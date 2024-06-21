@@ -9,6 +9,8 @@
 // @noframes
 // ==/UserScript==
 
+if (window.location.href.endsWith('l50')) window.location.href = window.location.href.slice(0, -3)
+
 let $ = (element) => document.querySelector(element)
 let $$ = (element) => document.querySelectorAll(element)
 
@@ -16,53 +18,48 @@ let $$ = (element) => document.querySelectorAll(element)
 let style = document.createElement('style')
 style.id = 'black-mode'
 style.textContent = `
-  body,
-  .main > * {
-    background-color: black !important;
-    color: white !important;
-  }
-
-  .fixed-top > :first-child,
-  .fixed-top > .border-top > :first-child,
-  .tgWrite,
+	.fixed-top,
+	.btn-secondary:not(#res-n),
+	.tgWrite,
 	#bottom,
 	#pagetop,
 	#write {
-    display: none !important;
-  }
+		display: none !important;
+	}
 
-  #thread {
-    margin-top: 0 !important;
-    padding: 1vh 0 7.5vh !important;
-  }
+	body,
+	.main > * {
+		background-color: black !important;
+		color: white !important;
+	}
 
 	.tgMenu {
 		position: fixed !important;
-		bottom: 0 !important;
+		top: 0 !important;
 		width: 100% !important;
-  	background-color: black !important;
-  	border-top: 1px solid #dee2e6 !important;
+		background-color: black !important;
+		border-bottom: 1px solid #dee2e6 !important;
 	}
 
-  .thumbnail {
-    max-width: 80% !important;
-    margin: 0.2em !important;
-  }
-
-	#pageend {
-		background-color: #E0E0E0 !important;
-		position: fixed !important;
-		bottom: 12px !important;
-		right: 12px !important;
-		width: 48px !important;
-		height: 48px !important;
-		margin-bottom: 0px !important;
-		text-align: center !important;
-		display: block !important;
+	#title {
+		font-size: 1.2rem !important;
+		color: red !important;
+		vertical-align: middle !important;
+		margin-right: 5px !important;
 	}
 
-	#pageend:hover {
-		background-color: #BDBDBD !important;
+	#thread {
+		margin-top: 0 !important;
+	}
+
+	.highlight {
+		color: black !important;
+		background-color: #FFA500 !important;
+	}
+
+	.thumbnail {
+		max-width: 80% !important;
+		margin: 0.2em !important;
 	}
 
 	#tooltip {
@@ -70,11 +67,11 @@ style.textContent = `
 		position: fixed !important;
 		top: 5vh !important;
 		left: 10vw !important;
-    background-color: #333333 !important;
+		background-color: #333333 !important;
 		padding: 5px !important;
 		border-radius: 5px !important;
 		border: 5px solid white !important;
-    max-height: 85vh !important;
+		max-height: 85vh !important;
 		max-width: 85vw !important;
 		overflow-y: auto !important;
 	}
@@ -88,11 +85,6 @@ style.textContent = `
 		max-width: 75vh !important;
 		margin: 0.1em !important;
 	}
-
-  .highlight {
-    color: black !important;
-    background-color: #FFA500 !important;
-  }
 `
 document.head.appendChild(style)
 
@@ -100,7 +92,9 @@ document.head.appendChild(style)
 let counter = 0
 
 document.body.innerHTML = document.body.innerHTML.replace(new RegExp(
-	["あくあ", "あくたん", "あくきん", "あてぃし", "あくシオ", "あくしお", "あくすい", "あくみこ", "みなきり", "あくおか", "あくころ", "あくぺこ", "あくトワ", "\\( \\^\\)o\\(\\^ \\)"]
+	["りんこ", "りんちゃん", "あくあ", "あくたん", "あくきん", "あてぃし", "たくあん", "\\( \\^\\)o\\(\\^ \\)",
+		"あくシオ", "あくしお", "あくすい", "あくみこ", "みなきり", "あくおか", "あくころ", "あくぺこ", "あくトワ",
+		"すたてん", "スタテン", "ねぎゆ", "ネギユ", "うみし", "ウミシ"]
 		.join('|'), 'g'), match => {
 			return `<span class="highlight" index="match-${++counter}">${match}</span>`
 		})
@@ -108,15 +102,22 @@ document.body.innerHTML = document.body.innerHTML.replace(new RegExp(
 let now = 0
 
 document.onkeydown = (event) => {
-	if (event.key === 'ArrowLeft' && now > 0) {
-    if (--now == 0) window.scrollTo({ top: 0, behavior: 'smooth' })
-    else $(`[index="match-${now}"]`).scrollIntoView({ behavior: 'smooth', block: 'center' })
-  }
-	else if (event.key === 'ArrowRight' && now <= counter) {
-     if (++now == counter + 1) window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' })
-    else $(`[index="match-${now}"]`).scrollIntoView({ behavior: 'smooth', block: 'center' })
-  }
+	if (event.key === 'ArrowLeft' && now >= 0) {
+		if (now == 0 || --now == 0) window.scrollTo({ top: 0, behavior: 'smooth' })
+		else $(`[index="match-${now}"]`).scrollIntoView({ behavior: 'smooth', block: 'center' })
+	} else if (event.key === 'ArrowRight' && now <= counter + 1) {
+		if (now == counter + 1 || ++now == counter + 1) window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' })
+		else $(`[index="match-${now}"]`).scrollIntoView({ behavior: 'smooth', block: 'center' })
+	}
 }
+
+let father = $('.tgMenu .m-2')
+
+// Title
+let title = document.createElement('a')
+title.id = 'title'
+title.textContent = document.title
+father.insertBefore(title, father.firstChild)
 
 // Fix Name
 $$('#thread a[href^="mailto:"]').forEach((info) => {
@@ -163,28 +164,6 @@ $$('#thread a[target="_blank"][rel="noopener"]').forEach((ele) => {
 		ele.appendChild(img)
 	}
 })
-
-// Pageend Button
-let img = document.createElement('img')
-img.style.paddingTop = '13px'
-img.src = 'data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20height%3D%2224%22%20viewBox%3D%220%20-960%20960%20960%22%20width%3D%2224%22%20fill%3D%22%23000%22%3E%3Cg%20transform%3D%22rotate(180%2C%20480%2C%20-480)%22%3E%3Cpath%20d%3D%22m296-345-56-56%20240-240%20240%20240-56%2056-184-183-184%20183Z%22%2F%3E%3C%2Fg%3E%3C%2Fsvg%3E'
-
-let a = document.createElement('a')
-a.appendChild(img)
-
-let p = document.createElement('p')
-p.id = 'pageend'
-p.classList.add('rounded-circle', 'shadow-sm')
-p.appendChild(a)
-
-p.onclick = () => {
-	window.scrollTo({
-		top: document.body.scrollHeight,
-		behavior: 'smooth'
-	})
-}
-
-$('#pagetop').insertAdjacentElement('afterend', p)
 
 // Create Tooltip
 let tooltip = document.createElement('div')
