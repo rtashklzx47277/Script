@@ -94,7 +94,7 @@ let counter = 0
 document.body.innerHTML = document.body.innerHTML.replace(new RegExp(
 	["りんこ", "りんちゃん", "あくあ", "あくたん", "あくきん", "あてぃし", "たくあん", "\\( \\^\\)o\\(\\^ \\)",
 		"あくシオ", "あくしお", "あくすい", "あくみこ", "みなきり", "あくおか", "あくころ", "あくぺこ", "あくトワ",
-		"すたてん", "スタテン", "ねぎゆ", "ネギユ", "うみし", "ウミシ"]
+		"すたてん", "スタテン", "ねぎゆ", "ネギユ", "うみし", "ウミシ", "スパイスラブ"]
 		.join('|'), 'g'), match => {
 			return `<span class="highlight" index="match-${++counter}">${match}</span>`
 		})

@@ -26,7 +26,7 @@ const css = `
     display: none !important;
   }
 
-  #ticker #container > #items /* SC列 */ {
+  #ticker #container > #ticker-bar /* SC列 */ {
     padding: 2px 1em 12px 1em !important;
     overflow-x: auto !important;
   }
