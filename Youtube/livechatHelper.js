@@ -5,163 +5,176 @@
 // @author             Derek
 // @match              *://www.youtube.com/live_chat*
 // @match              *://www.youtube.com/live_chat_replay*
+// @run-at             document-end
 // @grant              none
 // ==/UserScript==
 
-const $ = (element) => document.querySelector(element)
+(() => {
+  'use strict'
 
-const css = `
-  #chat-messages > yt-live-chat-header-renderer,  /* 標頭 */
-  #panel-pages #pickers #search-panel, /* 貼圖搜尋 */
-  #panel-pages #pickers #category-buttons, /* 類別選擇 */
-  #picker-buttons > yt-reaction-control-panel-overlay-view-model, /* 右下愛心 */
-  #ticker #container > #left-arrow-container, /* SC列左箭頭 */
-  #ticker #container > #right-arrow-container,  /* SC列右箭頭 */
-  #message #lower-buy-button, /* 購買SC */
-  #message #footer-button, /* 購買會員 */
-  #message #opt-in-prompt, /* 購買贈禮 */
-  .ytcf-button-wrapper > .static-logo, /* YTCF LOGO */
-  .ytcf-button-wrapper > .ytcf-popout-button, /* YTCF Popout */
-  .ytcf-button-wrapper .top-bar-icon /* YTCF Icon */ {
-    display: none !important;
+  const $ = (element) => document.querySelector(element)
+  let toolbar
+  const css = `
+    #chat-messages > yt-live-chat-header-renderer,  /* 標頭 */
+    #panel-pages #pickers #search-panel, /* 貼圖搜尋 */
+    #panel-pages #pickers #category-buttons, /* 類別選擇 */
+    #picker-buttons > yt-reaction-control-panel-overlay-view-model, /* 右下愛心 */
+    #ticker #container > #left-arrow-container, /* SC列左箭頭 */
+    #ticker #container > #right-arrow-container,  /* SC列右箭頭 */
+    #message #lower-buy-button, /* 購買SC */
+    #message #footer-button, /* 購買會員 */
+    #message #opt-in-prompt, /* 購買贈禮 */
+    .ytcf-button-wrapper > .static-logo, /* YTCF LOGO */
+    .ytcf-button-wrapper > .ytcf-popout-button, /* YTCF Popout */
+    .ytcf-button-wrapper .top-bar-icon /* YTCF Icon */ {
+      display: none !important;
+    }
+
+    #ticker #container > #ticker-bar /* SC列 */ {
+      padding: 2px 1em 12px 1em !important;
+      overflow-x: auto !important;
+    }
+
+    #items > yt-live-chat-text-message-renderer, /* 頭貼左側 */
+    #items > ytd-sponsorships-live-chat-gift-redemption-announcement-renderer /* 贈禮頭貼左側 */ {
+      padding: 4px 1em !important;
+    }
+
+    #items > yt-live-chat-text-message-renderer > #author-photo, /* 頭貼右側 */
+    #items > ytd-sponsorships-live-chat-gift-redemption-announcement-renderer > #author-photo /* 贈禮頭貼右側 */ {
+      margin: 0 1em 0 0 !important;
+    }
+
+    /* 懸浮留言 */
+    #item-offset {
+      overflow: visible !important;
+    }
+
+    #items {
+      transform: none !important;
+    }
+
+    ytd-engagement-panel-section-list-renderer #content {
+      margin-right: 7vw !important;
+    }
+
+    #item-offset yt-live-chat-text-message-renderer[author-type="owner"],
+    #item-offset yt-live-chat-text-message-renderer[author-type="moderator"] {
+      background: var(--yt-live-chat-message-highlight-background-color) !important;
+      position: sticky !important;
+      top: -1px !important;
+      z-index: 9999 !important;
+    }
+
+    .ytcf-button-wrapper {
+      display: flex !important;
+      justify-content: space-around !important;
+      margin: 5px 0 !important;
+    }
+
+    .ytcf-button-wrapper > button {
+      border: 2px solid aqua !important;
+      border-radius: 5px !important;
+      background-color: black !important;
+      color: white !important;
+    }
+
+    .hyperchat-root .context-menu {
+      margin-right: 0 !important;
+    }
+  `
+
+  const injectCSS = () => {
+    let styleElement = $('#chat-css')
+    if (!styleElement) {
+      styleElement = document.createElement('style')
+      styleElement.id = 'chat-css'
+      styleElement.textContent = css
+      document.head.appendChild(styleElement)
+    }
   }
 
-  #ticker #container > #ticker-bar /* SC列 */ {
-    padding: 2px 1em 12px 1em !important;
-    overflow-x: auto !important;
-  }
+  const addButtons = () => {
+    if ($('.ytcf-reload-button')) return
 
-  #items > yt-live-chat-text-message-renderer, /* 頭貼左側 */
-  #items > ytd-sponsorships-live-chat-gift-redemption-announcement-renderer /* 贈禮頭貼左側 */ {
-    padding: 4px 1em !important;
-  }
-
-  #items > yt-live-chat-text-message-renderer > #author-photo, /* 頭貼右側 */
-  #items > ytd-sponsorships-live-chat-gift-redemption-announcement-renderer > #author-photo /* 贈禮頭貼右側 */ {
-    margin: 0 1em 0 0 !important;
-  }
-
-  /* 懸浮留言 */
-  #item-offset {
-    overflow: visible !important;
-  }
-
-  #items {
-    transform: none !important;
-  }
-
-  #item-offset yt-live-chat-text-message-renderer[author-type="owner"],
-  #item-offset yt-live-chat-text-message-renderer[author-type="moderator"] {
-    background: var(--yt-live-chat-message-highlight-background-color) !important;
-    position: sticky !important;
-    top: -1px !important;
-    z-index: 9999 !important;
-  }
-
-  .ytcf-button-wrapper {
-    display: flex !important;
-    justify-content: space-around !important;
-    margin: 5px 0 !important;
-  }
-
-  .ytcf-button-wrapper > button {
-    border: 2px solid aqua !important;
-    border-radius: 5px !important;
-    background-color: black !important;
-    color: white !important;
-  }
-
-  .hyperchat-root .context-menu {
-    margin-right: 0 !important;
-  }
-`
-
-/* 複製聊天室貼圖 */
-const getCloneSelectedNode = () => {
-  let selection = window.getSelection()
-  if (!selection.rangeCount) return
-  return selection.getRangeAt(0).cloneContents()
-}
-
-const copyAltToSharedTooltipText = (ele) => {
-  let alt = ele.alt
-  let sharedTooltipText = ele.getAttribute('shared-tooltip-text')
-  if (document.contains(ele) && alt && sharedTooltipText && (alt != sharedTooltipText)) {
-    ele.setAttribute('copyable', true)
-    if (sharedTooltipText.match(alt)) ele.setAttribute('alt', sharedTooltipText)
-  }
-}
-
-let toolbar = null
-
-const waitElements = () => {
-  return new Promise((resolve) => {
-    const observer = new MutationObserver(() => {
-      toolbar = $('.ytcf-button-wrapper')
-      if (toolbar) {
-        observer.disconnect()
-        resolve()
-      }
+    const reloadBtn = document.createElement('button')
+    reloadBtn.className = 'ytcf-reload-button'
+    const span = document.createElement('span')
+    span.textContent = '↻'
+    reloadBtn.appendChild(span)
+    reloadBtn.addEventListener('mousedown', (e) => {
+      if (e.button === 0) location.reload()
     })
-    observer.observe(document.body, { attributes: false, childList: true, subtree: true })
-  })
-}
 
-const main = async () => {
-  let cssStyle = document.createElement('style')
-  cssStyle.setAttribute('id', 'livechat-css')
-  cssStyle.textContent = css
-  document.body.appendChild(cssStyle)
-
-  /* 複製聊天室貼圖 */
-  document.addEventListener('selectionchange', () => {
-    let cloneSelectedNode = getCloneSelectedNode()
-    if (!cloneSelectedNode) return
-    cloneSelectedNode.querySelectorAll('img.emoji[shared-tooltip-text][alt]:not([copyable])').forEach(img => {
-      if (img.id && document.querySelector(`#${img.id}`)) copyAltToSharedTooltipText(document.querySelector(`#${img.id}`))
+    const closeBtn = document.createElement('button')
+    closeBtn.className = 'ytcf-super-chat-button'
+    const span2 = document.createElement('span')
+    span2.textContent = 'X'
+    closeBtn.appendChild(span2)
+    closeBtn.addEventListener('mousedown', (e) => {
+      if (e.button === 0) $('#close-button button.yt-spec-button-shape-next')?.click()
     })
-  })
 
-  /* 增加SC列表按鈕及重整按鈕 */
-  await waitElements()
+    toolbar.append(reloadBtn, closeBtn)
+  }
 
-  new MutationObserver(() => {
-    if (toolbar.style.display === 'none') toolbar.style = ''
-  }).observe(toolbar, { attributes: true, attributeFilter: ['style'] })
+  const setupToolbar = async () => {
+    toolbar = await new Promise((resolve) => {
+      const observer = new MutationObserver(() => {
+        const ele = $('.ytcf-button-wrapper')
+        if (ele) {
+          observer.disconnect()
+          resolve(ele)
+        }
+      })
+      observer.observe(document.body, { childList: true, subtree: true })
+    })
 
-  toolbar.setAttribute('class', 'ytcf-button-wrapper')
-  toolbar.children[1].setAttribute('class', 'ytcf-launch-button')
-  toolbar.children[3].setAttribute('class', 'ytcf-settings-button')
+    toolbar.setAttribute('class', 'ytcf-button-wrapper')
+    toolbar.children[1].setAttribute('class', 'ytcf-launch-button')
+    toolbar.children[1].firstElementChild.textContent = 'Ytc-Filter'
+    toolbar.children[3].setAttribute('class', 'ytcf-settings-button')
+    addButtons()
 
-  const innerHTML = document.documentElement.innerHTML
-  const videoId = innerHTML.match(/"chat~([A-z0-9_-]{11})"/)
-  const channelId = innerHTML.match(/"(UC[A-z0-9_-]{22})\//)
+    new MutationObserver(() => {
+      if (toolbar.style.display === 'none') toolbar.style = ''
+    }).observe(toolbar, { attributes: true, attributeFilter: ['style'] })
+  }
 
-  let superChatBtn = document.createElement('button')
-  superChatBtn.setAttribute('class', 'ytcf-super-chat-button')
+  const debounce = (func, delay) => {
+    let timeout
+    return (...args) => {
+      clearTimeout(timeout)
+      timeout = setTimeout(() => func(...args), delay)
+    }
+  }
 
-  let span2 = document.createElement('span')
-  span2.textContent = 'Super Chat List'
+  const copyEmoji = () => {
+    const handleSelectionChange = debounce(() => {
+      const selection = window.getSelection()
+      if (!selection.rangeCount) return
 
-  superChatBtn.appendChild(span2)
-  toolbar.insertBefore(superChatBtn, toolbar.children[2])
+      const cloneSelectedNode = selection.getRangeAt(0).cloneContents()
+      cloneSelectedNode.querySelectorAll('img.emoji[shared-tooltip-text][alt]:not([copyable])').forEach(img => {
+        const originalImg = document.querySelector(`#${img.id}`)
+        if (!originalImg || !document.contains(originalImg)) return
 
-  superChatBtn.addEventListener('mousedown', (event) => {
-    if (event.button === 0 || event.button === 1) window.open(videoId ? `https://www.hololyzer.net/youtube/realtime/superchat/${videoId[1]}.html` : `https://www.hololyzer.net/youtube/channel/${channelId[1]}.html`)
-  })
+        const alt = originalImg.alt
+        const sharedTooltipText = originalImg.getAttribute('shared-tooltip-text')
+        if (alt && sharedTooltipText && alt !== sharedTooltipText) {
+          originalImg.setAttribute('copyable', true);
+          if (sharedTooltipText.includes(alt)) originalImg.setAttribute('alt', sharedTooltipText);
+        }
+      })
+    }, 100)
+    document.addEventListener('selectionchange', handleSelectionChange)
+  }
 
-  let reloadBtn = document.createElement('button')
-  reloadBtn.setAttribute('class', 'ytcf-reload-button')
+  const main = async () => {
+    injectCSS()
+    await setupToolbar()
+    copyEmoji()
+  }
 
-  let span1 = document.createElement('span')
-  span1.textContent = 'Reload'
-
-  reloadBtn.appendChild(span1)
-  toolbar.insertBefore(reloadBtn, toolbar.children[3].nextSibling)
-
-  reloadBtn.addEventListener('mousedown', (event) => {
-    if (event.button === 0) location.reload()
-  })
-}
-
-window.addEventListener('load', main)
+  main()
+})()

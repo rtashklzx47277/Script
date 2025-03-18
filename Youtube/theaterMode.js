@@ -2,7 +2,7 @@
 // @name               Youtube Theater Fill Up Window
 // @name:zh-TW         Youtube Theater Fill Up Window
 // @namespace          https://greasyfork.org/scripts/454092
-// @version            1.1.2
+// @version            1.2.0
 // @description        make theater mode fill up window
 // @description:zh-TW  讓劇院模式填滿視窗
 // @author             Derek
@@ -11,53 +11,95 @@
 // @noframes
 // ==/UserScript==
 
-const autoTheater = 0 //change the value into 「1」 to make Theater mode default!
+(() => {
+  'use strict'
 
-const $ = (element) => document.querySelector(element)
+  const autoTheater = 0 //change the value into 「1」 to make Theater mode default!
 
-const getScrollbarWidth = () => {
-  let dummy = document.createElement('div')
-  document.body.appendChild(dummy)
-  dummy.style.overflowY = 'scroll'
-  const clientWidth = dummy.clientWidth
-  const offsetWidth = dummy.offsetWidth
-  dummy.remove()
-  return offsetWidth - clientWidth + 1
-}
+  const $ = (element) => document.querySelector(element)
+  let container, watchFlexy
+  const scrollbarWidth = (() => {
+    let dummy = document.createElement('div')
+    document.body.appendChild(dummy)
+    dummy.style.overflowY = 'scroll'
+    const width = dummy.offsetWidth - dummy.clientWidth + 1
+    dummy.remove()
+    return width
+  })()
+  const css = `
+    #masthead-container {
+      display: none !important;
+    }
+    ytd-page-manager {
+      margin: 0 !important;
+    }
+    #full-bleed-container {
+      min-height: 100vh !important;
+      min-width: calc(100vw - ${scrollbarWidth}px) !important;
+    }
+  `
 
-const css = `
-  #masthead-container {
-    display: none !important;
+  const waitElements = () => {
+    return new Promise((resolve) => {
+      const observer = new MutationObserver(() => {
+        watchFlexy = $('ytd-watch-flexy')
+        container = $('#player-full-bleed-container')
+
+        if (watchFlexy && container) {
+          observer.disconnect()
+          resolve()
+        }
+      })
+      observer.observe(document.body, { attributes: false, childList: true, subtree: true })
+      setTimeout(() => {
+        observer.disconnect()
+        resolve()
+      }, 5000)
+    })
   }
-  ytd-page-manager {
-    margin: 0 !important;
+
+  const injectCSS = () => {
+    let styleElement = $('#theater-mode')
+    if (!styleElement) {
+      styleElement = document.createElement('style')
+      styleElement.id = 'theater-mode'
+      styleElement.textContent = css
+      document.head.appendChild(styleElement)
+    }
   }
-  #full-bleed-container {
-    min-height: 100vh !important;
-    min-width: calc(100vw - ${getScrollbarWidth()}px) !important;
+
+  const removeCSS = () => {
+    const styleElement = $('#theater-mode')
+    if (styleElement) styleElement.remove()
   }
-`
 
-let theaterStyle = document.createElement('style')
-theaterStyle.setAttribute('type', 'text/css')
-theaterStyle.setAttribute('id', 'theater-mode')
-theaterStyle.textContent = css
+  const monitorTheater = () => {
+    const observer = new MutationObserver(() => {
+      if (watchFlexy.theater) injectCSS()
+      else removeCSS()
+    })
+    observer.observe(container, { childList: true })
+    return observer
+  }
 
-const theaterMode = () => {
-  if ($('#player-full-bleed-container > #player-container') && !$('#theater-mode')) document.head.appendChild(theaterStyle)
-  else if (!$('#player-full-bleed-container > #player-container') && $('#theater-mode')) $('#theater-mode').remove()
-}
+  const main = async () => {
+    await waitElements()
+    if (autoTheater === 1 && !watchFlexy.theater) setTimeout(() => { $('.ytp-size-button').click() }, 500)
+    if (watchFlexy.theater) injectCSS()
+    else removeCSS()
 
-const main = () => {
-  if (autoTheater === 1 && !$('ytd-watch-flexy').isTheater_()) setTimeout(() => { $('.ytp-size-button').click() }, 500)
+    const chatObserver = monitorTheater()
+    return () => {
+      chatObserver.disconnect()
+      removeCSS()
+    }
+  }
 
-  if ($('ytd-watch-flexy').isTheater_()) theaterMode()
-
-  const observer = new MutationObserver(theaterMode)
-  observer.observe($('#player-full-bleed-container'), { attributes: false, childList: true })
-}
-
-document.addEventListener('yt-navigate-finish', (event) => {
-  if (event.detail.endpoint.commandMetadata.webCommandMetadata.url.startsWith('/watch?v=')) main()
-  else if ($('#theater-mode')) $('#theater-mode').remove()
-})
+  let cleanup
+  document.addEventListener('yt-navigate-finish', async (event) => {
+    if (cleanup) cleanup()
+    const url = event.detail.endpoint.commandMetadata.webCommandMetadata.url
+    if (url.startsWith('/watch?v=') || url.startsWith('/live/')) cleanup = await main()
+    else cleanup = null
+  })
+})()

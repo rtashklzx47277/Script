@@ -8,28 +8,32 @@
 // @noframes
 // ==/UserScript==
 
-const isObject = (value) => value != null && typeof value === "object"
+(() => {
+  'use strict'
 
-const {
-  get: getter,
-  set: setter,
-} = Object.getOwnPropertyDescriptor(Object.prototype, "playerResponse") ?? {
-  set(value) { this[Symbol.for("YoutubeOptimizer")] = value },
-  get() { return this[Symbol.for("YoutubeOptimizer")] }
-}
+  const isObject = (value) => value != null && typeof value === "object"
 
-Object.defineProperty(Object.prototype, "playerResponse", {
-  set(value) {
-    if (isObject(value)) {
-      const { videoDetails } = value
-      if (isObject(videoDetails)) {
-        videoDetails.isLiveDvrEnabled = true
+  const {
+    get: getter,
+    set: setter,
+  } = Object.getOwnPropertyDescriptor(Object.prototype, "playerResponse") ?? {
+    set(value) { this[Symbol.for("YoutubeOptimizer")] = value },
+    get() { return this[Symbol.for("YoutubeOptimizer")] }
+  }
+
+  Object.defineProperty(Object.prototype, "playerResponse", {
+    set(value) {
+      if (isObject(value)) {
+        const { videoDetails } = value
+        if (isObject(videoDetails)) {
+          videoDetails.isLiveDvrEnabled = true
+        }
       }
-    }
-    setter.call(this, value)
-  },
-  get() {
-    return getter.call(this)
-  },
-  configurable: true,
-})
+      setter.call(this, value)
+    },
+    get() {
+      return getter.call(this)
+    },
+    configurable: true,
+  })
+})()

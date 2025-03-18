@@ -8,9 +8,13 @@
 // @noframes
 // ==/UserScript==
 
-const url = window.location.href
-const firstHttpIndex = url.indexOf('http')
-var secondHttpIndex = url.indexOf('http', firstHttpIndex + 1)
-const targetUrl = window.location.href.substring(secondHttpIndex)
-const decodeUrl = decodeURIComponent(targetUrl)
-window.location.href = decodeUrl
+(() => {
+  'use strict'
+
+  const url = window.location.href
+  const firstHttpIndex = url.indexOf('http')
+  const secondHttpIndex = url.indexOf('http', firstHttpIndex + 1)
+  const targetUrl = window.location.href.substring(secondHttpIndex)
+  const decodeUrl = decodeURIComponent(targetUrl)
+  window.location.href = decodeUrl
+})()

@@ -2,7 +2,7 @@
 // @name               Auto Pause Youtube Channel Homepage Video
 // @name:zh-TW         Auto Pause Youtube Channel Homepage Video
 // @namespace          https://greasyfork.org/scripts/453851
-// @version            1.1.2
+// @version            1.2.0
 // @description        auto pause the channel homepage video
 // @description:zh-TW  自動暫停Youtube頻道首頁的影片
 // @author             Derek
@@ -11,10 +11,12 @@
 // @noframes
 // ==/UserScript==
 
-const $ = (element) => document.querySelector(element)
+(() => {
+  'use strict'
 
-const main = () => {
-  if (/\/(@|channel|user|c)/.test(window.location.pathname)) {
+  const $ = (element) => document.querySelector(element)
+
+  const main = () => {
     const observer = new MutationObserver(() => {
       const moviePlayer = $('ytd-browse video')
       if (moviePlayer && !moviePlayer.paused) {
@@ -22,8 +24,11 @@ const main = () => {
         observer.disconnect()
       }
     })
-    observer.observe(document.body, { attributes: false, childList: true, subtree: true })
+    observer.observe($('#page-manager'), { childList: true, subtree: true })
+    setTimeout(() => observer.disconnect(), 5000)
   }
-}
 
-document.addEventListener('yt-navigate-finish', main)
+  document.addEventListener('yt-navigate-finish', () => {
+    if (/^(\/@|\/channel\/|\/user\/|\/c\/)/.test(window.location.pathname)) main()
+  })
+})()
