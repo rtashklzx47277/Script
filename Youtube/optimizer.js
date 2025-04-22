@@ -5,6 +5,7 @@
 // @author       Derek
 // @match        *://www.youtube.com/*
 // @run-at       document-body
+// @grant        GM_addStyle
 // @grant        GM_download
 // @noframes
 // ==/UserScript==
@@ -14,18 +15,7 @@
 (() => {
   'use strict'
 
-  const $ = (element) => document.querySelector(element)
-  let container, settingBtn, videoTitle, floatingBar, moviePlayer, progressBar, videoPlayer
-  let floatingBarTimer = 0
-  const data = {
-    svg: {
-      loop: 'm 13,13 h 10 v 3 l 4,-4 -4,-4 v 3 H 11 v 6 h 2 z M 23,23 H 13 v -3 l -4,4 4,4 v -3 h 12 v -6 h -2 z',
-      photo: 'M 26.079999,10.02 H 22.878298 L 21.029999,8 h -6.06 l -1.8483,2.02 H 9.9200015 c -1.111,0 -2.02,0.909 -2.02,2.02 v 12.12 c 0,1.111 0.909,2.02 2.02,2.02 H 26.079999 c 1.111,0 2.019999,-0.909 2.019999,-2.02 V 12.04 c 0,-1.111 -0.909,-2.02 -2.019999,-2.02 z m 0,14.14 H 9.9200015 V 12.04 h 4.0904965 l 1.8483,-2.02 h 4.2824 l 1.8483,2.02 h 4.0905 z m -8.08,-11.11 c -2.7876,0 -5.05,2.2624 -5.05,5.05 0,2.7876 2.2624,5.05 5.05,5.05 2.7876,0 5.049999,-2.2624 5.049999,-5.05 0,-2.7876 -2.262399,-5.05 -5.049999,-5.05 z m 0,8.08 c -1.6665,0 -3.03,-1.3635 -3.03,-3.03 0,-1.6665 1.3635,-3.03 3.03,-3.03 1.6665,0 3.03,1.3635 3.03,3.03 0,1.6665 -1.3635,3.03 -3.03,3.03 z',
-      speed: 'm 27.526463,13.161756 -1.400912,2.107062 a 9.1116182,9.1116182 0 0 1 -0.250569,8.633258 H 10.089103 A 9.1116182,9.1116182 0 0 1 22.059491,11.202758 L 24.166553,9.8018471 A 11.389523,11.389523 0 0 0 8.1301049,25.041029 2.2779046,2.2779046 0 0 0 10.089103,26.179981 H 25.863592 A 2.2779046,2.2779046 0 0 0 27.845369,25.041029 11.389523,11.389523 0 0 0 27.537852,13.150367 Z M 16.376119,20.95219 a 2.2779046,2.2779046 0 0 0 3.223235,0 l 6.446471,-9.669705 -9.669706,6.44647 a 2.2779046,2.2779046 0 0 0 0,3.223235 z',
-      theater: 'M 5.390625,7.9999999 V 26.179687 h 25.21875 V 7.9999999 Z M 7.410156,10.009766 H 28.589844 V 24.169922 H 7.410156 Z m 4.040294,4.050342 h 3.029835 V 12.040219 H 9.430562 v 5.049722 h 2.019888 z m 15.118897,3.029833 h -2.019888 v 3.029834 h -3.029834 v 2.019889 h 5.049722 z'
-    },
-    removeList: ['aria-label', 'aria-controls', 'aria-expanded', 'aria-haspopup', 'data-tooltip-target-id'],
-    css: `
+  GM_addStyle(`
     #primary > ytd-section-list-renderer > #contents > ytd-item-section-renderer[is-playlist-video-container],
     button[data-tooltip-target-id="ytp-autonav-toggle-button"],
     button.ytp-miniplayer-button,
@@ -49,6 +39,9 @@
       max-width: 35% !important;
       min-width: 35% !important;
     }
+    ytd-rich-grid-renderer {
+      --ytd-rich-grid-items-per-row: 4 !important;
+    }
     #float-bar {
       width: 100%;
       height: 20px;
@@ -61,7 +54,19 @@
       background-color: rgba(0, 0, 0, 0.5);
       display: none;
     }
-  `
+  `)
+
+  const $ = (element) => document.querySelector(element)
+  let container, settingBtn, videoTitle, floatingBar, moviePlayer, progressBar, videoPlayer
+  let floatingBarTimer = 0
+  const data = {
+    svg: {
+      loop: 'm 13,13 h 10 v 3 l 4,-4 -4,-4 v 3 H 11 v 6 h 2 z M 23,23 H 13 v -3 l -4,4 4,4 v -3 h 12 v -6 h -2 z',
+      photo: 'M 26.079999,10.02 H 22.878298 L 21.029999,8 h -6.06 l -1.8483,2.02 H 9.9200015 c -1.111,0 -2.02,0.909 -2.02,2.02 v 12.12 c 0,1.111 0.909,2.02 2.02,2.02 H 26.079999 c 1.111,0 2.019999,-0.909 2.019999,-2.02 V 12.04 c 0,-1.111 -0.909,-2.02 -2.019999,-2.02 z m 0,14.14 H 9.9200015 V 12.04 h 4.0904965 l 1.8483,-2.02 h 4.2824 l 1.8483,2.02 h 4.0905 z m -8.08,-11.11 c -2.7876,0 -5.05,2.2624 -5.05,5.05 0,2.7876 2.2624,5.05 5.05,5.05 2.7876,0 5.049999,-2.2624 5.049999,-5.05 0,-2.7876 -2.262399,-5.05 -5.049999,-5.05 z m 0,8.08 c -1.6665,0 -3.03,-1.3635 -3.03,-3.03 0,-1.6665 1.3635,-3.03 3.03,-3.03 1.6665,0 3.03,1.3635 3.03,3.03 0,1.6665 -1.3635,3.03 -3.03,3.03 z',
+      speed: 'm 27.526463,13.161756 -1.400912,2.107062 a 9.1116182,9.1116182 0 0 1 -0.250569,8.633258 H 10.089103 A 9.1116182,9.1116182 0 0 1 22.059491,11.202758 L 24.166553,9.8018471 A 11.389523,11.389523 0 0 0 8.1301049,25.041029 2.2779046,2.2779046 0 0 0 10.089103,26.179981 H 25.863592 A 2.2779046,2.2779046 0 0 0 27.845369,25.041029 11.389523,11.389523 0 0 0 27.537852,13.150367 Z M 16.376119,20.95219 a 2.2779046,2.2779046 0 0 0 3.223235,0 l 6.446471,-9.669705 -9.669706,6.44647 a 2.2779046,2.2779046 0 0 0 0,3.223235 z',
+      theater: 'M 5.390625,7.9999999 V 26.179687 h 25.21875 V 7.9999999 Z M 7.410156,10.009766 H 28.589844 V 24.169922 H 7.410156 Z m 4.040294,4.050342 h 3.029835 V 12.040219 H 9.430562 v 5.049722 h 2.019888 z m 15.118897,3.029833 h -2.019888 v 3.029834 h -3.029834 v 2.019889 h 5.049722 z'
+    },
+    removeList: ['aria-label', 'aria-controls', 'aria-expanded', 'aria-haspopup', 'data-tooltip-target-id'],
   }
 
   const twoDigit = (num) => num.toString().padStart(2, '0')
@@ -201,16 +206,6 @@
     floatingBar = getFloatingBar()
     addButtons()
   }
-
-  (() => {
-    let styleElement = $('#youtube-css')
-    if (!styleElement) {
-      styleElement = document.createElement('style')
-      styleElement.id = 'youtube-css'
-      styleElement.textContent = data.css
-      document.head.appendChild(styleElement)
-    }
-  })()
 
   document.addEventListener('yt-navigate-finish', (event) => {
     const url = event.detail.endpoint.commandMetadata.webCommandMetadata.url

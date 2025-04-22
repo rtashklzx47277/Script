@@ -4,20 +4,18 @@
 // @description  KMN optimizer
 // @author       Derek
 // @match        *://kemono.su/*
-// @grant        none
+// @grant        GM_addStyle
 // @noframes
 // ==/UserScript==
 
 (() => {
   'use strict'
 
-  const style = document.createElement('style')
-  style.textContent = `
+  GM_addStyle(`
     .post__thumbnail img {
       max-height: 100vh !important;
     }
-  `
-  document.head.appendChild(style)
+  `)
 
   let listObserver = null
   let imageObserver = null
