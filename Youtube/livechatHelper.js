@@ -55,7 +55,7 @@
     }
 
     ytd-engagement-panel-section-list-renderer #content {
-      margin-right: 7vw !important;
+      margin-right: 8.5vw !important;
     }
 
     #item-offset yt-live-chat-text-message-renderer[author-type="owner"],

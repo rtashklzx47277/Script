@@ -11,12 +11,9 @@
 (() => {
   'use strict'
 
-  if (!document.querySelector('#nht-css')) {
-    let styleElement = document.createElement('style')
-    styleElement.id = 'nht-css'
-    styleElement.textContent = `.blacklisted {
-      display: none !important;
-    }`
-    document.head.appendChild(styleElement)
-  }
+  const style = document.createElement('style')
+  style.textContent = `.blacklisted {
+    display: none !important;
+  }`
+  document.head.appendChild(style)
 })()
