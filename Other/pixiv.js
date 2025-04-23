@@ -1,10 +1,11 @@
 // ==UserScript==
-// @name               Pixiv Jump Directly
-// @version            0.1.0
-// @description        Pixiv Jump Directly
-// @author             Derek
-// @match              *://www.pixiv.net/jump.php?*
-// @grant              none
+// @name          Pixiv Jump Directly
+// @version       0.1.0
+// @description   Pixiv Jump Directly
+// @author        Derek
+// @match         *://www.pixiv.net/jump.php?*
+// @run-at        document-start
+// @grant         none
 // @noframes
 // ==/UserScript==
 

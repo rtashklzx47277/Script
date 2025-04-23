@@ -1,10 +1,11 @@
 // ==UserScript==
-// @name               Youtube Twitch Like Mode
-// @version            0.1.0
-// @description        make Youtube Twitch liked
-// @author             Derek
-// @match              *://www.youtube.com/*
-// @grant              none
+// @name          Youtube Twitch Like Mode
+// @version       0.1.0
+// @description   make Youtube Twitch liked
+// @author        Derek
+// @match         *://www.youtube.com/*
+// @run-at        document-body
+// @grant         none
 // @noframes
 // ==/UserScript==
 
@@ -25,37 +26,30 @@
     #masthead-container {
       display: none !important;
     }
-  
     #content > #page-manager {
       margin: 0 !important;
     }
-  
     #columns > #primary {
       min-width: 75vw !important;
       margin: 0 !important;
       padding: 0 !important;
     }
-  
     #primary #player,
     #player-container-outer {
       min-width: 75vw !important;
       max-height: 100vh !important;
     }
-  
     .html5-video-container,
     #movie_player video {
       height: 100% !important;
     }
-  
     .ytp-chrome-bottom,
     .ytp-progress-bar-container {
       min-width: calc(75vw - 24px) !important;
     }
-  
     #primary #below {
       padding: 0 24px 0 !important;
     }
-  
     #columns > #secondary,
     #secondary #chat {
       min-width: calc(25vw - ${scrollbarWidth}px) !important;

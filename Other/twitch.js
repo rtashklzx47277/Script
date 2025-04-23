@@ -1,10 +1,11 @@
 // ==UserScript==
-// @name        Twitch ScreenShot
-// @version     0.1.0
-// @description ScreenShot
-// @author      Derek
-// @match       *://www.twitch.tv/*
-// @grant       GM_download
+// @name          Twitch ScreenShot
+// @version       0.1.0
+// @description   ScreenShot
+// @author        Derek
+// @match         *://www.twitch.tv/*
+// @run-at        document-start
+// @grant         GM_download
 // @noframes
 // ==/UserScript==
 

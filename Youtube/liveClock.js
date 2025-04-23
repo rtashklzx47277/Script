@@ -1,13 +1,14 @@
 // ==UserScript==
-// @name               Youtube Live Clock
-// @name:zh-TW         Youtube Live Clock
-// @namespace          https://greasyfork.org/scripts/453367
-// @version            1.7.3
-// @description        show duration for livestreams and present time for archives
-// @description:zh-TW  顯示直播及直播存檔當下的時間
-// @author             Derek
-// @match              *://www.youtube.com/*
-// @grant              none
+// @name              Youtube Live Clock
+// @name:zh-TW        Youtube Live Clock
+// @namespace         https://greasyfork.org/scripts/453367
+// @version           1.7.3
+// @description       show duration for livestreams and present time for archives
+// @description:zh-TW 顯示直播及直播存檔當下的時間
+// @author            Derek
+// @match             *://www.youtube.com/*
+// @run-at            document-start
+// @grant             none
 // ==/UserScript==
 
 (() => {

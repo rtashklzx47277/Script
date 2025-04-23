@@ -1,13 +1,14 @@
 // ==UserScript==
-// @name               Auto Change Youtube Video Resolution to Max
-// @name:zh-TW         Auto Change Youtube Video Resolution to Max
-// @namespace          https://greasyfork.org/scripts/453854
-// @version            1.2.0
-// @description        auto change the video resolution to Max
-// @description:zh-TW  自動將影片畫質切換至最高畫質
-// @author             Derek
-// @match              *://www.youtube.com/*
-// @grant              none
+// @name              Auto Change Youtube Video Resolution to Max
+// @name:zh-TW        Auto Change Youtube Video Resolution to Max
+// @namespace         https://greasyfork.org/scripts/453854
+// @version           1.2.0
+// @description       auto change the video resolution to Max
+// @description:zh-TW 自動將影片畫質切換至最高畫質
+// @author            Derek
+// @match             *://www.youtube.com/*
+// @run-at            document-start
+// @grant             none
 // @noframes
 // ==/UserScript==
 

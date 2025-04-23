@@ -1,13 +1,14 @@
 // ==UserScript==
-// @name               Youtube Theater Fill Up Window
-// @name:zh-TW         Youtube Theater Fill Up Window
-// @namespace          https://greasyfork.org/scripts/454092
-// @version            1.2.0
-// @description        make theater mode fill up window
-// @description:zh-TW  讓劇院模式填滿視窗
-// @author             Derek
-// @match              *://www.youtube.com/*
-// @grant              none
+// @name              Youtube Theater Fill Up Window
+// @name:zh-TW        Youtube Theater Fill Up Window
+// @namespace         https://greasyfork.org/scripts/454092
+// @version           1.2.0
+// @description       make theater mode fill up window
+// @description:zh-TW 讓劇院模式填滿視窗
+// @author            Derek
+// @match             *://www.youtube.com/*
+// @run-at            document-body
+// @grant             none
 // @noframes
 // ==/UserScript==
 

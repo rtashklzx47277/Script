@@ -1,12 +1,12 @@
 // ==UserScript==
-// @name               Youtube Live Chat Helper
-// @version            0.1.0
-// @description        sticky comment & copy emoji & hide heart
-// @author             Derek
-// @match              *://www.youtube.com/live_chat*
-// @match              *://www.youtube.com/live_chat_replay*
-// @run-at             document-end
-// @grant              none
+// @name          Youtube Live Chat Helper
+// @version       0.1.0
+// @description   sticky comment & copy emoji & hide heart
+// @author        Derek
+// @match         *://www.youtube.com/live_chat*
+// @match         *://www.youtube.com/live_chat_replay*
+// @run-at        document-start
+// @grant         none
 // ==/UserScript==
 
 (() => {
@@ -14,85 +14,6 @@
 
   const $ = (element) => document.querySelector(element)
   let toolbar
-  const css = `
-    #chat-messages > yt-live-chat-header-renderer,  /* 標頭 */
-    #panel-pages #pickers #search-panel, /* 貼圖搜尋 */
-    #panel-pages #pickers #category-buttons, /* 類別選擇 */
-    #picker-buttons > yt-reaction-control-panel-overlay-view-model, /* 右下愛心 */
-    #ticker #container > #left-arrow-container, /* SC列左箭頭 */
-    #ticker #container > #right-arrow-container,  /* SC列右箭頭 */
-    #message #lower-buy-button, /* 購買SC */
-    #message #footer-button, /* 購買會員 */
-    #message #opt-in-prompt, /* 購買贈禮 */
-    .ytcf-button-wrapper > .static-logo, /* YTCF LOGO */
-    .ytcf-button-wrapper > .ytcf-popout-button, /* YTCF Popout */
-    .ytcf-button-wrapper .top-bar-icon /* YTCF Icon */ {
-      display: none !important;
-    }
-
-    #ticker #container > #ticker-bar /* SC列 */ {
-      padding: 2px 1em 12px 1em !important;
-      overflow-x: auto !important;
-    }
-
-    #items > yt-live-chat-text-message-renderer, /* 頭貼左側 */
-    #items > ytd-sponsorships-live-chat-gift-redemption-announcement-renderer /* 贈禮頭貼左側 */ {
-      padding: 4px 1em !important;
-    }
-
-    #items > yt-live-chat-text-message-renderer > #author-photo, /* 頭貼右側 */
-    #items > ytd-sponsorships-live-chat-gift-redemption-announcement-renderer > #author-photo /* 贈禮頭貼右側 */ {
-      margin: 0 1em 0 0 !important;
-    }
-
-    /* 懸浮留言 */
-    #item-offset {
-      overflow: visible !important;
-    }
-
-    #items {
-      transform: none !important;
-    }
-
-    ytd-engagement-panel-section-list-renderer #content {
-      margin-right: 8.5vw !important;
-    }
-
-    #item-offset yt-live-chat-text-message-renderer[author-type="owner"],
-    #item-offset yt-live-chat-text-message-renderer[author-type="moderator"] {
-      background: var(--yt-live-chat-message-highlight-background-color) !important;
-      position: sticky !important;
-      top: -1px !important;
-      z-index: 9999 !important;
-    }
-
-    .ytcf-button-wrapper {
-      display: flex !important;
-      justify-content: space-around !important;
-      margin: 5px 0 !important;
-    }
-
-    .ytcf-button-wrapper > button {
-      border: 2px solid aqua !important;
-      border-radius: 5px !important;
-      background-color: black !important;
-      color: white !important;
-    }
-
-    .hyperchat-root .context-menu {
-      margin-right: 0 !important;
-    }
-  `
-
-  const injectCSS = () => {
-    let styleElement = $('#chat-css')
-    if (!styleElement) {
-      styleElement = document.createElement('style')
-      styleElement.id = 'chat-css'
-      styleElement.textContent = css
-      document.head.appendChild(styleElement)
-    }
-  }
 
   const addButtons = () => {
     if ($('.ytcf-reload-button')) return
@@ -127,7 +48,7 @@
           resolve(ele)
         }
       })
-      observer.observe(document.body, { childList: true, subtree: true })
+      observer.observe(document, { childList: true, subtree: true })
     })
 
     toolbar.setAttribute('class', 'ytcf-button-wrapper')
@@ -170,11 +91,69 @@
     document.addEventListener('selectionchange', handleSelectionChange)
   }
 
-  const main = async () => {
-    injectCSS()
+  (async () => {
+    let styleElement = document.createElement('style')
+    styleElement.textContent = `
+      #chat-messages > yt-live-chat-header-renderer,  /* 標頭 */
+      #panel-pages #pickers #search-panel, /* 貼圖搜尋 */
+      #panel-pages #pickers #category-buttons, /* 類別選擇 */
+      #picker-buttons > yt-reaction-control-panel-overlay-view-model, /* 右下愛心 */
+      #ticker #container > #left-arrow-container, /* SC列左箭頭 */
+      #ticker #container > #right-arrow-container,  /* SC列右箭頭 */
+      #message #lower-buy-button, /* 購買SC */
+      #message #footer-button, /* 購買會員 */
+      #message #opt-in-prompt, /* 購買贈禮 */
+      .ytcf-button-wrapper > .static-logo, /* YTCF LOGO */
+      .ytcf-button-wrapper > .ytcf-popout-button, /* YTCF Popout */
+      .ytcf-button-wrapper .top-bar-icon /* YTCF Icon */ {
+        display: none !important;
+      }
+      #ticker #container > #ticker-bar /* SC列 */ {
+        padding: 2px 1em 12px 1em !important;
+        overflow-x: auto !important;
+      }
+      #items > yt-live-chat-text-message-renderer, /* 頭貼左側 */
+      #items > ytd-sponsorships-live-chat-gift-redemption-announcement-renderer /* 贈禮頭貼左側 */ {
+        padding: 4px 1em !important;
+      }
+      #items > yt-live-chat-text-message-renderer > #author-photo, /* 頭貼右側 */
+      #items > ytd-sponsorships-live-chat-gift-redemption-announcement-renderer > #author-photo /* 贈禮頭貼右側 */ {
+        margin: 0 1em 0 0 !important;
+      }
+      /* 懸浮留言 */
+      #item-offset {
+        overflow: visible !important;
+      }
+      #items {
+        transform: none !important;
+      }
+      ytd-engagement-panel-section-list-renderer #content {
+        margin-right: 8.5vw !important;
+      }
+      #item-offset yt-live-chat-text-message-renderer[author-type="owner"],
+      #item-offset yt-live-chat-text-message-renderer[author-type="moderator"] {
+        background: var(--yt-live-chat-message-highlight-background-color) !important;
+        position: sticky !important;
+        top: -1px !important;
+        z-index: 9999 !important;
+      }
+      .ytcf-button-wrapper {
+        display: flex !important;
+        justify-content: space-around !important;
+        margin: 5px 0 !important;
+      }
+      .ytcf-button-wrapper > button {
+        border: 2px solid aqua !important;
+        border-radius: 5px !important;
+        background-color: black !important;
+        color: white !important;
+      }
+      .hyperchat-root .context-menu {
+        margin-right: 0 !important;
+      }
+    `
+    document.head.appendChild(styleElement)
     await setupToolbar()
     copyEmoji()
-  }
-
-  main()
+  })()
 })()

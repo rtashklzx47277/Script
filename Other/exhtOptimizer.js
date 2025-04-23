@@ -1,10 +1,11 @@
 // ==UserScript==
-// @name         EXHT Optimizer
-// @version      0.1.0
-// @description  EXHT optimizer
-// @author       Derek
-// @match        *://exhentai.org/s/*
-// @grant        GM_addStyle
+// @name          EXHT Optimizer
+// @version       0.1.0
+// @description   EXHT optimizer
+// @author        Derek
+// @match         *://exhentai.org/s/*
+// @run-at        document-start
+// @grant         GM_addStyle
 // @noframes
 // ==/UserScript==
 

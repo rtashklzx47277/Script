@@ -1,10 +1,10 @@
 // ==UserScript==
-// @name         Youtube RealTime PlayBack
-// @version      0.1.0
-// @description  Youtube RealTime PlayBack
-// @author       Derek
-// @match        *://www.youtube.com/*
-// @run-at       document-start
+// @name          Youtube RealTime PlayBack
+// @version       0.1.0
+// @description   Youtube RealTime PlayBack
+// @author        Derek
+// @match         *://www.youtube.com/*
+// @run-at        document-start
 // @noframes
 // ==/UserScript==
 

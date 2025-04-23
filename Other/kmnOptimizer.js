@@ -1,10 +1,11 @@
 // ==UserScript==
-// @name         KMN Optimizer
-// @version      0.1.0
-// @description  KMN optimizer
-// @author       Derek
-// @match        *://kemono.su/*
-// @grant        GM_addStyle
+// @name          KMN Optimizer
+// @version       0.1.0
+// @description   KMN optimizer
+// @author        Derek
+// @match         *://kemono.su/*
+// @run-at        document-start
+// @grant         GM_addStyle
 // @noframes
 // ==/UserScript==
 

@@ -1,11 +1,12 @@
 // ==UserScript==
-// @name               Auto Turnoff Youtube Video Subtitle
-// @namespace          https://greasyfork.org/
-// @version            0.1.0
-// @description        auto turnoff video subtitle
-// @author             Derek
-// @match              *://www.youtube.com/*
-// @grant              none
+// @name          Auto Turnoff Youtube Video Subtitle
+// @namespace     https://greasyfork.org/
+// @version       0.1.0
+// @description   auto turnoff video subtitle
+// @author        Derek
+// @match         *://www.youtube.com/*
+// @run-at        document-start
+// @grant         none
 // @noframes
 // ==/UserScript==
 

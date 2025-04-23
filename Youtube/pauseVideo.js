@@ -1,13 +1,14 @@
 // ==UserScript==
-// @name               Auto Pause Youtube Channel Homepage Video
-// @name:zh-TW         Auto Pause Youtube Channel Homepage Video
-// @namespace          https://greasyfork.org/scripts/453851
-// @version            1.2.0
-// @description        auto pause the channel homepage video
-// @description:zh-TW  自動暫停Youtube頻道首頁的影片
-// @author             Derek
-// @match              *://www.youtube.com/*
-// @grant              none
+// @name              Auto Pause Youtube Channel Homepage Video
+// @name:zh-TW        Auto Pause Youtube Channel Homepage Video
+// @namespace         https://greasyfork.org/scripts/453851
+// @version           1.2.0
+// @description       auto pause the channel homepage video
+// @description:zh-TW 自動暫停Youtube頻道首頁的影片
+// @author            Derek
+// @match             *://www.youtube.com/*
+// @run-at            document-body
+// @grant             none
 // @noframes
 // ==/UserScript==
 

@@ -1,12 +1,12 @@
 // ==UserScript==
-// @name         Youtube Optimizer
-// @version      0.1.0
-// @description  Optimize youtube!
-// @author       Derek
-// @match        *://www.youtube.com/*
-// @run-at       document-body
-// @grant        GM_addStyle
-// @grant        GM_download
+// @name          Youtube Optimizer
+// @version       0.1.0
+// @description   Optimize youtube!
+// @author        Derek
+// @match         *://www.youtube.com/*
+// @run-at        document-start
+// @grant         GM_addStyle
+// @grant         GM_download
 // @noframes
 // ==/UserScript==
 
