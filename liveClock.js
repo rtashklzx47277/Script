@@ -2,13 +2,13 @@
 // @name              Youtube Live Clock
 // @name:zh-TW        Youtube Live Clock
 // @namespace         https://greasyfork.org/scripts/453367
-// @version           1.7.3
+// @version           1.8.1
 // @description       show duration for livestreams and present time for archives
 // @description:zh-TW 顯示直播及直播存檔當下的時間
 // @author            Derek
 // @match             *://www.youtube.com/*
 // @run-at            document-start
-// @grant             none
+// @grant             GM_addStyle
 // ==/UserScript==
 
 (() => {
@@ -22,6 +22,16 @@
     5: Monday 31/10/2022 06:37:10
     6: Monday 31 October 2022 06:37:10
   */
+
+  GM_addStyle(`
+    .ytp-chrome-bottom .ytp-time-display,
+    .ytp-chrome-bottom .ytp-right-controls {
+      display: flex !important;
+    }
+    #present-time {
+      margin: 0 10px 0 5px !important;
+    }
+  `)
 
   const $ = (element) => document.querySelector(element)
 
@@ -52,17 +62,16 @@
     }[FORMAT]
   }
 
-  let videoId, liveBadge, timeDisplay, progressBar, liveData, publication, observer
+  let videoId, timeDisplay, progressBar, liveData, publication, observer
   let videoData = null
 
   const waitElements = () => {
     return new Promise((resolve) => {
       const observer = new MutationObserver(() => {
-        liveBadge = $('.ytp-chrome-bottom .ytp-live-badge')
         timeDisplay = $('.ytp-chrome-bottom .ytp-time-display')
         progressBar = $('.ytp-chrome-bottom .ytp-progress-bar')
 
-        if (liveBadge && timeDisplay && progressBar) {
+        if (timeDisplay && progressBar) {
           if (videoData !== $('#microformat script')) {
             videoData = $('#microformat script')
             observer.disconnect()
@@ -103,7 +112,6 @@
     }
     publication = liveData.publication[0]
 
-    liveBadge.style = 'margin-left: 10px'
     let liveClock = getLiveClock()
     liveClock.textContent = updateLiveTime()
 
