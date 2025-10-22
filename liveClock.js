@@ -2,7 +2,7 @@
 // @name              Youtube Live Clock
 // @name:zh-TW        Youtube Live Clock
 // @namespace         https://greasyfork.org/scripts/453367
-// @version           1.8.1
+// @version           1.8.2
 // @description       show duration for livestreams and present time for archives
 // @description:zh-TW 顯示直播及直播存檔當下的時間
 // @author            Derek
@@ -29,7 +29,16 @@
       display: flex !important;
     }
     #present-time {
-      margin: 0 10px 0 5px !important;
+      min-width: 0 !important;
+      position: relative !important;
+      display: inline-block !important;
+      height: var(--yt-delhi-pill-height, 48px) !important;
+      border-radius: 28px !important;
+      padding: 0 16px !important;
+      backdrop-filter: var(--yt-frosted-glass-backdrop-filter-override, blur(16px)) !important;
+      background: var(--yt-spec-overlay-background-medium-light, rgba(0, 0, 0, .3)) !important;
+      text-shadow: 0 0 2px #000 !important;
+      margin-left: 10px !important;
     }
   `)
 
@@ -53,12 +62,12 @@
   const dateFormat = (presentTime) => {
     const [week, month, day, year, time] = presentTime.toString().split(' ')
     return {
-      1: ` (${year}/${abbr.month[month]}/${day} ${time})`,
-      2: ` (${abbr.month[month]}/${day}/${year} ${time})`,
-      3: ` (${day}/${abbr.month[month]}/${year} ${time})`,
-      4: ` (${week} ${day}/${abbr.month[month]}/${year} ${time})`,
-      5: ` (${abbr.week[week]} ${day}/${abbr.month[month]}/${year} ${time})`,
-      6: ` (${abbr.week[week]} ${day} ${abbr.monthFull[month]} ${year} ${time})`
+      1: ` ${year}/${abbr.month[month]}/${day} ${time}`,
+      2: ` ${abbr.month[month]}/${day}/${year} ${time}`,
+      3: ` ${day}/${abbr.month[month]}/${year} ${time}`,
+      4: ` ${week} ${day}/${abbr.month[month]}/${year} ${time}`,
+      5: ` ${abbr.week[week]} ${day}/${abbr.month[month]}/${year} ${time}`,
+      6: ` ${abbr.week[week]} ${day} ${abbr.monthFull[month]} ${year} ${time}`
     }[FORMAT]
   }
 

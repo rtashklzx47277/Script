@@ -56,6 +56,9 @@
       min-height: 100vh !important;
       padding: 0 !important;
     }
+    #primary #below #above-the-fold #top-row #actions ytd-menu-renderer {
+      justify-content: flex-start !important;
+    }
   `
 
   const waitElements = () => {
