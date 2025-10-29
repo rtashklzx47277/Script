@@ -18,9 +18,11 @@
   GM_addStyle(`
     #voice-search-button,
     button.ytp-autonav-toggle,
+    button.ytp-subtitles-button,
     button.ytp-remote-button,
     .html5-endscreen,
     .ytp-ce-element-show,
+    .ytp-fullscreen-grid,
     #secondary-inner>#related {
       display: none !important;
     }

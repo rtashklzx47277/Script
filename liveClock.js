@@ -2,7 +2,7 @@
 // @name              Youtube Live Clock
 // @name:zh-TW        Youtube Live Clock
 // @namespace         https://greasyfork.org/scripts/453367
-// @version           1.8.2
+// @version           1.8.3
 // @description       show duration for livestreams and present time for archives
 // @description:zh-TW 顯示直播及直播存檔當下的時間
 // @author            Derek
@@ -29,16 +29,8 @@
       display: flex !important;
     }
     #present-time {
-      min-width: 0 !important;
-      position: relative !important;
-      display: inline-block !important;
-      height: var(--yt-delhi-pill-height, 48px) !important;
-      border-radius: 28px !important;
-      padding: 0 16px !important;
-      backdrop-filter: var(--yt-frosted-glass-backdrop-filter-override, blur(16px)) !important;
-      background: var(--yt-spec-overlay-background-medium-light, rgba(0, 0, 0, .3)) !important;
-      text-shadow: 0 0 2px #000 !important;
-      margin-left: 10px !important;
+      margin-left: 8px !important;
+      font-weight: normal !important;
     }
   `)
 
@@ -62,25 +54,25 @@
   const dateFormat = (presentTime) => {
     const [week, month, day, year, time] = presentTime.toString().split(' ')
     return {
-      1: ` ${year}/${abbr.month[month]}/${day} ${time}`,
-      2: ` ${abbr.month[month]}/${day}/${year} ${time}`,
-      3: ` ${day}/${abbr.month[month]}/${year} ${time}`,
-      4: ` ${week} ${day}/${abbr.month[month]}/${year} ${time}`,
-      5: ` ${abbr.week[week]} ${day}/${abbr.month[month]}/${year} ${time}`,
-      6: ` ${abbr.week[week]} ${day} ${abbr.monthFull[month]} ${year} ${time}`
+      1: `${year}/${abbr.month[month]}/${day} ${time}`,
+      2: `${abbr.month[month]}/${day}/${year} ${time}`,
+      3: `${day}/${abbr.month[month]}/${year} ${time}`,
+      4: `${week} ${day}/${abbr.month[month]}/${year} ${time}`,
+      5: `${abbr.week[week]} ${day}/${abbr.month[month]}/${year} ${time}`,
+      6: `${abbr.week[week]} ${day} ${abbr.monthFull[month]} ${year} ${time}`
     }[FORMAT]
   }
 
-  let videoId, timeDisplay, progressBar, liveData, publication, observer
+  let videoId, timeContent, progressBar, liveData, publication, observer
   let videoData = null
 
   const waitElements = () => {
     return new Promise((resolve) => {
       const observer = new MutationObserver(() => {
-        timeDisplay = $('.ytp-chrome-bottom .ytp-time-display')
+        timeContent = $('.ytp-chrome-bottom .ytp-time-contents')
         progressBar = $('.ytp-chrome-bottom .ytp-progress-bar')
 
-        if (timeDisplay && progressBar) {
+        if (timeContent && progressBar) {
           if (videoData !== $('#microformat script')) {
             videoData = $('#microformat script')
             observer.disconnect()
@@ -97,7 +89,7 @@
     if (!clockElement) {
       clockElement = document.createElement('span')
       clockElement.id = 'present-time'
-      timeDisplay.insertBefore(clockElement, timeDisplay.childNodes[1])
+      timeContent.appendChild(clockElement)
     }
     return clockElement
   }

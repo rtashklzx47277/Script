@@ -18,7 +18,7 @@
     let dummy = document.createElement('div')
     document.body.appendChild(dummy)
     dummy.style.overflowY = 'scroll'
-    const width = dummy.offsetWidth - dummy.clientWidth + 1
+    const width = dummy.offsetWidth - dummy.clientWidth
     dummy.remove()
     return width
   })()
@@ -51,7 +51,8 @@
       padding: 0 24px 0 !important;
     }
     #columns > #secondary,
-    #secondary #chat {
+    #secondary #chat,
+    iframe#chatframe {
       min-width: calc(25vw - ${scrollbarWidth}px) !important;
       min-height: 100vh !important;
       padding: 0 !important;

@@ -1,16 +1,33 @@
 // ==UserScript==
-// @name          Twitch ScreenShot
+// @name          Twitch Optimizer
 // @version       0.1.0
 // @description   ScreenShot
 // @author        Derek
 // @match         *://www.twitch.tv/*
 // @run-at        document-start
+// @grant         GM_addStyle
 // @grant         GM_download
 // @noframes
 // ==/UserScript==
 
 (() => {
   'use strict'
+
+  GM_addStyle(`
+    div.chat-room__content > div:has(~ div[aria-label="聊天訊息"]) {
+      display: none !important;
+    }
+    div.chat-scrollable-area__message-container > div:has(img[alt="管理員"]):not(:has(div[data-a-user="nightbot"], div[data-a-user="moobot"])) {
+      background: #18181b !important;
+      border-radius: 4px !important;
+      position: sticky !important;
+      top: -1px !important;
+      z-index: 9999 !important;
+    }
+    div.chat-scrollable-area__message-container > div:has(img[alt="管理員"]):not(:has(div[data-a-user="nightbot"], div[data-a-user="moobot"])) div.chat-line__message-highlight {
+      background: rgba(255, 255, 255, 0.16) !important;
+    }
+  `)
 
   let $ = (element) => document.querySelector(element)
   let controlBar, videoTitle, videoPlayer
@@ -63,12 +80,12 @@
 
   (async () => {
     await waitElements()
-    let settingBtn = $('button[aria-label=設定]').parentElement.parentElement.parentElement
+    let settingBtn = $('div.video-ref div.player-controls__right-control-group > div:has(button[aria-label="設定"])')
     let photoBtn = settingBtn.cloneNode(true)
     const svgContainer = photoBtn.querySelector('svg')
-    svgContainer.setAttribute('viewBox', '6 5 23 23')
-    const path = svgContainer.querySelector('path[fill-rule=evenodd]')
-    path.setAttribute('d', 'M 26.079999,10.02 H 22.878298 L 21.029999,8 h -6.06 l -1.8483,2.02 H 9.9200015 c -1.111,0 -2.02,0.909 -2.02,2.02 v 12.12 c 0,1.111 0.909,2.02 2.02,2.02 H 26.079999 c 1.111,0 2.019999,-0.909 2.019999,-2.02 V 12.04 c 0,-1.111 -0.909,-2.02 -2.019999,-2.02 z m 0,14.14 H 9.9200015 V 12.04 h 4.0904965 l 1.8483,-2.02 h 4.2824 l 1.8483,2.02 h 4.0905 z m -8.08,-11.11 c -2.7876,0 -5.05,2.2624 -5.05,5.05 0,2.7876 2.2624,5.05 5.05,5.05 2.7876,0 5.049999,-2.2624 5.049999,-5.05 0,-2.7876 -2.262399,-5.05 -5.049999,-5.05 z m 0,8.08 c -1.6665,0 -3.03,-1.3635 -3.03,-3.03 0,-1.6665 1.3635,-3.03 3.03,-3.03 1.6665,0 3.03,1.3635 3.03,3.03 0,1.6665 -1.3635,3.03 -3.03,3.03 z')
+    svgContainer.setAttribute('viewBox', '0 -960 960 960')
+    const pathContainer = svgContainer.querySelector('path[fill-rule=evenodd]')
+    pathContainer.setAttribute('d', 'M480-260q75 0 127.5-52.5T660-440q0-75-52.5-127.5T480-620q-75 0-127.5 52.5T300-440q0 75 52.5 127.5T480-260Zm0-80q-42 0-71-29t-29-71q0-42 29-71t71-29q42 0 71 29t29 71q0 42-29 71t-71 29ZM160-120q-33 0-56.5-23.5T80-200v-480q0-33 23.5-56.5T160-760h126l74-80h240l74 80h126q33 0 56.5 23.5T880-680v480q0 33-23.5 56.5T800-120H160Zm0-80h640v-480H638l-73-80H395l-73 80H160v480Zm320-240Z')
     controlBar.insertBefore(photoBtn, settingBtn)
     photoBtn.addEventListener('click', screenShot)
   })()

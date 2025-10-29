@@ -94,9 +94,18 @@
   (async () => {
     let styleElement = document.createElement('style')
     styleElement.textContent = `
+      yt-live-chat-app {
+        min-width: 100% !important;
+        min-height: 100% !important;
+      }
+      ytd-engagement-panel-section-list-renderer.yt-live-chat-app {
+        max-width: 100% !important;
+        min-width: 100% !important;
+      }
       #chat-messages > yt-live-chat-header-renderer,  /* 標頭 */
       #panel-pages #pickers #search-panel, /* 貼圖搜尋 */
       #panel-pages #pickers #category-buttons, /* 類別選擇 */
+      #categories > yt-emoji-picker-category-renderer:nth-child(n + 2), /* 貼圖類別 */
       #picker-buttons > yt-reaction-control-panel-overlay-view-model, /* 右下愛心 */
       #ticker #container > #left-arrow-container, /* SC列左箭頭 */
       #ticker #container > #right-arrow-container,  /* SC列右箭頭 */
@@ -120,15 +129,15 @@
       #items > ytd-sponsorships-live-chat-gift-redemption-announcement-renderer > #author-photo /* 贈禮頭貼右側 */ {
         margin: 0 1em 0 0 !important;
       }
+      #panel-pages {
+        max-height: 30vh !important;
+      }
       /* 懸浮留言 */
       #item-offset {
         overflow: visible !important;
       }
       #items {
         transform: none !important;
-      }
-      ytd-engagement-panel-section-list-renderer #content {
-        margin-right: 8.5vw !important;
       }
       #item-offset yt-live-chat-text-message-renderer[author-type="owner"],
       #item-offset yt-live-chat-text-message-renderer[author-type="moderator"] {
