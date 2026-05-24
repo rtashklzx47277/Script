@@ -43,6 +43,7 @@
   const LIVE_CATCHUP_TARGET_BUFFER = 0.5
   const LIVE_CATCHUP_RATE = 1.5
   const LIVE_CATCHUP_INTERVAL = 250
+  const PLAYBACK_RATE_RESTORE_DELAYS = [100, 500, 1000]
   const DEFAULT_MAX_DVR_SECONDS = 43200
   const EXTENDED_MAX_DVR_SECONDS = DEFAULT_MAX_DVR_SECONDS * 14
   const LIVE_DVR_WINDOW_FLAG = 'html5_max_live_dvr_window_plus_margin_secs'
@@ -62,6 +63,7 @@
   let persistentFloatingBarText = ''
   let liveCatchupTimer = 0
   let liveCatchupPreviousRate = null
+  let playbackRateRestoreToken = 0
   let pageController = null
 
   const data = {
@@ -403,7 +405,7 @@
   const isLivePlayback = () =>
     Boolean(moviePlayer?.getVideoData?.()?.isLive)
 
-  const getBufferedRangeEnd = () => {
+  const getBufferedRangeHealth = () => {
     if (!videoPlayer?.buffered?.length) return null
 
     const currentTime = videoPlayer.currentTime
@@ -412,13 +414,15 @@
       const start = videoPlayer.buffered.start(index)
       const end = videoPlayer.buffered.end(index)
 
-      if (start <= currentTime && currentTime <= end) return end
+      if (start <= currentTime && currentTime <= end) {
+        return Math.max(0, end - currentTime)
+      }
     }
 
-    return videoPlayer.buffered.end(videoPlayer.buffered.length - 1)
+    return null
   }
 
-  const getLiveBufferHealth = () => {
+  const getProgressBufferHealth = () => {
     const progressState = moviePlayer?.getProgressState?.()
 
     if (
@@ -428,11 +432,57 @@
       return Math.max(0, progressState.loaded - progressState.current)
     }
 
-    const bufferedEnd = getBufferedRangeEnd()
+    return null
+  }
 
-    if (!Number.isFinite(bufferedEnd)) return null
+  const getLiveBufferHealth = () => {
+    const bufferedHealth = getBufferedRangeHealth()
 
-    return Math.max(0, bufferedEnd - videoPlayer.currentTime)
+    if (Number.isFinite(bufferedHealth)) return bufferedHealth
+
+    return getProgressBufferHealth()
+  }
+
+  const getPlaybackRate = () => {
+    const playerRate = Number(moviePlayer?.getPlaybackRate?.())
+
+    if (Number.isFinite(playerRate)) return playerRate
+
+    return Number(videoPlayer?.playbackRate)
+  }
+
+  const setPlaybackRate = (rate) => {
+    if (!Number.isFinite(rate)) return
+
+    try {
+      moviePlayer?.setPlaybackRate?.(rate)
+    } catch (_) {
+      // Some player states reject API playback-rate changes.
+    }
+
+    if (videoPlayer) {
+      videoPlayer.playbackRate = rate
+    }
+  }
+
+  const restorePlaybackRate = (rate) => {
+    const restoreRate = Number.isFinite(rate) ? rate : 1
+    const restoreToken = ++playbackRateRestoreToken
+
+    setPlaybackRate(restoreRate)
+
+    for (const delay of PLAYBACK_RATE_RESTORE_DELAYS) {
+      setTimeout(() => {
+        if (restoreToken !== playbackRateRestoreToken || liveCatchupTimer) return
+
+        setPlaybackRate(restoreRate)
+      }, delay)
+    }
+  }
+
+  const setManualPlaybackRate = (rate) => {
+    playbackRateRestoreToken++
+    setPlaybackRate(rate)
   }
 
   const updateLiveButtonState = () => {
@@ -449,10 +499,9 @@
 
     if (
       restoreRate &&
-      Number.isFinite(liveCatchupPreviousRate) &&
-      videoPlayer
+      Number.isFinite(liveCatchupPreviousRate)
     ) {
-      videoPlayer.playbackRate = liveCatchupPreviousRate
+      restorePlaybackRate(liveCatchupPreviousRate)
     }
 
     liveCatchupPreviousRate = null
@@ -479,7 +528,7 @@
       return
     }
 
-    videoPlayer.playbackRate = LIVE_CATCHUP_RATE
+    setPlaybackRate(LIVE_CATCHUP_RATE)
   }
 
   const toggleLiveCatchup = () => {
@@ -499,7 +548,7 @@
       return
     }
 
-    liveCatchupPreviousRate = videoPlayer.playbackRate
+    liveCatchupPreviousRate = getPlaybackRate()
     liveCatchupTimer = setInterval(runLiveCatchupStep, LIVE_CATCHUP_INTERVAL)
 
     updateLiveButtonState()
@@ -528,14 +577,14 @@
       stopLiveCatchup('', false)
     }
 
-    let playbackRate = Number(videoPlayer.playbackRate)
+    let playbackRate = getPlaybackRate()
     playbackRate =
       event.deltaY < 0
         ? Math.min(16, playbackRate + 0.1)
         : Math.max(0.1, playbackRate - 0.1)
 
     playbackRate = Number(playbackRate.toFixed(1))
-    videoPlayer.playbackRate = playbackRate
+    setManualPlaybackRate(playbackRate)
 
     floatingBarTimer = showFloatingBar(floatingBarTimer, `${playbackRate}x`)
   }
@@ -545,7 +594,7 @@
       stopLiveCatchup('', false)
     }
 
-    videoPlayer.playbackRate = 1
+    setManualPlaybackRate(1)
     floatingBarTimer = showFloatingBar(floatingBarTimer, '1x')
   }
 
