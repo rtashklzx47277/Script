@@ -5,7 +5,7 @@
 // @description Shows elapsed time on live streams and absolute clock time on live archives.
 // @author      Derek
 // @match       *://www.youtube.com/*
-// @grant       GM_addStyle
+// @grant       none
 // @run-at      document-idle
 // @noframes
 // ==/UserScript==
@@ -25,6 +25,11 @@
   */
 
   const $ = (element) => document.querySelector(element)
+  const addStyle = (css) => {
+    const styleElement = document.createElement('style')
+    styleElement.textContent = css
+    ;(document.head || document.documentElement).appendChild(styleElement)
+  }
 
   const WEEK_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
   const WEEK_FULL = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
@@ -42,7 +47,7 @@
   let progressObserver = null
   let navigationToken = 0
 
-  GM_addStyle(`
+  addStyle(`
     .ytp-chrome-bottom .ytp-time-display,
     .ytp-chrome-bottom .ytp-right-controls {
       display: flex !important;

@@ -36,78 +36,80 @@
 
   const clamp = (value, min, max) => Math.min(max, Math.max(min, value))
 
-  const addStyle = () => {
-    const style = document.createElement('style')
-    style.textContent = `
-      button[aria-label^="剪輯"],
-      button[aria-label^="Clip"] {
-        display: none !important;
-      }
-
-      .extensions-video-overlay-size-container,
-      .extensions-dock__layout,
-      .extensions-notifications,
-      .extensions-popover {
-        display: none !important;
-      }
-
-      #twitch-player-tweaks-volume-bar {
-        position: absolute;
-        top: 0;
-        left: 0;
-        z-index: 20;
-        width: 100%;
-        height: 20px;
-        color: #fff;
-        background: rgba(0, 0, 0, 0.5);
-        text-align: center;
-        font-size: 13px;
-        line-height: 20px;
-        opacity: 0;
-        pointer-events: none;
-        transition: opacity 0.12s ease;
-      }
-
-      #twitch-player-tweaks-volume-bar[data-visible="true"] {
-        opacity: 0.95;
-      }
-
-      .twitch-player-tweaks-tooltip {
-        position: absolute;
-        z-index: 30;
-        display: none;
-        height: 27.6px;
-        padding: 4px 8px;
-        box-sizing: border-box;
-        color: rgb(14, 14, 16);
-        background: rgb(255, 255, 255);
-        border-radius: 4px;
-        font-family: Inter, "Noto Sans Arabic", Roobert, "Helvetica Neue", Helvetica, Arial, sans-serif;
-        font-size: 14px;
-        font-weight: 600;
-        line-height: 19.6px;
-        white-space: nowrap;
-        pointer-events: none;
-        transform: translateX(-50%);
-      }
-
-      .twitch-player-tweaks-tooltip::after {
-        position: absolute;
-        bottom: -5px;
-        left: 50%;
-        width: 10px;
-        height: 10px;
-        background: rgb(255, 255, 255);
-        content: '';
-        transform: translateX(-50%) rotate(45deg);
-      }
-
-      .twitch-player-tweaks-tooltip[data-visible="true"] {
-        display: inline-block;
-      }
-    `
-    document.documentElement.appendChild(style)
+  const addStyle = (css) => {
+    const styleElement = document.createElement('style')
+    styleElement.textContent = css
+    ;(document.head || document.documentElement).appendChild(styleElement)
   }
+
+  addStyle(`
+    button[aria-label^="剪輯"],
+    button[aria-label^="Clip"] {
+      display: none !important;
+    }
+
+    .extensions-video-overlay-size-container,
+    .extensions-dock__layout,
+    .extensions-notifications,
+    .extensions-popover {
+      display: none !important;
+    }
+
+    #twitch-player-tweaks-volume-bar {
+      position: absolute;
+      top: 0;
+      left: 0;
+      z-index: 20;
+      width: 100%;
+      height: 20px;
+      color: #fff;
+      background: rgba(0, 0, 0, 0.5);
+      text-align: center;
+      font-size: 13px;
+      line-height: 20px;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.12s ease;
+    }
+
+    #twitch-player-tweaks-volume-bar[data-visible="true"] {
+      opacity: 0.95;
+    }
+
+    .twitch-player-tweaks-tooltip {
+      position: absolute;
+      z-index: 30;
+      display: none;
+      height: 27.6px;
+      padding: 4px 8px;
+      box-sizing: border-box;
+      color: rgb(14, 14, 16);
+      background: rgb(255, 255, 255);
+      border-radius: 4px;
+      font-family: Inter, "Noto Sans Arabic", Roobert, "Helvetica Neue", Helvetica, Arial, sans-serif;
+      font-size: 14px;
+      font-weight: 600;
+      line-height: 19.6px;
+      white-space: nowrap;
+      pointer-events: none;
+      transform: translateX(-50%);
+    }
+
+    .twitch-player-tweaks-tooltip::after {
+      position: absolute;
+      bottom: -5px;
+      left: 50%;
+      width: 10px;
+      height: 10px;
+      background: rgb(255, 255, 255);
+      content: '';
+      transform: translateX(-50%) rotate(45deg);
+    }
+
+    .twitch-player-tweaks-tooltip[data-visible="true"] {
+      display: inline-block;
+    }
+  `)
 
   const setNativeInputValue = (input, value) => {
     const setter = Object.getOwnPropertyDescriptor(
@@ -177,7 +179,7 @@
 
     clearTimeout(state.volumeBarTimer)
 
-    state.volumeBar.textContent = `${Math.round(volume * 100)}%`
+    state.volumeBar.textContent = `${Math.round(volume * 100)}`
     state.volumeBar.dataset.visible = 'true'
 
     state.volumeBarTimer = setTimeout(() => {
@@ -394,7 +396,6 @@
     }
   })
 
-  addStyle()
   refresh()
 
   observer.observe(document.body, {

@@ -5,7 +5,6 @@
 // @description Adds player controls, unlocks live DVR, extends long-stream rewind, and provides wheel volume control on YouTube videos.
 // @author      Derek
 // @match       *://www.youtube.com/*
-// @grant       GM_addStyle
 // @grant       GM_download
 // @run-at      document-start
 // @noframes
@@ -31,6 +30,12 @@
     }
 
   const $ = (element) => document.querySelector(element)
+  const addStyle = (css) => {
+    const styleElement = document.createElement('style')
+    styleElement.textContent = css
+    ;(document.head || document.documentElement).appendChild(styleElement)
+  }
+
   const SVG_NS = 'http://www.w3.org/2000/svg'
   const SCREENSHOT_KEY = 's'
   const TOOLTIP_VERTICAL_GAP = 22
@@ -39,7 +44,8 @@
   const LIVE_CATCHUP_RATE = 1.5
   const LIVE_CATCHUP_INTERVAL = 250
   const DEFAULT_MAX_DVR_SECONDS = 43200
-  const EXTENDED_MAX_DVR_SECONDS = DEFAULT_MAX_DVR_SECONDS * 60
+  const EXTENDED_MAX_DVR_SECONDS = DEFAULT_MAX_DVR_SECONDS * 14
+  const LIVE_DVR_WINDOW_FLAG = 'html5_max_live_dvr_window_plus_margin_secs'
 
   let container
   let sizeBtn
@@ -66,7 +72,7 @@
     },
   }
 
-  GM_addStyle(`
+  addStyle(`
     #voice-search-button,
     button.ytp-autonav-toggle,
     button.ytp-subtitles-button,
@@ -321,18 +327,40 @@
       ? Object.keys(object).find((key) => object[key]?.[propName])
       : undefined
 
+  const disableServerDrivenPlayback = (playerConfig, streamingData) => {
+    const mediaCommonConfig = playerConfig?.mediaCommonConfig
+
+    if (isObject(mediaCommonConfig)) {
+      mediaCommonConfig.useServerDrivenAbr = false
+
+      if (isObject(mediaCommonConfig.serverPlaybackStartConfig)) {
+        mediaCommonConfig.serverPlaybackStartConfig.enable = false
+      }
+    }
+
+    if (
+      isObject(streamingData) &&
+      streamingData.serverAbrStreamingUrl &&
+      (streamingData.hlsManifestUrl || streamingData.dashManifestUrl)
+    ) {
+      delete streamingData.serverAbrStreamingUrl
+    }
+  }
+
   const enableLiveDvr = (response, owner) => {
     if (!isObject(response)) return
 
     const {
       streamingData,
       videoDetails,
+      playerConfig,
       microformat,
     } = response
 
     if (!isObject(videoDetails) || !videoDetails.isLive) return
 
     videoDetails.isLiveDvrEnabled = true
+    disableServerDrivenPlayback(playerConfig, streamingData)
 
     if (!isObject(streamingData)) return
 
@@ -356,9 +384,8 @@
     const configKey = getKeyByPropName(owner, 'experiments')
     const flags = configKey && owner[configKey]?.experiments?.flags
 
-    if (flags) {
-      flags.html5_max_live_dvr_window_plus_margin_secs =
-        EXTENDED_MAX_DVR_SECONDS
+    if (isObject(flags)) {
+      flags[LIVE_DVR_WINDOW_FLAG] = EXTENDED_MAX_DVR_SECONDS
     }
   }
 
@@ -660,17 +687,26 @@
     }
   }
 
+  const collectPlayerElements = () => {
+    container = $('.html5-video-container')
+    sizeBtn = $('button.ytp-size-button')
+    videoTitle = $('a.ytp-title-link')
+    moviePlayer = $('#movie_player')
+    progressBar = $('.ytp-progress-bar')
+    videoPlayer = $('#movie_player video')
+
+    return Boolean(container && sizeBtn && moviePlayer && progressBar && videoPlayer)
+  }
+
   const waitElements = () => {
     return new Promise((resolve) => {
-      const observer = new MutationObserver(() => {
-        container = $('.html5-video-container')
-        sizeBtn = $('button.ytp-size-button')
-        videoTitle = $('a.ytp-title-link')
-        moviePlayer = $('#movie_player')
-        progressBar = $('.ytp-progress-bar')
-        videoPlayer = $('#movie_player video')
+      if (collectPlayerElements()) {
+        resolve(true)
+        return
+      }
 
-        if (container && sizeBtn && moviePlayer && progressBar && videoPlayer) {
+      const observer = new MutationObserver(() => {
+        if (collectPlayerElements()) {
           observer.disconnect()
           resolve(true)
         }
@@ -684,7 +720,7 @@
 
       setTimeout(() => {
         observer.disconnect()
-        resolve(false)
+        resolve(collectPlayerElements())
       }, 5000)
     })
   }
