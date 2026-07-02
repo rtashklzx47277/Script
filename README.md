@@ -4,8 +4,7 @@
 
 ## 安裝
 
-瀏覽器安裝 [Tampermonkey](https://www.tampermonkey.net/) 後,點下方腳本連結即可安裝;各腳本彼此獨立,可只裝需要的。
-腳本已設定 `@updateURL`,推送到 `main` 分支後 Tampermonkey 會自動檢查更新。
+瀏覽器安裝 [Tampermonkey](https://www.tampermonkey.net/) 後,點下方腳本連結即可安裝;各腳本彼此獨立,可只裝需要的。更新採手動。
 
 ## 腳本清單
 
@@ -38,7 +37,7 @@
 
 ## 版本
 
-行為變更時遞增各腳本的 `@version`,Tampermonkey 依此判斷是否更新。
+行為變更時遞增各腳本的 `@version`。
 
 ## 授權
 

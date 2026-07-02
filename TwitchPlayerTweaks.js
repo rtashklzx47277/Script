@@ -1,12 +1,9 @@
 // ==UserScript==
 // @name        Twitch Player Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.2.0
+// @version     0.2.1
 // @description Hide clips and interactive extensions, add screenshot button, support wheel volume, and use native-like tooltips.
 // @author      Derek
-// @homepageURL https://github.com/rtashklzx47277/Script
-// @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchPlayerTweaks.js
-// @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchPlayerTweaks.js
 // @match       *://www.twitch.tv/*
 // @run-at      document-idle
 // @grant       GM_download
@@ -17,10 +14,14 @@
   'use strict'
 
   const PLAYER_SELECTOR = '[data-a-target="video-player"]'
-  // data-a-target is Twitch's stable test hook and is locale-independent,
-  // unlike the translated aria-label.
-  const THEATER_BUTTON_SELECTOR =
-    'button[data-a-target="player-theatre-mode-button"]'
+  // Prefer Twitch's data-a-target test hook (locale-independent), but keep
+  // the aria-label fallbacks — player builds exist where the hook is absent
+  // and matching nothing means the screenshot button never appears.
+  const THEATER_BUTTON_SELECTOR = [
+    'button[data-a-target="player-theatre-mode-button"]',
+    'button[aria-label^="劇院模式"]',
+    'button[aria-label^="Theater Mode"]',
+  ].join(', ')
   const VOLUME_SLIDER_SELECTOR =
     'input[data-a-target="player-volume-slider"]'
 

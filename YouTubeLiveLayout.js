@@ -4,9 +4,6 @@
 // @version     0.2.0
 // @description Keeps normal videos untouched, expands theater mode without chat, and uses a 75/25 theater layout for videos with chat.
 // @author      Derek
-// @homepageURL https://github.com/rtashklzx47277/Script
-// @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveLayout.js
-// @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveLayout.js
 // @match       *://www.youtube.com/*
 // @grant       none
 // @run-at      document-idle

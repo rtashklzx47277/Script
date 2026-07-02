@@ -4,9 +4,6 @@
 // @version     0.2.0
 // @description Tweaks YouTube live chat layout, emoji copying, adds a reload button, and keeps latest chat followed unless you scroll up manually.
 // @author      Derek
-// @homepageURL https://github.com/rtashklzx47277/Script
-// @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.js
-// @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.js
 // @match       *://www.youtube.com/live_chat*
 // @match       *://www.youtube.com/live_chat_replay*
 // @run-at      document-start

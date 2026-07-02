@@ -1,12 +1,9 @@
 // ==UserScript==
 // @name        YouTube Player Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.2.0
+// @version     0.2.1
 // @description Adds player controls (screenshot, wheel speed/volume, live catch-up) and unlocks live DVR with extended rewind on YouTube.
 // @author      Derek
-// @homepageURL https://github.com/rtashklzx47277/Script
-// @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubePlayerTweaks.js
-// @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubePlayerTweaks.js
 // @match       *://www.youtube.com/*
 // @grant       GM_download
 // @grant       unsafeWindow
@@ -865,10 +862,11 @@
     const buttons = ensureButtons()
     bindButtonEvents(buttons, signal)
 
-    // Scoped to the player (not document) so page scrolling keeps the
-    // browser's fast path; non-passive is still needed to preventDefault
-    // over the video area.
-    moviePlayer.addEventListener('wheel', handleWheelCapture, {
+    // Document-level capture on purpose: wheel events can be stopped before
+    // they ever reach #movie_player, so a player-scoped listener misses them.
+    // Non-passive is required to preventDefault; the handler bails fast
+    // unless the cursor is over the video area.
+    document.addEventListener('wheel', handleWheelCapture, {
       capture: true,
       passive: false,
       signal,

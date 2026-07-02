@@ -4,9 +4,6 @@
 // @version     0.2.0
 // @description Automatically turns off subtitles on YouTube watch and live pages.
 // @author      Derek
-// @homepageURL https://github.com/rtashklzx47277/Script
-// @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeAutoDisableSubtitles.js
-// @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeAutoDisableSubtitles.js
 // @match       *://www.youtube.com/*
 // @run-at      document-idle
 // @grant       none

@@ -3,9 +3,6 @@
 // @version       0.2.0
 // @description   Pixiv Jump Directly
 // @author        Derek
-// @homepageURL   https://github.com/rtashklzx47277/Script
-// @updateURL     https://raw.githubusercontent.com/rtashklzx47277/Script/main/pixiv.js
-// @downloadURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/pixiv.js
 // @match         *://www.pixiv.net/jump.php?*
 // @run-at        document-start
 // @grant         none

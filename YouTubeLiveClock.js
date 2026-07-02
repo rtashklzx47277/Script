@@ -4,9 +4,6 @@
 // @version     0.2.0
 // @description Shows elapsed time on live streams and absolute clock time on live archives.
 // @author      Derek
-// @homepageURL https://github.com/rtashklzx47277/Script
-// @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveClock.js
-// @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveClock.js
 // @match       *://www.youtube.com/*
 // @grant       none
 // @run-at      document-idle
