@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.2.0
+// @version     0.2.1
 // @description Tweaks YouTube live chat layout, emoji copying, adds a reload button, and keeps latest chat followed unless you scroll up manually.
 // @author      Derek
 // @match       *://www.youtube.com/live_chat*
@@ -48,6 +48,7 @@
 
   let followLatest = true
   let pointerScrolling = false
+  let scrollFramePending = false
 
   addStyle(`
     :root {
@@ -244,10 +245,16 @@
 
       const range = selection.getRangeAt(0)
 
+      // Scope the scan to the selection's common ancestor instead of the
+      // whole chat DOM: selecting one message only touches its own nodes.
+      let root = range.commonAncestorContainer
+      if (root.nodeType !== Node.ELEMENT_NODE) root = root.parentElement
+      if (!root) return
+
       // Walk the real nodes intersecting the selection instead of looking
       // clones up by id: emoji ids repeat across messages and getElementById
       // only ever returns the first occurrence.
-      for (const img of document.querySelectorAll(EMOJI_SELECTOR)) {
+      for (const img of root.querySelectorAll(EMOJI_SELECTOR)) {
         if (!range.intersectsNode(img)) continue
 
         const alt = img.alt
@@ -293,10 +300,18 @@
   }
 
   const scrollToBottom = () => {
-    if (!scroller) return
+    // One scrollTop write per frame: busy chats deliver several mutation
+    // batches between frames, and each used to queue its own rAF.
+    if (!scroller || scrollFramePending) return
+
+    scrollFramePending = true
 
     requestAnimationFrame(() => {
-      scroller.scrollTop = scroller.scrollHeight
+      scrollFramePending = false
+
+      if (scroller) {
+        scroller.scrollTop = scroller.scrollHeight
+      }
     })
   }
 
@@ -398,9 +413,11 @@
 
     // YouTube can replace the chat internals wholesale (e.g. switching
     // Top chat / Live chat), which strands listeners and observers on dead
-    // nodes. Keep watching and rebind whenever the bound nodes drop out of
-    // the document; this also covers the initial wait before chat renders.
-    const observer = new MutationObserver(() => {
+    // nodes. A 1s poll costs three property reads per tick — far cheaper
+    // than a subtree observer serviced on every chat message — and also
+    // covers the initial wait before chat renders (worst case binds ~1s
+    // later, which is imperceptible).
+    setInterval(() => {
       if (
         scroller?.isConnected &&
         items?.isConnected &&
@@ -410,12 +427,7 @@
       }
 
       bindAutoFollow()
-    })
-
-    observer.observe(document.documentElement, {
-      childList: true,
-      subtree: true,
-    })
+    }, 1000)
   }
 
   ;(async () => {
