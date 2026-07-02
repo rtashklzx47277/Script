@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Live Layout
 // @namespace   https://tampermonkey.net/
-// @version     0.2.0
+// @version     0.2.1
 // @description Keeps normal videos untouched, expands theater mode without chat, and uses a 75/25 theater layout for videos with chat.
 // @author      Derek
 // @match       *://www.youtube.com/*
@@ -171,6 +171,15 @@
     .ytp-chrome-bottom,
     .ytp-progress-bar-container {
       min-width: calc(${PRIMARY_WIDTH} - 24px) !important;
+    }
+
+    /* Squeezing #columns to 75vw can flip ytd-watch-flexy into one-column
+       mode, which reparents related videos between the video info and the
+       comments. Hide them in this layout (both possible slots) so comments
+       stay within reach. */
+    #related,
+    ytd-watch-next-secondary-results-renderer {
+      display: none !important;
     }
   `
 
