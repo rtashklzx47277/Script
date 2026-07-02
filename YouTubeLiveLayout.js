@@ -1,9 +1,12 @@
 // ==UserScript==
 // @name        YouTube Live Layout
 // @namespace   https://tampermonkey.net/
-// @version     0.1.0
+// @version     0.2.0
 // @description Keeps normal videos untouched, expands theater mode without chat, and uses a 75/25 theater layout for videos with chat.
 // @author      Derek
+// @homepageURL https://github.com/rtashklzx47277/Script
+// @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveLayout.js
+// @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveLayout.js
 // @match       *://www.youtube.com/*
 // @grant       none
 // @run-at      document-idle
@@ -29,6 +32,7 @@
   let sizeButton
 
   let cleanup = null
+  let navigationToken = 0
   let autoTheaterAttempted = false
   let autoTheaterWindowOpen = false
   let autoTheaterTimer = 0
@@ -413,9 +417,11 @@
   const monitorLayout = () => {
     const observer = new MutationObserver(queueLayoutSync)
 
+    // ponytail: drop the childList firehose (fired on every comment/related-video
+    // DOM change). Layout only reacts to the theater/collapsed attributes; subtree
+    // stays so `collapsed` on the deep #chat element is still covered.
     observer.observe(watchFlexy, {
       attributes: true,
-      childList: true,
       subtree: true,
       attributeFilter: ['theater', 'collapsed']
     })
@@ -441,9 +447,13 @@
     }
   }
 
-  const main = async () => {
+  const main = async (token) => {
     const ready = await waitElements()
-    if (!ready) return null
+
+    // Stale run (user already navigated again, possibly off the watch page):
+    // bail before styling anything — watch-page elements linger in the DOM on
+    // other pages, so waitElements alone can succeed there.
+    if (!ready || token !== navigationToken) return null
 
     beginAutoTheaterWindow()
     syncLayout()
@@ -470,12 +480,25 @@
     }
   }
 
+  // yt-navigate-finish also fires on the initial page load, so runs can
+  // overlap while main() awaits; the token makes the newest run win and
+  // disposes stale ones instead of losing their cleanup.
   const run = async () => {
-    if (cleanup) cleanup()
+    const token = ++navigationToken
 
-    cleanup = isWatchPage()
-      ? await main()
-      : null
+    cleanup?.()
+    cleanup = null
+
+    if (!isWatchPage()) return
+
+    const dispose = await main(token)
+
+    if (token !== navigationToken) {
+      dispose?.()
+      return
+    }
+
+    cleanup = dispose
   }
 
   run()

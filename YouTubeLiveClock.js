@@ -1,9 +1,12 @@
 // ==UserScript==
 // @name        YouTube Live Clock
 // @namespace   https://tampermonkey.net/
-// @version     0.1.0
+// @version     0.2.0
 // @description Shows elapsed time on live streams and absolute clock time on live archives.
 // @author      Derek
+// @homepageURL https://github.com/rtashklzx47277/Script
+// @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveClock.js
+// @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveClock.js
 // @match       *://www.youtube.com/*
 // @grant       none
 // @run-at      document-idle
@@ -156,25 +159,44 @@
         return
       }
 
+      let microformatObserver = null
+
+      const finish = (result) => {
+        observer.disconnect()
+        microformatObserver?.disconnect()
+        resolve(result)
+      }
+
       const observer = new MutationObserver(() => {
         const result = check()
-
-        if (!result) return
-
-        observer.disconnect()
-        resolve(result)
+        if (result) finish(result)
       })
 
+      // Player chrome and the #microformat <script> appearing or being replaced
+      // surface as childList mutations.
       observer.observe(document.body, {
         childList: true,
-        characterData: true,
         subtree: true,
       })
 
-      setTimeout(() => {
-        observer.disconnect()
-        resolve(null)
-      }, 5000)
+      // ponytail: keep the heavy characterData watch scoped to #microformat
+      // (in-place JSON-LD updates between navigations), not the whole body.
+      const microformat = $('#microformat')
+
+      if (microformat) {
+        microformatObserver = new MutationObserver(() => {
+          const result = check()
+          if (result) finish(result)
+        })
+
+        microformatObserver.observe(microformat, {
+          childList: true,
+          characterData: true,
+          subtree: true,
+        })
+      }
+
+      setTimeout(() => finish(null), 5000)
     })
   }
 
@@ -227,7 +249,11 @@
 
     if (publication.endDate) {
       const startTime = Date.parse(publication.startDate)
-      return dateFormat(new Date(startTime + progressTime * 1000))
+
+      // Malformed startDate would otherwise render "(NaN/NaN/NaN ...)".
+      if (Number.isFinite(startTime)) {
+        return dateFormat(new Date(startTime + progressTime * 1000))
+      }
     }
 
     return timeFormat(progressTime)
@@ -271,6 +297,9 @@
 
     updateClock()
 
+    // ponytail: bound to this progressBar node; if YT rebuilds the player DOM
+    // mid-video the clock freezes until the next navigation. Watch for node
+    // disconnection if that ever matters in practice.
     progressObserver = new MutationObserver(updateClock)
     progressObserver.observe(progressBar, {
       attributes: true,
@@ -292,7 +321,12 @@
   }
 
   document.addEventListener('yt-navigate-finish', (event) => {
-    const url = event.detail.endpoint.commandMetadata.webCommandMetadata.url
+    // Not every navigation event carries the full endpoint shape; fall back
+    // to location.href instead of throwing and killing the handler.
+    const url =
+      event?.detail?.endpoint?.commandMetadata?.webCommandMetadata?.url ??
+      location.href
+
     handleNavigation(url)
   })
 

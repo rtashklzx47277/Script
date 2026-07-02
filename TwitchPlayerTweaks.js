@@ -1,12 +1,15 @@
 // ==UserScript==
 // @name        Twitch Player Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.1.0
+// @version     0.2.0
 // @description Hide clips and interactive extensions, add screenshot button, support wheel volume, and use native-like tooltips.
 // @author      Derek
+// @homepageURL https://github.com/rtashklzx47277/Script
+// @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchPlayerTweaks.js
+// @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchPlayerTweaks.js
 // @match       *://www.twitch.tv/*
 // @run-at      document-idle
-// @grant       none
+// @grant       GM_download
 // @noframes
 // ==/UserScript==
 
@@ -14,16 +17,12 @@
   'use strict'
 
   const PLAYER_SELECTOR = '[data-a-target="video-player"]'
+  // data-a-target is Twitch's stable test hook and is locale-independent,
+  // unlike the translated aria-label.
   const THEATER_BUTTON_SELECTOR =
-    'button[aria-label^="劇院模式"], button[aria-label^="Theater Mode"]'
+    'button[data-a-target="player-theatre-mode-button"]'
   const VOLUME_SLIDER_SELECTOR =
     'input[data-a-target="player-volume-slider"]'
-
-  const RELEVANT_SELECTOR = [
-    PLAYER_SELECTOR,
-    THEATER_BUTTON_SELECTOR,
-    VOLUME_SLIDER_SELECTOR,
-  ].join(', ')
 
   const VOLUME_STEP = 0.05
   const VOLUME_BAR_DURATION = 3000
@@ -43,6 +42,7 @@
   }
 
   addStyle(`
+    button[data-a-target="player-clip-button"],
     button[aria-label^="剪輯"],
     button[aria-label^="Clip"] {
       display: none !important;
@@ -55,7 +55,7 @@
       display: none !important;
     }
 
-    #twitch-player-tweaks-volume-bar {
+    .twitch-player-tweaks-volume-bar {
       position: absolute;
       top: 0;
       left: 0;
@@ -72,8 +72,18 @@
       transition: opacity 0.12s ease;
     }
 
-    #twitch-player-tweaks-volume-bar[data-visible="true"] {
+    .twitch-player-tweaks-volume-bar[data-visible="true"] {
       opacity: 0.95;
+    }
+
+    button[data-twitch-player-tweaks="screenshot"] {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    button[data-twitch-player-tweaks="screenshot"] svg {
+      fill: currentColor;
     }
 
     .twitch-player-tweaks-tooltip {
@@ -120,12 +130,14 @@
     setter?.call(input, value)
   }
 
+  // Class instead of id: multiple players (squad / mini player) each get
+  // their own bar without producing duplicate ids in the document.
   const getVolumeBar = (player) => {
-    let bar = $('#twitch-player-tweaks-volume-bar', player)
+    let bar = $('.twitch-player-tweaks-volume-bar', player)
 
     if (!bar) {
       bar = document.createElement('div')
-      bar.id = 'twitch-player-tweaks-volume-bar'
+      bar.className = 'twitch-player-tweaks-volume-bar'
       bar.dataset.visible = 'false'
       player.appendChild(bar)
     }
@@ -256,8 +268,12 @@
   }
 
   const getScreenshotFileName = () => {
+    const segments = location.pathname.split('/').filter(Boolean)
+    // On non-channel pages (e.g. /videos/<id>) the first segment isn't a
+    // channel name; fall back to a generic prefix.
     const channel =
-      location.pathname.split('/').filter(Boolean)[0] || 'twitch'
+      (['videos', 'directory'].includes(segments[0]) ? '' : segments[0]) ||
+      'twitch'
     const now = new Date()
 
     const stamp = [
@@ -284,36 +300,54 @@
     canvas.height = video.videoHeight
     context.drawImage(video, 0, 0)
 
+    const fileName = `ScreenShot/${getScreenshotFileName()}`
+
     canvas.toBlob((blob) => {
       if (!blob) return
 
-      const url = URL.createObjectURL(blob)
-      const link = document.createElement('a')
+      const objectUrl = URL.createObjectURL(blob)
+      const revokeObjectUrl = () => URL.revokeObjectURL(objectUrl)
+      const downloadFallback = () => {
+        revokeObjectUrl()
 
-      link.href = url
-      link.download = getScreenshotFileName()
-      link.click()
+        GM_download({
+          url: canvas.toDataURL('image/png'),
+          name: fileName,
+        })
+      }
 
-      URL.revokeObjectURL(url)
+      try {
+        GM_download({
+          url: objectUrl,
+          name: fileName,
+          onload: revokeObjectUrl,
+          onerror: downloadFallback,
+          ontimeout: downloadFallback,
+        })
+      } catch (_) {
+        downloadFallback()
+      }
     }, 'image/png')
   }
 
   const createScreenshotButton = (theaterButton, player) => {
+    // Clone to inherit Twitch's current button classes at runtime (kept fresh
+    // by Twitch itself), but strip Twitch's behavioral hook so its own code
+    // never targets our button as the theater button.
     const button = theaterButton.cloneNode(false)
 
     button.dataset.twitchPlayerTweaks = 'screenshot'
     button.setAttribute('aria-label', '截圖')
     button.removeAttribute('title')
     button.removeAttribute('aria-haspopup')
+    button.removeAttribute('data-a-target')
 
+    // Bare SVG + own CSS instead of Twitch's build-hashed wrapper classes,
+    // which change on every redeploy.
     button.innerHTML = `
-      <div class="ButtonIconFigure-sc-1emm8lf-0 lnTwMD">
-        <div class="ScSvgWrapper-sc-wkgzod-0 kccyMt tw-svg">
-          <svg width="24" height="24" viewBox="0 0 24 24" focusable="false" aria-hidden="true" role="presentation">
-            <path d="M9 4 7.5 6H5a3 3 0 0 0-3 3v8a3 3 0 0 0 3 3h14a3 3 0 0 0 3-3V9a3 3 0 0 0-3-3h-2.5L15 4H9Zm3 4a5 5 0 1 1 0 10a5 5 0 0 1 0-10Zm0 2a3 3 0 1 0 0 6a3 3 0 0 0 0-6Z"></path>
-          </svg>
-        </div>
-      </div>
+      <svg width="24" height="24" viewBox="0 0 24 24" focusable="false" aria-hidden="true" role="presentation">
+        <path d="M9 4 7.5 6H5a3 3 0 0 0-3 3v8a3 3 0 0 0 3 3h14a3 3 0 0 0 3-3V9a3 3 0 0 0-3-3h-2.5L15 4H9Zm3 4a5 5 0 1 1 0 10a5 5 0 0 1 0-10Zm0 2a3 3 0 1 0 0 6a3 3 0 0 0 0-6Z"></path>
+      </svg>
     `
 
     button.addEventListener('click', () => takeScreenshot(player))
@@ -353,6 +387,8 @@
       const screenshotButtonWrapper = theaterButtonWrapper.cloneNode(false)
       const screenshotButton = createScreenshotButton(theaterButton, player)
 
+      screenshotSlot.removeAttribute('data-a-target')
+      screenshotButtonWrapper.removeAttribute('data-a-target')
       screenshotSlot.dataset.twitchPlayerTweaksSlot = 'screenshot'
 
       screenshotButtonWrapper.appendChild(screenshotButton)
@@ -368,30 +404,29 @@
     }
   }
 
-  let refreshQueued = false
+  // ponytail: throttle to ~4/s instead of per-frame, and let the cheap,
+  // idempotent refresh() do the selector matching once — rather than running a
+  // deep querySelector on every added node during Twitch's constant DOM churn.
+  const REFRESH_INTERVAL = 250
+  let refreshTimer = 0
+  let lastRefresh = 0
 
   const scheduleRefresh = () => {
-    if (refreshQueued) return
+    if (refreshTimer) return
 
-    refreshQueued = true
-    requestAnimationFrame(() => {
-      refreshQueued = false
+    const wait = Math.max(0, REFRESH_INTERVAL - (Date.now() - lastRefresh))
+    refreshTimer = setTimeout(() => {
+      refreshTimer = 0
+      lastRefresh = Date.now()
       refresh()
-    })
+    }, wait)
   }
 
   const observer = new MutationObserver((mutations) => {
     for (const mutation of mutations) {
-      for (const node of mutation.addedNodes) {
-        if (!(node instanceof Element)) continue
-
-        if (
-          node.matches(RELEVANT_SELECTOR) ||
-          node.querySelector(RELEVANT_SELECTOR)
-        ) {
-          scheduleRefresh()
-          return
-        }
+      if (mutation.addedNodes.length) {
+        scheduleRefresh()
+        return
       }
     }
   })

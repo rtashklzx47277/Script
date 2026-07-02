@@ -1,9 +1,12 @@
 // ==UserScript==
 // @name        YouTube Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.1.0
+// @version     0.2.0
 // @description Tweaks YouTube live chat layout, emoji copying, adds a reload button, and keeps latest chat followed unless you scroll up manually.
 // @author      Derek
+// @homepageURL https://github.com/rtashklzx47277/Script
+// @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.js
+// @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.js
 // @match       *://www.youtube.com/live_chat*
 // @match       *://www.youtube.com/live_chat_replay*
 // @run-at      document-start
@@ -21,7 +24,8 @@
   }
 
   const SVG_NS = 'http://www.w3.org/2000/svg'
-  const RELOAD_BUTTON_ID = 'reload-button'
+  // Prefixed to avoid colliding with any id YouTube may introduce.
+  const RELOAD_BUTTON_ID = 'yt-chat-tweaks-reload-button'
   const RELOAD_ICON_PATH =
     'M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-8 3.58-8 8s3.58 8 8 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z'
   const EMOJI_SELECTOR =
@@ -101,7 +105,7 @@
       margin-right: var(--yt-emoji-picker-category-margin-left) !important;
     }
 
-    #reload-button {
+    #yt-chat-tweaks-reload-button {
       display: inline-flex !important;
       align-items: center !important;
       justify-content: center !important;
@@ -119,15 +123,15 @@
       flex: none !important;
     }
 
-    #reload-button:hover {
+    #yt-chat-tweaks-reload-button:hover {
       background-color: rgba(255, 255, 255, 0.1) !important;
     }
 
-    #reload-button:active {
+    #yt-chat-tweaks-reload-button:active {
       background-color: rgba(255, 255, 255, 0.2) !important;
     }
 
-    #reload-button svg {
+    #yt-chat-tweaks-reload-button svg {
       fill: currentColor !important;
     }
   `)
@@ -239,25 +243,25 @@
   const copyEmoji = () => {
     const handleSelectionChange = debounce(() => {
       const selection = window.getSelection()
-      if (!selection || !selection.rangeCount) return
+      if (!selection || !selection.rangeCount || selection.isCollapsed) return
 
-      const cloneSelectedNode = selection.getRangeAt(0).cloneContents()
+      const range = selection.getRangeAt(0)
 
-      for (const img of cloneSelectedNode.querySelectorAll(EMOJI_SELECTOR)) {
-        if (!img.id) continue
+      // Walk the real nodes intersecting the selection instead of looking
+      // clones up by id: emoji ids repeat across messages and getElementById
+      // only ever returns the first occurrence.
+      for (const img of document.querySelectorAll(EMOJI_SELECTOR)) {
+        if (!range.intersectsNode(img)) continue
 
-        const originalImg = document.getElementById(img.id)
-        if (!originalImg || !document.contains(originalImg)) continue
-
-        const alt = originalImg.alt
-        const sharedTooltipText = originalImg.getAttribute('shared-tooltip-text')
+        const alt = img.alt
+        const sharedTooltipText = img.getAttribute('shared-tooltip-text')
 
         if (!alt || !sharedTooltipText || alt === sharedTooltipText) continue
 
-        originalImg.setAttribute('data-copy-processed', 'true')
+        img.setAttribute('data-copy-processed', 'true')
 
         if (sharedTooltipText.includes(alt)) {
-          originalImg.setAttribute('alt', sharedTooltipText)
+          img.setAttribute('alt', sharedTooltipText)
         }
       }
     }, 100)
@@ -276,15 +280,12 @@
     element.scrollHeight - element.scrollTop - element.clientHeight <= 4
 
   const isShowMoreVisible = () => {
-    if (!showMoreButton) return false
+    // Cheap attribute check first; getComputedStyle only when still needed.
+    if (!showMoreButton || showMoreButton.hasAttribute('disabled')) return false
 
     const style = getComputedStyle(showMoreButton)
 
-    return (
-      style.display !== 'none' &&
-      style.visibility !== 'hidden' &&
-      !showMoreButton.hasAttribute('disabled')
-    )
+    return style.display !== 'none' && style.visibility !== 'hidden'
   }
 
   const clickShowMore = () => {
@@ -309,6 +310,27 @@
     scrollToBottom()
   }
 
+  // Window/document-level handlers live outside bindAutoFollow so rebinding
+  // never stacks duplicates of them.
+  const handlePointerUp = () => {
+    if (!pointerScrolling) return
+
+    if (scroller) followLatest = isNearBottom(scroller)
+    pointerScrolling = false
+  }
+
+  const handlePointerCancel = () => {
+    pointerScrolling = false
+  }
+
+  const handleScrollKeys = (event) => {
+    if (isEditableTarget(event.target)) return
+
+    if (SCROLL_UP_KEYS.has(event.key)) {
+      followLatest = false
+    }
+  }
+
   const bindAutoFollow = () => {
     scroller = $(SELECTORS.scroller)
     items = $(SELECTORS.items)
@@ -330,27 +352,8 @@
       pointerScrolling = true
     })
 
-    window.addEventListener('pointerup', () => {
-      if (!pointerScrolling) return
-
-      followLatest = isNearBottom(scroller)
-      pointerScrolling = false
-    })
-
-    window.addEventListener('pointercancel', () => {
-      pointerScrolling = false
-    })
-
-    document.addEventListener('keydown', (event) => {
-      if (isEditableTarget(event.target)) return
-
-      if (SCROLL_UP_KEYS.has(event.key)) {
-        followLatest = false
-      }
-    })
-
-    scroller.addEventListener('scroll', () => {
-      if (isNearBottom(scroller)) {
+    scroller.addEventListener('scroll', (event) => {
+      if (isNearBottom(event.currentTarget)) {
         followLatest = true
       } else if (pointerScrolling) {
         followLatest = false
@@ -390,12 +393,26 @@
   }
 
   const setupAutoFollow = () => {
-    if (bindAutoFollow()) return
+    window.addEventListener('pointerup', handlePointerUp)
+    window.addEventListener('pointercancel', handlePointerCancel)
+    document.addEventListener('keydown', handleScrollKeys)
 
+    bindAutoFollow()
+
+    // YouTube can replace the chat internals wholesale (e.g. switching
+    // Top chat / Live chat), which strands listeners and observers on dead
+    // nodes. Keep watching and rebind whenever the bound nodes drop out of
+    // the document; this also covers the initial wait before chat renders.
     const observer = new MutationObserver(() => {
-      if (bindAutoFollow()) {
-        observer.disconnect()
+      if (
+        scroller?.isConnected &&
+        items?.isConnected &&
+        showMoreButton?.isConnected
+      ) {
+        return
       }
+
+      bindAutoFollow()
     })
 
     observer.observe(document.documentElement, {

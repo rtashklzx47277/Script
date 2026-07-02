@@ -1,11 +1,15 @@
 // ==UserScript==
 // @name        YouTube Player Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.1.0
-// @description Adds player controls, unlocks live DVR, extends long-stream rewind, and provides wheel volume control on YouTube videos.
+// @version     0.2.0
+// @description Adds player controls (screenshot, wheel speed/volume, live catch-up) and unlocks live DVR with extended rewind on YouTube.
 // @author      Derek
+// @homepageURL https://github.com/rtashklzx47277/Script
+// @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubePlayerTweaks.js
+// @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubePlayerTweaks.js
 // @match       *://www.youtube.com/*
 // @grant       GM_download
+// @grant       unsafeWindow
 // @run-at      document-start
 // @noframes
 // ==/UserScript==
@@ -13,21 +17,176 @@
 (() => {
   'use strict'
 
-  // Interop with other scripts that also hook playerResponse.
-  const playerResponseDescriptor =
-    Object.getOwnPropertyDescriptor(Object.prototype, 'playerResponse')
+  // ---- Live DVR unlock ---------------------------------------------------------------
+  // Make DVR-disabled live streams seekable and widen the rewind window to 7 days, by
+  // patching the player response on its two real delivery paths (the inline global and
+  // JSON.parse) plus the rewind-cap flag inside ytcfg. We deliberately do NOT define
+  // Object.prototype.playerResponse: that makes `'playerResponse' in <any object>` true
+  // and breaks YouTube's comment / share panels. unsafeWindow is required because this
+  // script is sandboxed (it holds a @grant), so page globals aren't on our own `window`.
+  const pageWindow =
+    (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window)
 
-  const playerResponseGetter =
-    playerResponseDescriptor?.get ??
-    function () {
-      return this[Symbol.for('YouTubePlayerTweaks')]
+  const MAX_DVR_SECONDS = 43200 * 14
+  const DVR_WINDOW_FLAG = 'html5_max_live_dvr_window_plus_margin_secs'
+
+  const streamRunningOver12h = (microformat) => {
+    const live = microformat?.playerMicroformatRenderer?.liveBroadcastDetails
+    if (!live?.startTimestamp) return false
+    const startTime = Date.parse(live.startTimestamp)
+    return Number.isFinite(startTime) && (Date.now() - startTime) / 1000 > 43200
+  }
+
+  const modifyPlayerResponse = (response) => {
+    const { streamingData, videoDetails, playerConfig, microformat } = response
+
+    // Only live streams have DVR; leave normal videos and finished VODs alone.
+    if (!videoDetails || !videoDetails.isLive) return
+
+    videoDetails.isLiveDvrEnabled = true
+
+    const mediaCommonConfig = playerConfig?.mediaCommonConfig
+    if (mediaCommonConfig) {
+      mediaCommonConfig.useServerDrivenAbr = false
+      if (mediaCommonConfig.serverPlaybackStartConfig) {
+        mediaCommonConfig.serverPlaybackStartConfig.enable = false
+      }
     }
 
-  const playerResponseSetter =
-    playerResponseDescriptor?.set ??
-    function (value) {
-      this[Symbol.for('YouTubePlayerTweaks')] = value
+    if (streamingData) {
+      if (
+        streamingData.serverAbrStreamingUrl &&
+        (streamingData.hlsManifestUrl || streamingData.dashManifestUrl)
+      ) {
+        delete streamingData.serverAbrStreamingUrl
+      }
+
+      if (
+        Array.isArray(streamingData.adaptiveFormats) &&
+        streamRunningOver12h(microformat)
+      ) {
+        for (const format of streamingData.adaptiveFormats) {
+          format.maxDvrDurationSec = MAX_DVR_SECONDS
+        }
+      }
     }
+  }
+
+  const patchResponse = (data) => {
+    if (!data || typeof data !== 'object') return false
+    if (data.videoDetails) modifyPlayerResponse(data)
+    else if (data.playerResponse?.videoDetails) modifyPlayerResponse(data.playerResponse)
+    else return false
+    return true
+  }
+
+  // Source 1: the inline `ytInitialPlayerResponse` on first load. Intercept once, then
+  // release the global so uBO and other scriptlets can keep editing it normally.
+  const initialDescriptor =
+    Object.getOwnPropertyDescriptor(pageWindow, 'ytInitialPlayerResponse')
+  const previousInitialSetter = initialDescriptor?.set
+  let initialResponse = pageWindow.ytInitialPlayerResponse
+
+  if (!patchResponse(initialResponse)) {
+    try {
+      Object.defineProperty(pageWindow, 'ytInitialPlayerResponse', {
+        configurable: true,
+        get() {
+          return initialResponse
+        },
+        set(value) {
+          previousInitialSetter?.call(this, value)
+          initialResponse = value
+          if (patchResponse(value)) {
+            Object.defineProperty(pageWindow, 'ytInitialPlayerResponse', {
+              configurable: true,
+              writable: true,
+              value,
+            })
+          }
+        },
+      })
+    } catch (_) {
+      patchResponse(pageWindow.ytInitialPlayerResponse)
+    }
+  }
+
+  // Source 2: player responses fetched on later in-site navigations pass through JSON.parse.
+  const nativeJsonParse = pageWindow.JSON.parse
+  pageWindow.JSON.parse = function (...args) {
+    const data = nativeJsonParse.apply(this, args)
+    try {
+      patchResponse(data)
+    } catch (_) {
+      // Never let our hook break the page.
+    }
+    return data
+  }
+
+  // Lift the ~13h rewind cap: the flag lives in a serialized "key=value&..." string inside
+  // ytcfg's per-player config, which the player parses — rewrite it before that happens.
+  // Track patched configs individually (no global "done" flag), so player
+  // configs registered later (miniplayer, inline preview) still get patched.
+  const patchedPlayerConfigs = new WeakSet()
+
+  const liftDvrCap = (ytcfg) => {
+    const store = typeof ytcfg.d === 'function' && ytcfg.d()
+    const players = store?.WEB_PLAYER_CONTEXT_CONFIGS
+    if (!players) return
+
+    for (const id in players) {
+      const config = players[id]
+      if (
+        typeof config?.serializedExperimentFlags !== 'string' ||
+        patchedPlayerConfigs.has(config)
+      ) {
+        continue
+      }
+
+      config.serializedExperimentFlags = config.serializedExperimentFlags.replace(
+        new RegExp(`${DVR_WINDOW_FLAG}=[\\d.]+`),
+        `${DVR_WINDOW_FLAG}=${MAX_DVR_SECONDS}`
+      )
+      patchedPlayerConfigs.add(config)
+    }
+  }
+
+  const hookYtcfg = (ytcfg) => {
+    if (!ytcfg || ytcfg.__dvrHooked) return ytcfg
+    ytcfg.__dvrHooked = true
+
+    const nativeSet = ytcfg.set
+    if (typeof nativeSet === 'function') {
+      ytcfg.set = function (...args) {
+        const result = nativeSet.apply(this, args)
+        try {
+          liftDvrCap(ytcfg)
+        } catch (_) {}
+        return result
+      }
+    }
+
+    try {
+      liftDvrCap(ytcfg)
+    } catch (_) {}
+    return ytcfg
+  }
+
+  // ytcfg is created by an inline page script that runs after us; intercept its creation.
+  let ytcfgRef = hookYtcfg(pageWindow.ytcfg)
+  try {
+    Object.defineProperty(pageWindow, 'ytcfg', {
+      configurable: true,
+      get() {
+        return ytcfgRef
+      },
+      set(value) {
+        ytcfgRef = hookYtcfg(value)
+      },
+    })
+  } catch (_) {
+    // Already present and non-configurable — handled by the direct hook above.
+  }
 
   const $ = (element) => document.querySelector(element)
   const addStyle = (css) => {
@@ -44,9 +203,6 @@
   const LIVE_CATCHUP_RATE = 1.5
   const LIVE_CATCHUP_INTERVAL = 250
   const PLAYBACK_RATE_RESTORE_DELAYS = [100, 500, 1000]
-  const DEFAULT_MAX_DVR_SECONDS = 43200
-  const EXTENDED_MAX_DVR_SECONDS = DEFAULT_MAX_DVR_SECONDS * 14
-  const LIVE_DVR_WINDOW_FLAG = 'html5_max_live_dvr_window_plus_margin_secs'
 
   let container
   let sizeBtn
@@ -64,7 +220,6 @@
   let liveCatchupTimer = 0
   let liveCatchupPreviousRate = null
   let playbackRateRestoreToken = 0
-  let pageController = null
 
   const data = {
     svg: {
@@ -320,87 +475,6 @@
     }, 'image/png')
   }
 
-  const isObject = (value) =>
-    value !== null &&
-    typeof value === 'object'
-
-  const getKeyByPropName = (object, propName) =>
-    isObject(object)
-      ? Object.keys(object).find((key) => object[key]?.[propName])
-      : undefined
-
-  const disableServerDrivenPlayback = (playerConfig, streamingData) => {
-    const mediaCommonConfig = playerConfig?.mediaCommonConfig
-
-    if (isObject(mediaCommonConfig)) {
-      mediaCommonConfig.useServerDrivenAbr = false
-
-      if (isObject(mediaCommonConfig.serverPlaybackStartConfig)) {
-        mediaCommonConfig.serverPlaybackStartConfig.enable = false
-      }
-    }
-
-    if (
-      isObject(streamingData) &&
-      streamingData.serverAbrStreamingUrl &&
-      (streamingData.hlsManifestUrl || streamingData.dashManifestUrl)
-    ) {
-      delete streamingData.serverAbrStreamingUrl
-    }
-  }
-
-  const enableLiveDvr = (response, owner) => {
-    if (!isObject(response)) return
-
-    const {
-      streamingData,
-      videoDetails,
-      playerConfig,
-      microformat,
-    } = response
-
-    if (!isObject(videoDetails) || !videoDetails.isLive) return
-
-    videoDetails.isLiveDvrEnabled = true
-    disableServerDrivenPlayback(playerConfig, streamingData)
-
-    if (!isObject(streamingData)) return
-
-    const playerMicroformat = microformat?.playerMicroformatRenderer
-    const liveDetails = playerMicroformat?.liveBroadcastDetails
-
-    if (!isObject(liveDetails) || !liveDetails.startTimestamp) return
-
-    const startTime = Date.parse(liveDetails.startTimestamp)
-    if (!Number.isFinite(startTime)) return
-
-    const durationSeconds = Math.floor((Date.now() - startTime) / 1000)
-    if (durationSeconds <= DEFAULT_MAX_DVR_SECONDS) return
-
-    if (Array.isArray(streamingData.adaptiveFormats)) {
-      for (const format of streamingData.adaptiveFormats) {
-        format.maxDvrDurationSec = EXTENDED_MAX_DVR_SECONDS
-      }
-    }
-
-    const configKey = getKeyByPropName(owner, 'experiments')
-    const flags = configKey && owner[configKey]?.experiments?.flags
-
-    if (isObject(flags)) {
-      flags[LIVE_DVR_WINDOW_FLAG] = EXTENDED_MAX_DVR_SECONDS
-    }
-  }
-
-  Object.defineProperty(Object.prototype, 'playerResponse', {
-    set(value) {
-      enableLiveDvr(value, this)
-      playerResponseSetter.call(this, value)
-    },
-    get() {
-      return playerResponseGetter.call(this)
-    },
-    configurable: true,
-  })
 
   const isLivePlayback = () =>
     Boolean(moviePlayer?.getVideoData?.()?.isLive)
@@ -528,7 +602,11 @@
       return
     }
 
-    setPlaybackRate(LIVE_CATCHUP_RATE)
+    // Only touch the player API when the rate actually drifted, instead of
+    // re-issuing setPlaybackRate 4x per second.
+    if (Number(videoPlayer.playbackRate) !== LIVE_CATCHUP_RATE) {
+      setPlaybackRate(LIVE_CATCHUP_RATE)
+    }
   }
 
   const toggleLiveCatchup = () => {
@@ -724,7 +802,7 @@
 
   const handleKeydown = (event) => {
     if (
-      event.key.toLowerCase() === SCREENSHOT_KEY &&
+      event.key?.toLowerCase() === SCREENSHOT_KEY &&
       !event.altKey &&
       !event.ctrlKey &&
       !event.metaKey &&
@@ -774,12 +852,12 @@
     })
   }
 
-  const main = async () => {
+  const main = async (token) => {
     const ready = await waitElements()
-    if (!ready) return null
+    if (!ready || token !== navigationToken) return null
 
-    pageController = new AbortController()
-    const { signal } = pageController
+    const controller = new AbortController()
+    const { signal } = controller
 
     floatingBar = getFloatingBar()
     tooltip = getTooltip()
@@ -787,7 +865,10 @@
     const buttons = ensureButtons()
     bindButtonEvents(buttons, signal)
 
-    document.addEventListener('wheel', handleWheelCapture, {
+    // Scoped to the player (not document) so page scrolling keeps the
+    // browser's fast path; non-passive is still needed to preventDefault
+    // over the video area.
+    moviePlayer.addEventListener('wheel', handleWheelCapture, {
       capture: true,
       passive: false,
       signal,
@@ -797,21 +878,33 @@
 
     return () => {
       stopLiveCatchup('', true)
-      pageController?.abort()
-      pageController = null
+      controller.abort()
       hideTooltip()
     }
   }
 
   let cleanup = null
+  let navigationToken = 0
 
+  // yt-navigate-finish also fires on the initial page load, so runs can
+  // overlap while main() awaits; the token makes the newest run win and
+  // disposes stale ones instead of leaking their listeners.
   const handleNavigation = async () => {
+    const token = ++navigationToken
+
     cleanup?.()
     cleanup = null
 
-    if (isWatchPage()) {
-      cleanup = await main()
+    if (!isWatchPage()) return
+
+    const dispose = await main(token)
+
+    if (token !== navigationToken) {
+      dispose?.()
+      return
     }
+
+    cleanup = dispose
   }
 
   document.addEventListener('yt-navigate-finish', handleNavigation)

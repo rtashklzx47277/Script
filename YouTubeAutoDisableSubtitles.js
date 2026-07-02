@@ -1,9 +1,12 @@
 // ==UserScript==
 // @name        YouTube Auto Disable Subtitles
 // @namespace   https://tampermonkey.net/
-// @version     0.1.0
+// @version     0.2.0
 // @description Automatically turns off subtitles on YouTube watch and live pages.
 // @author      Derek
+// @homepageURL https://github.com/rtashklzx47277/Script
+// @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeAutoDisableSubtitles.js
+// @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeAutoDisableSubtitles.js
 // @match       *://www.youtube.com/*
 // @run-at      document-idle
 // @grant       none
@@ -19,6 +22,7 @@
   const MAX_WAIT = 5000
 
   let cleanup = null
+  let navigationToken = 0
 
   const isWatchPage = () =>
     location.pathname === '/watch' ||
@@ -70,9 +74,9 @@
     return true
   }
 
-  const main = async () => {
+  const main = async (token) => {
     const moviePlayer = await waitForMoviePlayer()
-    if (!moviePlayer) return null
+    if (!moviePlayer || token !== navigationToken) return null
 
     if (disableSubtitlesIfNeeded(moviePlayer)) {
       return null
@@ -104,13 +108,25 @@
     return stop
   }
 
+  // yt-navigate-finish also fires on the initial page load, so runs can
+  // overlap while main() awaits; the token makes the newest run win and
+  // disposes stale ones instead of losing their cleanup.
   const run = async () => {
+    const token = ++navigationToken
+
     cleanup?.()
     cleanup = null
 
-    if (isWatchPage()) {
-      cleanup = await main()
+    if (!isWatchPage()) return
+
+    const stop = await main(token)
+
+    if (token !== navigationToken) {
+      stop?.()
+      return
     }
+
+    cleanup = stop
   }
 
   document.addEventListener('yt-navigate-finish', run)

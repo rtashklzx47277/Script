@@ -1,2 +1,6 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Keep sources LF everywhere so Windows checkouts stop flip-flopping line endings
+*.js text eol=lf
+*.md text eol=lf
