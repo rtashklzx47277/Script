@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Live Layout
 // @namespace   https://tampermonkey.net/
-// @version     0.2.1
+// @version     0.2.2
 // @description Keeps normal videos untouched, expands theater mode without chat, and uses a 75/25 theater layout for videos with chat.
 // @author      Derek
 // @match       *://www.youtube.com/*
@@ -432,6 +432,13 @@
       attributeFilter: ['theater', 'collapsed']
     })
 
+    // #chat can be inserted late and already expanded — a childList change
+    // that produces no 'collapsed'/'theater' attribute mutation, so nothing
+    // above fires and the layout stays stuck (theater-fill with the chat
+    // overlapping the video). A 1s heartbeat re-runs the cheap, converging
+    // syncLayout as a catch-all for every missed trigger.
+    const heartbeat = setInterval(queueLayoutSync, 1000)
+
     const onResize = queueLayoutSync
 
     const onLoadedMetadata = queueLayoutSync
@@ -442,6 +449,7 @@
 
     return () => {
       observer.disconnect()
+      clearInterval(heartbeat)
       document.removeEventListener('fullscreenchange', queueLayoutSync)
       window.removeEventListener('resize', onResize)
       video.removeEventListener('loadedmetadata', onLoadedMetadata)
