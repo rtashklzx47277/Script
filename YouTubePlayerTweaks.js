@@ -419,7 +419,7 @@
     if (!videoPlayer || !videoPlayer.videoWidth || !videoPlayer.videoHeight) return
 
     const canvas = document.createElement('canvas')
-    const context = canvas.getContext('2d')
+    const context = canvas.getContext('2d', { alpha: false })
 
     canvas.width = videoPlayer.videoWidth
     canvas.height = videoPlayer.videoHeight
@@ -438,24 +438,31 @@
     const fileName =
       `${rawTitle} - ${timeFormat(currentTime)}`.replace(/[\/\\:*?"<>|]/g, '_')
 
-    canvas.toBlob(async (blob) => {
-      if (!blob) return
+    // One PNG encode, shared by clipboard and download; both start immediately.
+    const blobPromise = new Promise((resolve) => canvas.toBlob(resolve, 'image/png'))
 
-      try {
-        await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })])
-      } catch (_) {
-        // Clipboard permission may be unavailable; downloading still works.
-      }
+    // Called inside the user gesture so the clipboard keeps its permission.
+    try {
+      navigator.clipboard
+        .write([new ClipboardItem({ 'image/png': blobPromise })])
+        .catch(() => {})
+    } catch (_) {
+      // Clipboard permission may be unavailable; downloading still works.
+    }
+
+    blobPromise.then((blob) => {
+      if (!blob) return
 
       const objectUrl = URL.createObjectURL(blob)
       const revokeObjectUrl = () => URL.revokeObjectURL(objectUrl)
+      // ponytail: anchor fallback loses the ScreenShot/ subfolder but never
+      // re-encodes; toDataURL froze the tab on 4K frames.
       const downloadFallback = () => {
-        revokeObjectUrl()
-
-        GM_download({
-          url: canvas.toDataURL('image/png'),
-          name: `ScreenShot/${fileName}.png`,
-        })
+        const link = document.createElement('a')
+        link.href = objectUrl
+        link.download = `${fileName}.png`
+        link.click()
+        setTimeout(revokeObjectUrl, 10000)
       }
 
       try {
@@ -469,7 +476,7 @@
       } catch (_) {
         downloadFallback()
       }
-    }, 'image/png')
+    })
   }
 
 
