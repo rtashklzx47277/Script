@@ -2,6 +2,8 @@
 // @name        YouTube Auto Disable Subtitles
 // @namespace   https://tampermonkey.net/
 // @version     0.2.0
+// @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeAutoDisableSubtitles.js
+// @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeAutoDisableSubtitles.js
 // @description Automatically turns off subtitles on YouTube watch and live pages.
 // @author      Derek
 // @match       *://www.youtube.com/*

@@ -2,6 +2,8 @@
 // @name        YouTube Channel Auto Pause
 // @namespace   https://tampermonkey.net/
 // @version     0.2.0
+// @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeChannelAutoPause.js
+// @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeChannelAutoPause.js
 // @description Automatically pauses autoplaying videos on YouTube channel pages.
 // @author      Derek
 // @match       *://www.youtube.com/*

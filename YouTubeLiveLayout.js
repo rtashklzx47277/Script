@@ -1,8 +1,10 @@
 // ==UserScript==
 // @name        YouTube Live Layout
 // @namespace   https://tampermonkey.net/
-// @version     0.2.2
-// @description Keeps normal videos untouched, expands theater mode without chat, and uses a 75/25 theater layout for videos with chat.
+// @version     0.2.5
+// @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveLayout.js
+// @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveLayout.js
+// @description Keeps normal videos untouched and uses responsive theater layouts for live videos, placing chat below the player in narrow windows.
 // @author      Derek
 // @match       *://www.youtube.com/*
 // @grant       none
@@ -17,6 +19,8 @@
   const SECONDARY_RATIO = 1 - PRIMARY_RATIO
   const PRIMARY_WIDTH = `${PRIMARY_RATIO * 100}vw`
   const SECONDARY_WIDTH = `${SECONDARY_RATIO * 100}vw`
+  const MIN_SIDE_CHAT_WIDTH = 400
+  const MAX_STACKED_VIEWPORT_RATIO = 0.75
   const FALLBACK_ASPECT_RATIO = 16 / 9
   const AUTO_THEATER_WINDOW = 5000
 
@@ -183,6 +187,59 @@
     }
   `
 
+  const stackedChatTheaterCSS = `
+    #full-bleed-container,
+    #player-full-bleed-container,
+    #movie_player {
+      width: 100vw !important;
+      min-width: 100vw !important;
+      max-width: 100vw !important;
+    }
+
+    #columns {
+      position: relative !important;
+      display: block !important;
+      width: 100vw !important;
+      min-width: 100vw !important;
+      max-width: 100vw !important;
+      padding-top: clamp(360px, 70vh, 720px) !important;
+    }
+
+    #columns > #secondary {
+      position: static !important;
+      width: 100% !important;
+      min-width: 0 !important;
+      max-width: 100% !important;
+      margin: 0 !important;
+      padding: 0 !important;
+    }
+
+    #columns > #secondary > #secondary-inner,
+    #columns > #secondary #chat-container {
+      position: static !important;
+      width: 100% !important;
+      min-width: 0 !important;
+      max-width: 100% !important;
+    }
+
+    #chat {
+      position: absolute !important;
+      inset: 0 auto auto 0 !important;
+      width: 100% !important;
+      min-width: 100% !important;
+      max-width: 100% !important;
+      height: clamp(360px, 70vh, 720px) !important;
+      min-height: 360px !important;
+      margin: 0 !important;
+      box-sizing: border-box !important;
+    }
+
+    .ytp-chrome-bottom,
+    .ytp-progress-bar-container {
+      min-width: calc(100vw - 24px) !important;
+    }
+  `
+
   const fullscreenCSS = `
     #masthead-container,
     #chat-container,
@@ -237,8 +294,14 @@
     return FALLBACK_ASPECT_RATIO
   }
 
-  const updateChatTheaterMetrics = () => {
-    const width = window.innerWidth * PRIMARY_RATIO
+  // Display scaling can make a maximized viewport look narrow in CSS pixels.
+  // Edge split screen keeps the full screen width while shrinking each pane.
+  const shouldStackChat = () =>
+    window.innerWidth * SECONDARY_RATIO - scrollbarWidth < MIN_SIDE_CHAT_WIDTH &&
+    window.innerWidth < screen.availWidth * MAX_STACKED_VIEWPORT_RATIO
+
+  const updateChatTheaterMetrics = (stackChat) => {
+    const width = window.innerWidth * (stackChat ? 1 : PRIMARY_RATIO)
     const height = Math.min(
       window.innerHeight,
       width / getVideoAspectRatio()
@@ -373,6 +436,14 @@
       window.scrollTo({ left: 0, top: window.scrollY })
     }
 
+    if (layout === 'chat-theater-stacked') {
+      setStyle(
+        'yt-chat-theater',
+        `${chatTheaterCSS}\n${stackedChatTheaterCSS}`
+      )
+      window.scrollTo({ left: 0, top: window.scrollY })
+    }
+
     if (layout === 'fullscreen') {
       setStyle('yt-video-only-fullscreen', fullscreenCSS)
     }
@@ -382,6 +453,8 @@
 
   const syncLayout = () => {
     collectElements()
+    if (!watchFlexy || !moviePlayer || !video) return
+
     maybeAutoSwitchToTheater()
 
     if (isFullscreen()) {
@@ -391,10 +464,12 @@
     }
 
     if (hasVisibleChat() && watchFlexy.theater) {
-      const metricsChanged = updateChatTheaterMetrics()
-      applyLayout('chat-theater')
+      const stackChat = shouldStackChat()
+      const layout = stackChat ? 'chat-theater-stacked' : 'chat-theater'
+      const metricsChanged = updateChatTheaterMetrics(stackChat)
+      applyLayout(layout)
 
-      if (metricsChanged && currentLayout === 'chat-theater') {
+      if (metricsChanged && currentLayout === layout) {
         dispatchResize()
       }
 
@@ -422,6 +497,7 @@
 
   const monitorLayout = () => {
     const observer = new MutationObserver(queueLayoutSync)
+    const monitoredVideo = video
 
     // ponytail: drop the childList firehose (fired on every comment/related-video
     // DOM change). Layout only reacts to the theater/collapsed attributes; subtree
@@ -445,14 +521,14 @@
 
     document.addEventListener('fullscreenchange', queueLayoutSync)
     window.addEventListener('resize', onResize)
-    video.addEventListener('loadedmetadata', onLoadedMetadata)
+    monitoredVideo.addEventListener('loadedmetadata', onLoadedMetadata)
 
     return () => {
       observer.disconnect()
       clearInterval(heartbeat)
       document.removeEventListener('fullscreenchange', queueLayoutSync)
       window.removeEventListener('resize', onResize)
-      video.removeEventListener('loadedmetadata', onLoadedMetadata)
+      monitoredVideo.removeEventListener('loadedmetadata', onLoadedMetadata)
 
       if (layoutSyncFrame) {
         cancelAnimationFrame(layoutSyncFrame)

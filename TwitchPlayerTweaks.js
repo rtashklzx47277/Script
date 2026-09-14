@@ -1,7 +1,9 @@
 // ==UserScript==
 // @name        Twitch Player Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.2.1
+// @version     0.2.2
+// @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchPlayerTweaks.js
+// @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchPlayerTweaks.js
 // @description Hide clips and interactive extensions, add screenshot button, support wheel volume, and use native-like tooltips.
 // @author      Derek
 // @match       *://www.twitch.tv/*
@@ -220,7 +222,7 @@
 
   const changeVolume = (event, player) => {
     const video = $('video', player)
-    if (!video) return
+    if (!video || event.ctrlKey || event.deltaY === 0) return
 
     event.preventDefault()
     event.stopPropagation()

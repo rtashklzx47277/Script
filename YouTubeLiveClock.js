@@ -1,7 +1,9 @@
 // ==UserScript==
 // @name        YouTube Live Clock
 // @namespace   https://tampermonkey.net/
-// @version     0.2.0
+// @version     0.2.1
+// @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveClock.js
+// @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveClock.js
 // @description Shows elapsed time on live streams and absolute clock time on live archives.
 // @author      Derek
 // @match       *://www.youtube.com/*
@@ -39,8 +41,6 @@
   ]
 
   let currentVideoId = null
-  let currentMicroformatScript = null
-  let currentMicroformatText = ''
   let timeContent
   let timeWrapper
   let progressBar
@@ -119,10 +119,21 @@
     return null
   }
 
-  const waitElements = ({
-    previousMicroformatScript,
-    previousMicroformatText,
-  }) => {
+  const parseMicroformat = (microformatScript, videoId) => {
+    try {
+      const data = JSON.parse(microformatScript?.textContent ?? '')
+      const embedUrl = new URL(data?.embedUrl, location.origin)
+      const embeddedVideoId = embedUrl.pathname.startsWith('/embed/')
+        ? embedUrl.pathname.split('/')[2]
+        : null
+
+      return embeddedVideoId === videoId ? data : null
+    } catch (_) {
+      return null
+    }
+  }
+
+  const waitElements = (videoId) => {
     return new Promise((resolve) => {
       const check = () => {
         timeContent = $('.ytp-chrome-bottom .ytp-time-contents')
@@ -131,21 +142,16 @@
 
         const microformatScript = $('#microformat script')
         const microformatText = microformatScript?.textContent ?? ''
+        const microformatData = parseMicroformat(microformatScript, videoId)
 
-        const microformatUpdated =
-          microformatScript &&
-          (
-            microformatScript !== previousMicroformatScript ||
-            microformatText !== previousMicroformatText
-          )
-
-        if (!timeContent || !timeWrapper || !progressBar || !microformatUpdated) {
+        if (!timeContent || !timeWrapper || !progressBar || !microformatData) {
           return null
         }
 
         return {
           microformatScript,
           microformatText,
+          microformatData,
         }
       }
 
@@ -157,8 +163,13 @@
       }
 
       let microformatObserver = null
+      let settled = false
+      let timeout = 0
 
       const finish = (result) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timeout)
         observer.disconnect()
         microformatObserver?.disconnect()
         resolve(result)
@@ -193,24 +204,18 @@
         })
       }
 
-      setTimeout(() => finish(null), 5000)
+      timeout = setTimeout(() => finish(null), 5000)
     })
   }
 
-  const getPublication = (microformatScript) => {
-    try {
-      const liveData = JSON.parse(microformatScript.textContent)
+  const getPublication = (microformatData) => {
+    const publications = Array.isArray(microformatData?.publication)
+      ? microformatData.publication
+      : microformatData?.publication
+        ? [microformatData.publication]
+        : []
 
-      const publications = Array.isArray(liveData?.publication)
-        ? liveData.publication
-        : liveData?.publication
-          ? [liveData.publication]
-          : []
-
-      return publications.find((item) => item?.startDate) ?? null
-    } catch (_) {
-      return null
-    }
+    return publications.find((item) => item?.startDate) ?? null
   }
 
   const getClock = (publication) => {
@@ -260,23 +265,15 @@
     if (currentVideoId === videoId && progressObserver) return
 
     const token = ++navigationToken
-    const previousMicroformatScript = currentMicroformatScript
-    const previousMicroformatText = currentMicroformatText
 
     currentVideoId = videoId
     cleanup()
 
-    const result = await waitElements({
-      previousMicroformatScript,
-      previousMicroformatText,
-    })
+    const result = await waitElements(videoId)
 
     if (!result || token !== navigationToken || videoId !== currentVideoId) return
 
-    currentMicroformatScript = result.microformatScript
-    currentMicroformatText = result.microformatText
-
-    const publication = getPublication(currentMicroformatScript)
+    const publication = getPublication(result.microformatData)
 
     if (!publication) {
       removeClocks()

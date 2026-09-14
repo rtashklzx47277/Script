@@ -1,7 +1,9 @@
 // ==UserScript==
 // @name        YouTube Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.2.1
+// @version     0.2.2
+// @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.js
+// @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.js
 // @description Tweaks YouTube live chat layout, emoji copying, adds a reload button, and keeps latest chat followed unless you scroll up manually.
 // @author      Derek
 // @match       *://www.youtube.com/live_chat*
@@ -305,12 +307,13 @@
     if (!scroller || scrollFramePending) return
 
     scrollFramePending = true
+    const targetScroller = scroller
 
     requestAnimationFrame(() => {
       scrollFramePending = false
 
-      if (scroller) {
-        scroller.scrollTop = scroller.scrollHeight
+      if (followLatest && scroller === targetScroller) {
+        targetScroller.scrollTop = targetScroller.scrollHeight
       }
     })
   }
@@ -432,10 +435,11 @@
 
   ;(async () => {
     const found = await waitHeaderElements()
-    if (!found) return
+    if (found) {
+      addReloadButton()
+      observeHeaderButtons()
+    }
 
-    addReloadButton()
-    observeHeaderButtons()
     copyEmoji()
     setupAutoFollow()
   })()

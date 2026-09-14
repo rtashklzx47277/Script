@@ -1,7 +1,9 @@
 // ==UserScript==
 // @name        YouTube Player Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.2.1
+// @version     0.2.4
+// @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubePlayerTweaks.js
+// @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubePlayerTweaks.js
 // @description Adds player controls (screenshot, wheel speed/volume, live catch-up) and unlocks live DVR with extended rewind on YouTube.
 // @author      Derek
 // @match       *://www.youtube.com/*
@@ -194,6 +196,7 @@
 
   const SVG_NS = 'http://www.w3.org/2000/svg'
   const SCREENSHOT_KEY = 's'
+  const SCREENSHOT_WORKER_TIMEOUT = 15000
   const TOOLTIP_VERTICAL_GAP = 22
   const FEEDBACK_DURATION = 3000
   const LIVE_CATCHUP_TARGET_BUFFER = 0.5
@@ -217,6 +220,11 @@
   let liveCatchupTimer = 0
   let liveCatchupPreviousRate = null
   let playbackRateRestoreToken = 0
+  let screenshotWorker = null
+  let screenshotWorkerAvailable = true
+  let screenshotWorkerJobId = 0
+  let screenshotInFlight = false
+  const screenshotWorkerJobs = new Map()
 
   const data = {
     svg: {
@@ -310,14 +318,12 @@
   const showFloatingBar = (timer, text) => {
     if (timer) clearTimeout(timer)
 
-    const textToRestore = persistentFloatingBarText
-
     floatingBar.textContent = text
     floatingBar.style.display = 'block'
 
     return setTimeout(() => {
-      if (textToRestore) {
-        floatingBar.textContent = textToRestore
+      if (persistentFloatingBarText) {
+        floatingBar.textContent = persistentFloatingBarText
         floatingBar.style.display = 'block'
         return
       }
@@ -415,15 +421,172 @@
     tooltip.dataset.visible = 'false'
   }
 
-  const screenShot = () => {
-    if (!videoPlayer || !videoPlayer.videoWidth || !videoPlayer.videoHeight) return
+  const stopScreenshotWorker = (error, disable = false) => {
+    screenshotWorker?.terminate()
+    screenshotWorker = null
+    if (disable) screenshotWorkerAvailable = false
 
+    for (const { reject, timer } of screenshotWorkerJobs.values()) {
+      clearTimeout(timer)
+      reject(error)
+    }
+    screenshotWorkerJobs.clear()
+  }
+
+  const getScreenshotWorker = () => {
+    if (screenshotWorker) return screenshotWorker
+
+    const workerSource = `
+      let canvas
+      let context
+      let queue = Promise.resolve()
+
+      const encode = async ({ id, frame, width, height }) => {
+        try {
+          try {
+            if (!canvas || canvas.width !== width || canvas.height !== height) {
+              canvas = new OffscreenCanvas(width, height)
+              context = canvas.getContext('2d', { alpha: false })
+            }
+            if (!context) throw new Error('Canvas 2D is unavailable')
+            context.drawImage(frame, 0, 0, width, height)
+          } finally {
+            frame.close()
+          }
+
+          const blob = await canvas.convertToBlob({ type: 'image/png' })
+          self.postMessage({ id, blob })
+        } catch (error) {
+          self.postMessage({ id, error: error?.message || 'PNG encode failed' })
+        }
+      }
+
+      self.onmessage = ({ data }) => {
+        queue = queue.then(() => encode(data))
+      }
+    `
+
+    const workerUrl = URL.createObjectURL(
+      new Blob([workerSource], { type: 'text/javascript' })
+    )
+
+    try {
+      const worker = new Worker(workerUrl)
+
+      worker.addEventListener('message', ({ data }) => {
+        const job = screenshotWorkerJobs.get(data.id)
+        if (!job) return
+
+        screenshotWorkerJobs.delete(data.id)
+        clearTimeout(job.timer)
+        if (data.blob) job.resolve(data.blob)
+        else job.reject(new Error(data.error || 'PNG encode failed'))
+      })
+
+      const handleWorkerError = () => {
+        if (screenshotWorker !== worker) return
+        stopScreenshotWorker(new Error('Screenshot worker failed'), true)
+      }
+      worker.addEventListener('error', handleWorkerError)
+      worker.addEventListener('messageerror', handleWorkerError)
+
+      screenshotWorker = worker
+      return worker
+    } catch (error) {
+      screenshotWorkerAvailable = false
+      throw error
+    } finally {
+      URL.revokeObjectURL(workerUrl)
+    }
+  }
+
+  const encodeScreenshotInWorker = (worker, frame, width, height) => {
+    // Worker startup can fail while the ImageBitmap fallback is still pending.
+    if (worker !== screenshotWorker) {
+      return Promise.reject(new Error('Screenshot worker is unavailable'))
+    }
+    const id = ++screenshotWorkerJobId
+
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        stopScreenshotWorker(new Error('Screenshot worker timed out'), true)
+      }, SCREENSHOT_WORKER_TIMEOUT)
+      screenshotWorkerJobs.set(id, { resolve, reject, timer })
+
+      try {
+        // VideoFrame serialization shares the underlying pixels. Keep our
+        // reference so a worker failure can still encode the clicked frame.
+        worker.postMessage({ id, frame, width, height })
+      } catch (error) {
+        screenshotWorkerJobs.delete(id)
+        clearTimeout(timer)
+        reject(error)
+      }
+    })
+  }
+
+  const encodeScreenshotOnMainThread = (source, width, height) => {
     const canvas = document.createElement('canvas')
+    canvas.width = width
+    canvas.height = height
     const context = canvas.getContext('2d', { alpha: false })
+    if (!context) throw new Error('Canvas 2D is unavailable')
+    context.drawImage(source, 0, 0, width, height)
 
-    canvas.width = videoPlayer.videoWidth
-    canvas.height = videoPlayer.videoHeight
-    context.drawImage(videoPlayer, 0, 0)
+    return new Promise((resolve, reject) => {
+      canvas.toBlob((blob) => {
+        if (blob) resolve(blob)
+        else reject(new Error('PNG encode failed'))
+      }, 'image/png')
+    })
+  }
+
+  const encodeScreenshot = async () => {
+    const source = videoPlayer
+    const width = source.videoWidth
+    const height = source.videoHeight
+    let frame
+
+    try {
+      if (
+        !screenshotWorkerAvailable ||
+        typeof Worker !== 'function' ||
+        typeof OffscreenCanvas !== 'function'
+      ) {
+        return encodeScreenshotOnMainThread(source, width, height)
+      }
+
+      // Start the worker before capture so its startup can overlap the work.
+      const worker = getScreenshotWorker()
+      if (typeof VideoFrame === 'function') {
+        try {
+          // Freeze the decoded frame synchronously, avoiding an intermediate
+          // ImageBitmap conversion on the UI thread.
+          frame = new VideoFrame(source)
+        } catch (_) {}
+      }
+      if (!frame) frame = await createImageBitmap(source)
+
+      return await encodeScreenshotInWorker(worker, frame, width, height)
+    } catch (_) {
+      return encodeScreenshotOnMainThread(frame || source, width, height)
+    } finally {
+      // The fallback draws synchronously before returning its PNG promise.
+      frame?.close()
+    }
+  }
+
+  const screenShot = () => {
+    if (
+      screenshotInFlight ||
+      !videoPlayer ||
+      !videoPlayer.videoWidth ||
+      !videoPlayer.videoHeight
+    ) {
+      return
+    }
+
+    screenshotInFlight = true
 
     const currentTime =
       Number(progressBar?.getAttribute('aria-valuenow')) ||
@@ -438,8 +601,11 @@
     const fileName =
       `${rawTitle} - ${timeFormat(currentTime)}`.replace(/[\/\\:*?"<>|]/g, '_')
 
-    // One PNG encode, shared by clipboard and download; both start immediately.
-    const blobPromise = new Promise((resolve) => canvas.toBlob(resolve, 'image/png'))
+    // Freeze the current frame, then draw and encode in the worker. One PNG
+    // is shared by clipboard and download, so neither path re-encodes it.
+    const blobPromise = encodeScreenshot().finally(() => {
+      screenshotInFlight = false
+    })
 
     // Called inside the user gesture so the clipboard keeps its permission.
     try {
@@ -475,6 +641,11 @@
         })
       } catch (_) {
         downloadFallback()
+      }
+    }).catch((error) => {
+      console.warn('[YouTube Player Tweaks] Screenshot failed:', error)
+      if (floatingBar?.isConnected) {
+        floatingBarTimer = showFloatingBar(floatingBarTimer, '截圖失敗，請再試一次')
       }
     })
   }
@@ -549,9 +720,21 @@
 
     setPlaybackRate(restoreRate)
 
+    const restoreNavigationToken = navigationToken
+    const restoreMoviePlayer = moviePlayer
+    const restoreVideoPlayer = videoPlayer
+
     for (const delay of PLAYBACK_RATE_RESTORE_DELAYS) {
       setTimeout(() => {
-        if (restoreToken !== playbackRateRestoreToken || liveCatchupTimer) return
+        if (
+          restoreToken !== playbackRateRestoreToken ||
+          restoreNavigationToken !== navigationToken ||
+          restoreMoviePlayer !== moviePlayer ||
+          restoreVideoPlayer !== videoPlayer ||
+          liveCatchupTimer
+        ) {
+          return
+        }
 
         setPlaybackRate(restoreRate)
       }, delay)
@@ -635,7 +818,7 @@
 
     updateLiveButtonState()
     runLiveCatchupStep()
-    showPersistentFloatingBar('追直播中')
+    if (liveCatchupTimer) showPersistentFloatingBar('追直播中')
   }
 
   const changeVolume = (event) => {
@@ -793,7 +976,7 @@
   }
 
   const handleWheelCapture = (event) => {
-    if (!container || !moviePlayer) return
+    if (!container || !moviePlayer || event.ctrlKey || event.deltaY === 0) return
 
     const target = event.target
     if (!(target instanceof Node)) return
@@ -811,6 +994,7 @@
       !event.ctrlKey &&
       !event.metaKey &&
       !event.shiftKey &&
+      !event.repeat &&
       !isEditableTarget(event.target)
     ) {
       event.preventDefault()
@@ -883,6 +1067,7 @@
 
     return () => {
       stopLiveCatchup('', true)
+      playbackRateRestoreToken++
       controller.abort()
       hideTooltip()
     }

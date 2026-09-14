@@ -2,6 +2,8 @@
 // @name        YouTube Default Max Quality
 // @namespace   https://tampermonkey.net/
 // @version     0.2.0
+// @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeDefaultMaxQuality.js
+// @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeDefaultMaxQuality.js
 // @description Sets the highest available playback quality on YouTube watch and live pages.
 // @author      Derek
 // @match       *://www.youtube.com/*
