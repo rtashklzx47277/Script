@@ -4,21 +4,21 @@
 
 ## 安裝
 
-瀏覽器安裝 [Tampermonkey](https://www.tampermonkey.net/) 後,點下方腳本連結即可安裝;各腳本彼此獨立,可只裝需要的。更新採手動。
+瀏覽器安裝 [Tampermonkey](https://www.tampermonkey.net/) 後,點下方腳本連結即可安裝;各腳本彼此獨立,可只裝需要的。安裝後由 Tampermonkey 自動檢查更新。
 
 ## 腳本清單
 
 | 腳本 | 對象 | 功能 |
 |---|---|---|
-| [YouTubePlayerTweaks](https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubePlayerTweaks.js) | YouTube | 播放器加截圖鍵(`S`)、滾輪調音量/播放速度、直播追平(1.5x 追到最低延遲);解鎖無 DVR 直播的回看,並將回看視窗放寬到 7 天 |
-| [YouTubeLiveClock](https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveClock.js) | YouTube | 直播顯示經過時間,直播存檔顯示當下時間點的絕對時刻 |
-| [YouTubeLiveLayout](https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveLayout.js) | YouTube | 一般影片不動;無聊天室的劇院模式滿版;有聊天室時使用響應式劇院版面,窄視窗將聊天室排在影片下方 |
-| [YouTubeLiveChatTweaks](https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.js) | YouTube 聊天室 | 版面精簡、表情複製帶完整名稱、重新載入按鈕、自動跟隨最新訊息(手動上捲時暫停) |
-| [YouTubeAutoDisableSubtitles](https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeAutoDisableSubtitles.js) | YouTube | 進入影片自動關閉字幕 |
-| [YouTubeDefaultMaxQuality](https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeDefaultMaxQuality.js) | YouTube | 自動切到最高畫質 |
-| [YouTubeChannelAutoPause](https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeChannelAutoPause.js) | YouTube | 頻道頁自動暫停自動播放的預告影片 |
-| [TwitchPlayerTweaks](https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchPlayerTweaks.js) | Twitch | 隱藏剪輯按鈕與互動擴充、截圖按鈕、滾輪調音量、原生風格 tooltip |
-| [pixiv](https://raw.githubusercontent.com/rtashklzx47277/Script/main/pixiv.js) | Pixiv | `jump.php` 跳轉頁直接前往目標網址 |
+| [YouTubePlayerTweaks](https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubePlayerTweaks.user.js) | YouTube | 播放器加截圖鍵(`S`)、滾輪調音量/播放速度、直播追平(1.5x 追到最低延遲);解鎖無 DVR 直播的回看,並將回看視窗放寬到 7 天 |
+| [YouTubeLiveClock](https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveClock.user.js) | YouTube | 直播顯示經過時間,直播存檔顯示當下時間點的絕對時刻 |
+| [YouTubeLiveLayout](https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveLayout.user.js) | YouTube | 一般影片不動;無聊天室的劇院模式滿版;有聊天室時使用響應式劇院版面,窄視窗將聊天室排在影片下方 |
+| [YouTubeLiveChatTweaks](https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js) | YouTube 聊天室 | 版面精簡、表情複製帶完整名稱、重新載入按鈕、自動跟隨最新訊息(手動上捲時暫停) |
+| [YouTubeAutoDisableSubtitles](https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeAutoDisableSubtitles.user.js) | YouTube | 進入影片自動關閉字幕 |
+| [YouTubeDefaultMaxQuality](https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeDefaultMaxQuality.user.js) | YouTube | 自動切到最高畫質 |
+| [YouTubeChannelAutoPause](https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeChannelAutoPause.user.js) | YouTube | 頻道頁自動暫停自動播放的預告影片 |
+| [TwitchPlayerTweaks](https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchPlayerTweaks.user.js) | Twitch | 隱藏剪輯按鈕與互動擴充、截圖按鈕、滾輪調音量、原生風格 tooltip |
+| [pixiv](https://raw.githubusercontent.com/rtashklzx47277/Script/main/pixiv.user.js) | Pixiv | `jump.php` 跳轉頁直接前往目標網址 |
 
 `Other/` 內另有幾支站點腳本,不納入版控。
 

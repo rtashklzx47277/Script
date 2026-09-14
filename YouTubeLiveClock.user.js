@@ -2,8 +2,8 @@
 // @name        YouTube Live Clock
 // @namespace   https://tampermonkey.net/
 // @version     0.2.1
-// @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveClock.js
-// @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveClock.js
+// @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveClock.user.js
+// @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveClock.user.js
 // @description Shows elapsed time on live streams and absolute clock time on live archives.
 // @author      Derek
 // @match       *://www.youtube.com/*

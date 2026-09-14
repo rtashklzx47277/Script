@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name          Pixiv Jump Directly
 // @version       0.2.1
-// @updateURL     https://raw.githubusercontent.com/rtashklzx47277/Script/main/pixiv.js
-// @downloadURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/pixiv.js
+// @updateURL     https://raw.githubusercontent.com/rtashklzx47277/Script/main/pixiv.user.js
+// @downloadURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/pixiv.user.js
 // @description   Pixiv Jump Directly
 // @author        Derek
 // @match         *://www.pixiv.net/jump.php?*

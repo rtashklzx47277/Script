@@ -2,8 +2,8 @@
 // @name        YouTube Player Tweaks
 // @namespace   https://tampermonkey.net/
 // @version     0.2.4
-// @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubePlayerTweaks.js
-// @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubePlayerTweaks.js
+// @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubePlayerTweaks.user.js
+// @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubePlayerTweaks.user.js
 // @description Adds player controls (screenshot, wheel speed/volume, live catch-up) and unlocks live DVR with extended rewind on YouTube.
 // @author      Derek
 // @match       *://www.youtube.com/*

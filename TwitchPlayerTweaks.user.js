@@ -2,8 +2,8 @@
 // @name        Twitch Player Tweaks
 // @namespace   https://tampermonkey.net/
 // @version     0.2.2
-// @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchPlayerTweaks.js
-// @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchPlayerTweaks.js
+// @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchPlayerTweaks.user.js
+// @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchPlayerTweaks.user.js
 // @description Hide clips and interactive extensions, add screenshot button, support wheel volume, and use native-like tooltips.
 // @author      Derek
 // @match       *://www.twitch.tv/*

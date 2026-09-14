@@ -2,8 +2,8 @@
 // @name        YouTube Live Layout
 // @namespace   https://tampermonkey.net/
 // @version     0.2.5
-// @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveLayout.js
-// @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveLayout.js
+// @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveLayout.user.js
+// @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveLayout.user.js
 // @description Keeps normal videos untouched and uses responsive theater layouts for live videos, placing chat below the player in narrow windows.
 // @author      Derek
 // @match       *://www.youtube.com/*

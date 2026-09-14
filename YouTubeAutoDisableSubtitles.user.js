@@ -1,10 +1,10 @@
 // ==UserScript==
-// @name        YouTube Default Max Quality
+// @name        YouTube Auto Disable Subtitles
 // @namespace   https://tampermonkey.net/
 // @version     0.2.0
-// @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeDefaultMaxQuality.js
-// @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeDefaultMaxQuality.js
-// @description Sets the highest available playback quality on YouTube watch and live pages.
+// @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeAutoDisableSubtitles.user.js
+// @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeAutoDisableSubtitles.user.js
+// @description Automatically turns off subtitles on YouTube watch and live pages.
 // @author      Derek
 // @match       *://www.youtube.com/*
 // @run-at      document-idle
@@ -57,32 +57,28 @@
       }, MAX_WAIT)
     })
 
+  const disableSubtitlesIfNeeded = (moviePlayer) => {
+    if (
+      typeof moviePlayer.isSubtitlesOn !== 'function' ||
+      typeof moviePlayer.toggleSubtitles !== 'function'
+    ) {
+      return false
+    }
+
+    if (!moviePlayer.isSubtitlesOn()) {
+      return false
+    }
+
+    moviePlayer.toggleSubtitles()
+    return true
+  }
+
   const main = async (token) => {
     const moviePlayer = await waitForMoviePlayer()
     if (!moviePlayer || token !== navigationToken) return null
 
-    // The first quality list can be incomplete (e.g. 4K often appears only
-    // after playback starts), so poll until MAX_WAIT and re-apply whenever a
-    // new top quality shows up, instead of stopping at the first success.
-    let appliedQuality = null
-
-    const applyMaxQuality = () => {
-      if (
-        typeof moviePlayer.getAvailableQualityLevels !== 'function' ||
-        typeof moviePlayer.setPlaybackQualityRange !== 'function'
-      ) {
-        return
-      }
-
-      const qualityLevels = moviePlayer.getAvailableQualityLevels()
-
-      if (!Array.isArray(qualityLevels) || qualityLevels.length === 0) return
-
-      const maxQuality = qualityLevels[0]
-      if (!maxQuality || maxQuality === appliedQuality) return
-
-      moviePlayer.setPlaybackQualityRange(maxQuality)
-      appliedQuality = maxQuality
+    if (disableSubtitlesIfNeeded(moviePlayer)) {
+      return null
     }
 
     let interval = 0
@@ -100,9 +96,12 @@
       }
     }
 
-    applyMaxQuality()
+    interval = setInterval(() => {
+      if (disableSubtitlesIfNeeded(moviePlayer)) {
+        stop()
+      }
+    }, CHECK_INTERVAL)
 
-    interval = setInterval(applyMaxQuality, CHECK_INTERVAL)
     timeout = setTimeout(stop, MAX_WAIT)
 
     return stop

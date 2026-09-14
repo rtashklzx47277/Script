@@ -2,8 +2,8 @@
 // @name        YouTube Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
 // @version     0.2.2
-// @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.js
-// @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.js
+// @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
+// @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @description Tweaks YouTube live chat layout, emoji copying, adds a reload button, and keeps latest chat followed unless you scroll up manually.
 // @author      Derek
 // @match       *://www.youtube.com/live_chat*
