@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Default Max Quality
 // @namespace   https://tampermonkey.net/
-// @version     0.2.0
+// @version     0.2.2
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeDefaultMaxQuality.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeDefaultMaxQuality.user.js
 // @description Sets the highest available playback quality on YouTube watch and live pages.
@@ -22,14 +22,30 @@
 
   let cleanup = null
   let navigationToken = 0
+  let pendingWaitCancel = null
 
   const isWatchPage = () =>
     location.pathname === '/watch' ||
     location.pathname.startsWith('/live/')
 
+  const findReadyPlayer = () => {
+    const player = $('#movie_player')
+    if (
+      typeof player?.getAvailableQualityLevels !== 'function' ||
+      typeof player?.setPlaybackQualityRange !== 'function'
+    ) return null
+
+    try {
+      const levels = player.getAvailableQualityLevels()
+      return Array.isArray(levels) && levels.length > 0 ? player : null
+    } catch (_) {
+      return null
+    }
+  }
+
   const waitForMoviePlayer = () =>
     new Promise((resolve) => {
-      const currentPlayer = $('#movie_player')
+      const currentPlayer = findReadyPlayer()
 
       if (currentPlayer) {
         resolve(currentPlayer)
@@ -37,24 +53,44 @@
       }
 
       const observer = new MutationObserver(() => {
-        const moviePlayer = $('#movie_player')
+        const moviePlayer = findReadyPlayer()
 
         if (!moviePlayer) return
 
-        observer.disconnect()
-        clearTimeout(timeout)
-        resolve(moviePlayer)
+        finish(moviePlayer)
       })
+
+      let fallbackTimer = 0
+      let pollTimer = 0
+      let settled = false
+      const cancel = () => finish(null)
+      const finish = (moviePlayer) => {
+        if (settled) return
+        settled = true
+        clearTimeout(fallbackTimer)
+        clearInterval(pollTimer)
+        observer.disconnect()
+        if (pendingWaitCancel === cancel) pendingWaitCancel = null
+        resolve(moviePlayer)
+      }
 
       observer.observe(document.documentElement, {
         childList: true,
         subtree: true,
       })
 
-      const timeout = setTimeout(() => {
+      pendingWaitCancel = cancel
+      // API readiness and the first quality list need not change the DOM.
+      const checkPlayer = () => {
+        const moviePlayer = findReadyPlayer()
+        if (moviePlayer) finish(moviePlayer)
+      }
+      pollTimer = setInterval(checkPlayer, CHECK_INTERVAL)
+      fallbackTimer = setTimeout(() => {
         observer.disconnect()
-        resolve(null)
-      }, MAX_WAIT)
+        clearInterval(pollTimer)
+        pollTimer = setInterval(checkPlayer, 1000)
+      }, 10000)
     })
 
   const main = async (token) => {
@@ -114,6 +150,7 @@
   const run = async () => {
     const token = ++navigationToken
 
+    pendingWaitCancel?.()
     cleanup?.()
     cleanup = null
 

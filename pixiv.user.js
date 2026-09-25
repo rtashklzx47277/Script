@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name          Pixiv Jump Directly
-// @version       0.2.1
+// @version       0.2.2
 // @updateURL     https://raw.githubusercontent.com/rtashklzx47277/Script/main/pixiv.user.js
 // @downloadURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/pixiv.user.js
 // @description   Pixiv Jump Directly
@@ -30,6 +30,12 @@
   }
 
   if (!/^https?:\/\//i.test(targetUrl)) return
+
+  // In an unencoded jump target, the fragment belongs to the destination,
+  // although the browser exposes it separately from location.search.
+  if (window.location.hash && !targetUrl.includes('#')) {
+    targetUrl += window.location.hash
+  }
 
   window.location.href = targetUrl
 })()

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Channel Auto Pause
 // @namespace   https://tampermonkey.net/
-// @version     0.2.0
+// @version     0.2.1
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeChannelAutoPause.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeChannelAutoPause.user.js
 // @description Automatically pauses autoplaying videos on YouTube channel pages.
@@ -21,6 +21,7 @@
 
   let cleanup = null
   let navigationToken = 0
+  let pendingWaitCancel = null
 
   // Modern channel URL prefixes only; legacy top-level vanity URLs
   // (youtube.com/name) redirect to /@handle, so they're intentionally
@@ -42,20 +43,33 @@
 
         if (!video) return
 
-        observer.disconnect()
-        clearTimeout(timeout)
-        resolve(video)
+        finish(video)
       })
+
+      let fallbackTimer = 0
+      let pollTimer = 0
+      const cancel = () => finish(null)
+      const finish = (video) => {
+        clearTimeout(fallbackTimer)
+        clearInterval(pollTimer)
+        observer.disconnect()
+        if (pendingWaitCancel === cancel) pendingWaitCancel = null
+        resolve(video)
+      }
 
       observer.observe(document.documentElement, {
         childList: true,
         subtree: true,
       })
 
-      const timeout = setTimeout(() => {
+      pendingWaitCancel = cancel
+      fallbackTimer = setTimeout(() => {
         observer.disconnect()
-        resolve(null)
-      }, MAX_WAIT)
+        pollTimer = setInterval(() => {
+          const video = $('ytd-browse video')
+          if (video) finish(video)
+        }, 1000)
+      }, 10000)
     })
 
   const main = async (token) => {
@@ -98,6 +112,7 @@
   const run = async () => {
     const token = ++navigationToken
 
+    pendingWaitCancel?.()
     cleanup?.()
     cleanup = null
 

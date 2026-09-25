@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name        YouTube Live Layout
 // @namespace   https://tampermonkey.net/
-// @version     0.2.5
+// @version     0.2.6
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveLayout.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveLayout.user.js
-// @description Keeps normal videos untouched and uses responsive theater layouts for live videos, placing chat below the player in narrow windows.
+// @description Keeps default mode intact and fills theater mode, with responsive layouts when chat is visible.
 // @author      Derek
 // @match       *://www.youtube.com/*
 // @grant       none
@@ -40,6 +40,7 @@
   let currentLayout = ''
   let lastChatTheaterPlayerHeight = ''
   let layoutSyncFrame = 0
+  let pendingWaitCancel = null
 
   const scrollbarWidth = (() => {
     const dummy = document.createElement('div')
@@ -349,21 +350,33 @@
       }
 
       const observer = new MutationObserver(() => {
-        if (collectElements()) {
-          observer.disconnect()
-          resolve(true)
-        }
+        if (collectElements()) finish(true)
       })
+
+      let fallbackTimer = 0
+      let pollTimer = 0
+      const cancel = () => finish(false)
+      const finish = (ready) => {
+        clearTimeout(fallbackTimer)
+        clearInterval(pollTimer)
+        observer.disconnect()
+        if (pendingWaitCancel === cancel) pendingWaitCancel = null
+        resolve(ready)
+      }
 
       observer.observe(document.documentElement, {
         childList: true,
         subtree: true
       })
 
-      setTimeout(() => {
+      pendingWaitCancel = cancel
+
+      fallbackTimer = setTimeout(() => {
         observer.disconnect()
-        resolve(collectElements())
-      }, 5000)
+        pollTimer = setInterval(() => {
+          if (collectElements()) finish(true)
+        }, 1000)
+      }, 10000)
     })
 
   const setStyle = (id, css) => {
@@ -413,8 +426,10 @@
     autoTheaterAttempted = true
     autoTheaterWindowOpen = false
 
+    const targetButton = sizeButton
+    const token = navigationToken
     requestAnimationFrame(() => {
-      sizeButton.click()
+      if (token === navigationToken && targetButton.isConnected) targetButton.click()
     })
   }
 
@@ -576,6 +591,7 @@
   const run = async () => {
     const token = ++navigationToken
 
+    pendingWaitCancel?.()
     cleanup?.()
     cleanup = null
 

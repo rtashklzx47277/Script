@@ -12,7 +12,7 @@
 |---|---|---|
 | [YouTubePlayerTweaks](https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubePlayerTweaks.user.js) | YouTube | 播放器加截圖鍵(`S`)、滾輪調音量/播放速度、直播追平(1.5x 追到最低延遲);解鎖無 DVR 直播的回看,並將回看視窗放寬到 7 天 |
 | [YouTubeLiveClock](https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveClock.user.js) | YouTube | 直播顯示經過時間,直播存檔顯示當下時間點的絕對時刻 |
-| [YouTubeLiveLayout](https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveLayout.user.js) | YouTube | 一般影片不動;無聊天室的劇院模式滿版;有聊天室時使用響應式劇院版面,窄視窗將聊天室排在影片下方 |
+| [YouTubeLiveLayout](https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveLayout.user.js) | YouTube | 一般模式不改動版面;無聊天室時將劇院模式滿版;有聊天室時使用響應式劇院版面,窄視窗將聊天室排在影片下方 |
 | [YouTubeLiveChatTweaks](https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js) | YouTube 聊天室 | 版面精簡、表情複製帶完整名稱、重新載入按鈕、自動跟隨最新訊息(手動上捲時暫停) |
 | [YouTubeAutoDisableSubtitles](https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeAutoDisableSubtitles.user.js) | YouTube | 進入影片自動關閉字幕 |
 | [YouTubeDefaultMaxQuality](https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeDefaultMaxQuality.user.js) | YouTube | 自動切到最高畫質 |
@@ -38,7 +38,7 @@ javascript:(()=>{const m=/(^|\.)(youtube\.com|youtu\.be)$/.test(location.hostnam
 
 - **YouTubeLiveClock**:改檔頭的 `FORMAT` 常數(1–6)切換日期格式,選項見檔內註解。
 - **YouTubeLiveLayout**:`PRIMARY_RATIO` 控制寬視窗中播放器與聊天室的寬度比(預設 0.75);頁面寬度低於螢幕可用寬度的 `MAX_STACKED_VIEWPORT_RATIO`(預設 0.75),且側欄低於 `MIN_SIDE_CHAT_WIDTH`(預設 400px)時,聊天室改排在影片正下方並使用完整寬度。
-- **YouTubePlayerTweaks**:`MAX_DVR_SECONDS` 為 DVR 回看上限(預設 7 天);`LIVE_CATCHUP_RATE` / `LIVE_CATCHUP_TARGET_BUFFER` 控制追直播的速度與目標緩衝秒數。
+- **YouTubePlayerTweaks**:`MAX_DVR_SECONDS` 為 DVR 回看上限(預設 7 天);`LIVE_CATCHUP_RATE` 控制追直播速度,`LIVE_CATCHUP_TARGET_DELAY` 為距直播端的目標秒數,`LIVE_CATCHUP_TARGET_BUFFER` 為加速所需的最低緩衝秒數。直播端位置無法取得時不會啟動追平。
 
 ## 腳本間的關聯與已知取捨
 
@@ -47,6 +47,18 @@ javascript:(()=>{const m=/(^|\.)(youtube\.com|youtu\.be)$/.test(location.hostnam
 - **YouTube / Twitch 截圖**:播放器就緒後預先啟動背景編碼 Worker,截圖保留原解析度 PNG,剪貼簿與下載共用同一份圖片。PNG 完成後直接由瀏覽器下載,省去 Tampermonkey 下載流程的等待;檔案存到瀏覽器設定的下載位置,不再自動放入 `ScreenShot/` 子資料夾。不支援相關瀏覽器功能時自動使用相容流程;PNG 編碼與瀏覽器存檔仍需要時間。
 - **PlayerTweaks 會覆寫頁面的 `JSON.parse` 並攔截 `ytInitialPlayerResponse`**:這是 player response 送達的僅有兩條路徑。副作用:接手 `ytInitialPlayerResponse` 後,先前掛在該屬性上的其他攔截器(如 uBO scriptlet)之後的 setter 只會被通知一次。
 - 所有腳本都依賴 YouTube / Twitch 的內部 DOM 結構與非公開 API,**上游改版隨時可能使功能失效**,失效模式以「靜默不動作」為主,不會弄壞頁面本身。
+
+## 本機驗證
+
+使用 Node.js 內建測試工具,不需要安裝額外套件:
+
+```sh
+node --test tests/*.test.cjs
+```
+
+測試涵蓋播放器追平與速度恢復、截圖 Worker 及失敗回退、SPA 導覽與等待清理、聊天室跟隨、時鐘重建、版面初始化、字幕與畫質就緒、網址跳轉,以及 `Other/` 的圖片和側欄操作。`Other/` 不在版控中,缺少這些本機腳本時會略過對應測試。
+
+測試在 Node.js VM 中模擬瀏覽器 API;實際網站 DOM、CSS 排版、剪貼簿權限與 PNG 像素仍需在瀏覽器驗證。
 
 ## 版本
 

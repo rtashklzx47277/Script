@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.2.2
+// @version     0.2.3
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @description Tweaks YouTube live chat layout, emoji copying, adds a reload button, and keeps latest chat followed unless you scroll up manually.
@@ -41,8 +41,10 @@
   let contextMenu
   let closeButton
   let headerButtonsObserver
+  let headerButtonsParent
   let itemsObserver
   let showMoreObserver
+  let autoFollowController
 
   let scroller
   let items
@@ -50,6 +52,7 @@
 
   let followLatest = true
   let pointerScrolling = false
+  let pointerCancelTimer = 0
   let scrollFramePending = false
 
   addStyle(`
@@ -198,36 +201,12 @@
     return Boolean(contextMenu && closeButton)
   }
 
-  const waitHeaderElements = () =>
-    new Promise((resolve) => {
-      if (collectHeaderElements()) {
-        resolve(true)
-        return
-      }
-
-      const observer = new MutationObserver(() => {
-        if (collectHeaderElements()) {
-          observer.disconnect()
-          resolve(true)
-        }
-      })
-
-      observer.observe(document.documentElement, {
-        childList: true,
-        subtree: true,
-      })
-
-      setTimeout(() => {
-        observer.disconnect()
-        resolve(collectHeaderElements())
-      }, 5000)
-    })
-
   const observeHeaderButtons = () => {
     const parent = contextMenu?.parentElement
     if (!parent) return
 
     headerButtonsObserver?.disconnect()
+    headerButtonsParent = parent
 
     headerButtonsObserver = new MutationObserver(() => {
       collectHeaderElements()
@@ -238,6 +217,12 @@
     headerButtonsObserver.observe(parent, {
       childList: true,
     })
+  }
+
+  const refreshHeader = () => {
+    if (!collectHeaderElements()) return
+    addReloadButton()
+    if (contextMenu.parentElement !== headerButtonsParent) observeHeaderButtons()
   }
 
   const copyEmoji = () => {
@@ -332,10 +317,22 @@
 
     if (scroller) followLatest = isNearBottom(scroller)
     pointerScrolling = false
+    clearTimeout(pointerCancelTimer)
+    pointerCancelTimer = 0
   }
 
-  const handlePointerCancel = () => {
-    pointerScrolling = false
+  const handlePointerCancel = (event) => {
+    clearTimeout(pointerCancelTimer)
+    if (event.pointerType === 'touch' && pointerScrolling) {
+      // Native touch panning cancels the pointer before it fires scroll.
+      pointerCancelTimer = setTimeout(() => {
+        pointerScrolling = false
+        pointerCancelTimer = 0
+      }, 1000)
+    } else {
+      pointerScrolling = false
+      pointerCancelTimer = 0
+    }
   }
 
   const handleScrollKeys = (event) => {
@@ -353,6 +350,13 @@
 
     if (!scroller || !items || !showMoreButton) return false
 
+    autoFollowController?.abort()
+    autoFollowController = new AbortController()
+    const { signal } = autoFollowController
+    pointerScrolling = false
+    clearTimeout(pointerCancelTimer)
+    pointerCancelTimer = 0
+
     scroller.addEventListener(
       'wheel',
       (event) => {
@@ -360,27 +364,32 @@
           followLatest = false
         }
       },
-      { passive: true }
+      { passive: true, signal }
     )
 
     scroller.addEventListener('pointerdown', () => {
       pointerScrolling = true
-    })
+    }, { signal })
 
     scroller.addEventListener('scroll', (event) => {
       if (isNearBottom(event.currentTarget)) {
         followLatest = true
       } else if (pointerScrolling) {
         followLatest = false
+        if (pointerCancelTimer) {
+          clearTimeout(pointerCancelTimer)
+          pointerCancelTimer = 0
+          pointerScrolling = false
+        }
       }
-    })
+    }, { signal })
 
     showMoreButton.addEventListener(
       'click',
       () => {
         followLatest = true
       },
-      true
+      { capture: true, signal }
     )
 
     itemsObserver?.disconnect()
@@ -412,15 +421,15 @@
     window.addEventListener('pointercancel', handlePointerCancel)
     document.addEventListener('keydown', handleScrollKeys)
 
+    refreshHeader()
     bindAutoFollow()
 
     // YouTube can replace the chat internals wholesale (e.g. switching
     // Top chat / Live chat), which strands listeners and observers on dead
-    // nodes. A 1s poll costs three property reads per tick — far cheaper
-    // than a subtree observer serviced on every chat message — and also
-    // covers the initial wait before chat renders (worst case binds ~1s
-    // later, which is imperceptible).
+    // nodes. A 1s poll checks node identity and late header insertion without
+    // a subtree observer serviced on every chat message.
     setInterval(() => {
+      refreshHeader()
       if (
         scroller?.isConnected &&
         items?.isConnected &&
@@ -433,14 +442,6 @@
     }, 1000)
   }
 
-  ;(async () => {
-    const found = await waitHeaderElements()
-    if (found) {
-      addReloadButton()
-      observeHeaderButtons()
-    }
-
-    copyEmoji()
-    setupAutoFollow()
-  })()
+  copyEmoji()
+  setupAutoFollow()
 })()

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Player Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.2.5
+// @version     0.2.7
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubePlayerTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubePlayerTweaks.user.js
 // @description Adds player controls (screenshot, wheel speed/volume, live catch-up) and unlocks live DVR with extended rewind on YouTube.
@@ -198,10 +198,10 @@
   const SCREENSHOT_WORKER_TIMEOUT = 15000
   const TOOLTIP_VERTICAL_GAP = 22
   const FEEDBACK_DURATION = 3000
+  const LIVE_CATCHUP_TARGET_DELAY = 0.5
   const LIVE_CATCHUP_TARGET_BUFFER = 0.5
   const LIVE_CATCHUP_RATE = 1.5
   const LIVE_CATCHUP_INTERVAL = 250
-  const PLAYBACK_RATE_RESTORE_DELAYS = [100, 500, 1000]
 
   let container
   let sizeBtn
@@ -218,7 +218,6 @@
   let persistentFloatingBarText = ''
   let liveCatchupTimer = 0
   let liveCatchupPreviousRate = null
-  let playbackRateRestoreToken = 0
   let screenshotWorker = null
   let screenshotWorkerAvailable = true
   let screenshotWorkerJobId = 0
@@ -687,6 +686,22 @@
     return getProgressBufferHealth()
   }
 
+  const getLiveEdgeDistance = () => {
+    const ranges = videoPlayer?.seekable
+    if (!ranges?.length) return null
+
+    let liveEdge
+    try {
+      liveEdge = ranges.end(ranges.length - 1)
+    } catch (_) {
+      return null
+    }
+    const currentTime = Number(videoPlayer.currentTime)
+    if (!Number.isFinite(liveEdge) || !Number.isFinite(currentTime)) return null
+
+    return Math.max(0, liveEdge - currentTime)
+  }
+
   const getPlaybackRate = () => {
     const playerRate = Number(moviePlayer?.getPlaybackRate?.())
 
@@ -710,35 +725,9 @@
   }
 
   const restorePlaybackRate = (rate) => {
-    const restoreRate = Number.isFinite(rate) ? rate : 1
-    const restoreToken = ++playbackRateRestoreToken
-
-    setPlaybackRate(restoreRate)
-
-    const restoreNavigationToken = navigationToken
-    const restoreMoviePlayer = moviePlayer
-    const restoreVideoPlayer = videoPlayer
-
-    for (const delay of PLAYBACK_RATE_RESTORE_DELAYS) {
-      setTimeout(() => {
-        if (
-          restoreToken !== playbackRateRestoreToken ||
-          restoreNavigationToken !== navigationToken ||
-          restoreMoviePlayer !== moviePlayer ||
-          restoreVideoPlayer !== videoPlayer ||
-          liveCatchupTimer
-        ) {
-          return
-        }
-
-        setPlaybackRate(restoreRate)
-      }, delay)
-    }
-  }
-
-  const setManualPlaybackRate = (rate) => {
-    playbackRateRestoreToken++
-    setPlaybackRate(rate)
+    // Restore once through both APIs. A later 1.5x value may be the user's
+    // own choice, so it cannot safely be treated as a failed restore.
+    setPlaybackRate(Number.isFinite(rate) ? rate : 1)
   }
 
   const updateLiveButtonState = () => {
@@ -775,12 +764,21 @@
       return
     }
 
-    const bufferHealth = getLiveBufferHealth()
+    const distance = getLiveEdgeDistance()
+    if (!Number.isFinite(distance)) return
 
-    if (!Number.isFinite(bufferHealth)) return
-
-    if (bufferHealth <= LIVE_CATCHUP_TARGET_BUFFER) {
+    if (distance <= LIVE_CATCHUP_TARGET_DELAY) {
       stopLiveCatchup('最低延遲', true)
+      return
+    }
+
+    const bufferHealth = getLiveBufferHealth()
+    if (
+      !Number.isFinite(bufferHealth) ||
+      bufferHealth <= LIVE_CATCHUP_TARGET_BUFFER
+    ) {
+      const safeRate = Math.min(1, liveCatchupPreviousRate ?? 1)
+      if (Number(videoPlayer.playbackRate) > safeRate) setPlaybackRate(safeRate)
       return
     }
 
@@ -799,11 +797,10 @@
       return
     }
 
-    const bufferHealth = getLiveBufferHealth()
+    const distance = getLiveEdgeDistance()
+    if (!Number.isFinite(distance)) return
 
-    if (!Number.isFinite(bufferHealth)) return
-
-    if (bufferHealth <= LIVE_CATCHUP_TARGET_BUFFER) {
+    if (distance <= LIVE_CATCHUP_TARGET_DELAY) {
       floatingBarTimer = showFloatingBar(floatingBarTimer, '已是最低延遲')
       return
     }
@@ -844,7 +841,7 @@
         : Math.max(0.1, playbackRate - 0.1)
 
     playbackRate = Number(playbackRate.toFixed(1))
-    setManualPlaybackRate(playbackRate)
+    setPlaybackRate(playbackRate)
 
     floatingBarTimer = showFloatingBar(floatingBarTimer, `${playbackRate}x`)
   }
@@ -854,7 +851,7 @@
       stopLiveCatchup('', false)
     }
 
-    setManualPlaybackRate(1)
+    setPlaybackRate(1)
     floatingBarTimer = showFloatingBar(floatingBarTimer, '1x')
   }
 
@@ -1016,22 +1013,33 @@
       }
 
       const observer = new MutationObserver(() => {
-        if (collectPlayerElements()) {
-          observer.disconnect()
-          resolve(true)
-        }
+        if (collectPlayerElements()) finish(true)
       })
+
+      let fallbackTimer = 0
+      let pollTimer = 0
+      const cancel = () => finish(false)
+      const finish = (ready) => {
+        clearTimeout(fallbackTimer)
+        clearInterval(pollTimer)
+        observer.disconnect()
+        if (pendingWaitCancel === cancel) pendingWaitCancel = null
+        resolve(ready)
+      }
 
       observer.observe(document.documentElement, {
         attributes: false,
         childList: true,
         subtree: true,
       })
+      pendingWaitCancel = cancel
 
-      setTimeout(() => {
+      fallbackTimer = setTimeout(() => {
         observer.disconnect()
-        resolve(collectPlayerElements())
-      }, 5000)
+        pollTimer = setInterval(() => {
+          if (collectPlayerElements()) finish(true)
+        }, 1000)
+      }, 10000)
     })
   }
 
@@ -1078,7 +1086,6 @@
 
     return () => {
       stopLiveCatchup('', true)
-      playbackRateRestoreToken++
       controller.abort()
       hideTooltip()
     }
@@ -1086,6 +1093,7 @@
 
   let cleanup = null
   let navigationToken = 0
+  let pendingWaitCancel = null
 
   // yt-navigate-finish also fires on the initial page load, so runs can
   // overlap while main() awaits; the token makes the newest run win and
@@ -1093,6 +1101,7 @@
   const handleNavigation = async () => {
     const token = ++navigationToken
 
+    pendingWaitCancel?.()
     cleanup?.()
     cleanup = null
 

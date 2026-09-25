@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Auto Disable Subtitles
 // @namespace   https://tampermonkey.net/
-// @version     0.2.0
+// @version     0.2.2
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeAutoDisableSubtitles.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeAutoDisableSubtitles.user.js
 // @description Automatically turns off subtitles on YouTube watch and live pages.
@@ -22,14 +22,23 @@
 
   let cleanup = null
   let navigationToken = 0
+  let pendingWaitCancel = null
 
   const isWatchPage = () =>
     location.pathname === '/watch' ||
     location.pathname.startsWith('/live/')
 
+  const findReadyPlayer = () => {
+    const player = $('#movie_player')
+    return (
+      typeof player?.isSubtitlesOn === 'function' &&
+      typeof player?.toggleSubtitles === 'function'
+    ) ? player : null
+  }
+
   const waitForMoviePlayer = () =>
     new Promise((resolve) => {
-      const currentPlayer = $('#movie_player')
+      const currentPlayer = findReadyPlayer()
 
       if (currentPlayer) {
         resolve(currentPlayer)
@@ -37,24 +46,44 @@
       }
 
       const observer = new MutationObserver(() => {
-        const moviePlayer = $('#movie_player')
+        const moviePlayer = findReadyPlayer()
 
         if (!moviePlayer) return
 
-        observer.disconnect()
-        clearTimeout(timeout)
-        resolve(moviePlayer)
+        finish(moviePlayer)
       })
+
+      let fallbackTimer = 0
+      let pollTimer = 0
+      let settled = false
+      const cancel = () => finish(null)
+      const finish = (moviePlayer) => {
+        if (settled) return
+        settled = true
+        clearTimeout(fallbackTimer)
+        clearInterval(pollTimer)
+        observer.disconnect()
+        if (pendingWaitCancel === cancel) pendingWaitCancel = null
+        resolve(moviePlayer)
+      }
 
       observer.observe(document.documentElement, {
         childList: true,
         subtree: true,
       })
 
-      const timeout = setTimeout(() => {
+      pendingWaitCancel = cancel
+      // Player methods can become ready without a DOM mutation.
+      const checkPlayer = () => {
+        const moviePlayer = findReadyPlayer()
+        if (moviePlayer) finish(moviePlayer)
+      }
+      pollTimer = setInterval(checkPlayer, CHECK_INTERVAL)
+      fallbackTimer = setTimeout(() => {
         observer.disconnect()
-        resolve(null)
-      }, MAX_WAIT)
+        clearInterval(pollTimer)
+        pollTimer = setInterval(checkPlayer, 1000)
+      }, 10000)
     })
 
   const disableSubtitlesIfNeeded = (moviePlayer) => {
@@ -113,6 +142,7 @@
   const run = async () => {
     const token = ++navigationToken
 
+    pendingWaitCancel?.()
     cleanup?.()
     cleanup = null
 

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Live Clock
 // @namespace   https://tampermonkey.net/
-// @version     0.2.1
+// @version     0.2.2
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveClock.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveClock.user.js
 // @description Shows elapsed time on live streams and absolute clock time on live archives.
@@ -45,6 +45,9 @@
   let timeWrapper
   let progressBar
   let progressObserver = null
+  let currentClock = null
+  let lifecycleTimer = 0
+  let pendingWaitCancel = null
   let navigationToken = 0
 
   addStyle(`
@@ -100,8 +103,11 @@
   }
 
   const cleanup = () => {
+    if (lifecycleTimer) clearInterval(lifecycleTimer)
+    lifecycleTimer = 0
     progressObserver?.disconnect()
     progressObserver = null
+    currentClock = null
     removeClocks()
   }
 
@@ -136,21 +142,21 @@
   const waitElements = (videoId) => {
     return new Promise((resolve) => {
       const check = () => {
-        timeContent = $('.ytp-chrome-bottom .ytp-time-contents')
-        timeWrapper = $('.ytp-chrome-bottom .ytp-time-wrapper')
-        progressBar = $('.ytp-chrome-bottom .ytp-progress-bar')
+        const nextTimeContent = $('.ytp-chrome-bottom .ytp-time-contents')
+        const nextTimeWrapper = $('.ytp-chrome-bottom .ytp-time-wrapper')
+        const nextProgressBar = $('.ytp-chrome-bottom .ytp-progress-bar')
 
         const microformatScript = $('#microformat script')
-        const microformatText = microformatScript?.textContent ?? ''
         const microformatData = parseMicroformat(microformatScript, videoId)
 
-        if (!timeContent || !timeWrapper || !progressBar || !microformatData) {
+        if (!nextTimeContent || !nextTimeWrapper || !nextProgressBar || !microformatData) {
           return null
         }
 
         return {
-          microformatScript,
-          microformatText,
+          timeContent: nextTimeContent,
+          timeWrapper: nextTimeWrapper,
+          progressBar: nextProgressBar,
           microformatData,
         }
       }
@@ -163,19 +169,45 @@
       }
 
       let microformatObserver = null
+      let observedMicroformat = null
       let settled = false
-      let timeout = 0
+      let fallbackTimer = 0
+      let pollTimer = 0
 
       const finish = (result) => {
         if (settled) return
         settled = true
-        clearTimeout(timeout)
+        clearTimeout(fallbackTimer)
+        clearInterval(pollTimer)
         observer.disconnect()
         microformatObserver?.disconnect()
+        if (pendingWaitCancel === cancel) pendingWaitCancel = null
         resolve(result)
       }
 
+      const cancel = () => finish(null)
+
+      const watchMicroformat = () => {
+        const microformat = $('#microformat')
+        if (microformat === observedMicroformat) return
+
+        microformatObserver?.disconnect()
+        observedMicroformat = microformat
+        if (!microformat) return
+
+        microformatObserver = new MutationObserver(() => {
+          const result = check()
+          if (result) finish(result)
+        })
+        microformatObserver.observe(microformat, {
+          childList: true,
+          characterData: true,
+          subtree: true,
+        })
+      }
+
       const observer = new MutationObserver(() => {
+        watchMicroformat()
         const result = check()
         if (result) finish(result)
       })
@@ -187,24 +219,20 @@
         subtree: true,
       })
 
-      // ponytail: keep the heavy characterData watch scoped to #microformat
-      // (in-place JSON-LD updates between navigations), not the whole body.
-      const microformat = $('#microformat')
+      // Scope characterData watching to #microformat even if it appears late.
+      watchMicroformat()
+      pendingWaitCancel = cancel
 
-      if (microformat) {
-        microformatObserver = new MutationObserver(() => {
+      // A watch page can stay incomplete indefinitely. After the initial
+      // render, replace the broad body observer with a cheap periodic check.
+      fallbackTimer = setTimeout(() => {
+        observer.disconnect()
+        pollTimer = setInterval(() => {
+          watchMicroformat()
           const result = check()
           if (result) finish(result)
-        })
-
-        microformatObserver.observe(microformat, {
-          childList: true,
-          characterData: true,
-          subtree: true,
-        })
-      }
-
-      timeout = setTimeout(() => finish(null), 5000)
+        }, 1000)
+      }, 10000)
     })
   }
 
@@ -262,16 +290,27 @@
   }
 
   const main = async (videoId) => {
-    if (currentVideoId === videoId && progressObserver) return
+    if (
+      currentVideoId === videoId &&
+      progressObserver &&
+      progressBar?.isConnected &&
+      currentClock?.isConnected &&
+      $('.ytp-chrome-bottom .ytp-progress-bar') === progressBar
+    ) return
 
     const token = ++navigationToken
 
+    pendingWaitCancel?.()
     currentVideoId = videoId
     cleanup()
 
     const result = await waitElements(videoId)
 
     if (!result || token !== navigationToken || videoId !== currentVideoId) return
+
+    timeContent = result.timeContent
+    timeWrapper = result.timeWrapper
+    progressBar = result.progressBar
 
     const publication = getPublication(result.microformatData)
 
@@ -281,6 +320,7 @@
     }
 
     const liveClock = getClock(publication)
+    currentClock = liveClock
     const updateClock = () => {
       const nextText = getClockText(publication)
 
@@ -291,14 +331,21 @@
 
     updateClock()
 
-    // ponytail: bound to this progressBar node; if YT rebuilds the player DOM
-    // mid-video the clock freezes until the next navigation. Watch for node
-    // disconnection if that ever matters in practice.
     progressObserver = new MutationObserver(updateClock)
     progressObserver.observe(progressBar, {
       attributes: true,
       attributeFilter: ['aria-valuenow'],
     })
+
+    lifecycleTimer = setInterval(() => {
+      if (
+        !progressBar?.isConnected ||
+        !currentClock?.isConnected ||
+        $('.ytp-chrome-bottom .ytp-progress-bar') !== progressBar
+      ) {
+        main(videoId)
+      }
+    }, 1000)
   }
 
   const handleNavigation = (rawUrl) => {
@@ -306,6 +353,7 @@
 
     if (!videoId) {
       navigationToken++
+      pendingWaitCancel?.()
       currentVideoId = null
       cleanup()
       return
