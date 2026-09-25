@@ -1,13 +1,12 @@
 // ==UserScript==
 // @name        YouTube Player Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.2.4
+// @version     0.2.5
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubePlayerTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubePlayerTweaks.user.js
 // @description Adds player controls (screenshot, wheel speed/volume, live catch-up) and unlocks live DVR with extended rewind on YouTube.
 // @author      Derek
 // @match       *://www.youtube.com/*
-// @grant       GM_download
 // @grant       unsafeWindow
 // @run-at      document-start
 // @noframes
@@ -434,6 +433,13 @@
   }
 
   const getScreenshotWorker = () => {
+    if (
+      !screenshotWorkerAvailable ||
+      typeof Worker !== 'function' ||
+      typeof OffscreenCanvas !== 'function'
+    ) {
+      return null
+    }
     if (screenshotWorker) return screenshotWorker
 
     const workerSource = `
@@ -548,16 +554,12 @@
     let frame
 
     try {
-      if (
-        !screenshotWorkerAvailable ||
-        typeof Worker !== 'function' ||
-        typeof OffscreenCanvas !== 'function'
-      ) {
+      // Usually already started while the player was idle.
+      const worker = getScreenshotWorker()
+      if (!worker) {
         return encodeScreenshotOnMainThread(source, width, height)
       }
 
-      // Start the worker before capture so its startup can overlap the work.
-      const worker = getScreenshotWorker()
       if (typeof VideoFrame === 'function') {
         try {
           // Freeze the decoded frame synchronously, avoiding an intermediate
@@ -620,27 +622,20 @@
       if (!blob) return
 
       const objectUrl = URL.createObjectURL(blob)
-      const revokeObjectUrl = () => URL.revokeObjectURL(objectUrl)
-      // ponytail: anchor fallback loses the ScreenShot/ subfolder but never
-      // re-encodes; toDataURL froze the tab on 4K frames.
-      const downloadFallback = () => {
-        const link = document.createElement('a')
-        link.href = objectUrl
-        link.download = `${fileName}.png`
-        link.click()
-        setTimeout(revokeObjectUrl, 10000)
-      }
+      const link = document.createElement('a')
+      link.href = objectUrl
+      link.download = `${fileName}.png`
+      link.hidden = true
 
+      // Start downloading as soon as the PNG is ready, without an extension
+      // round-trip. The browser saves to its configured download location.
       try {
-        GM_download({
-          url: objectUrl,
-          name: `ScreenShot/${fileName}.png`,
-          onload: revokeObjectUrl,
-          onerror: downloadFallback,
-          ontimeout: downloadFallback,
-        })
-      } catch (_) {
-        downloadFallback()
+        ;(document.body || document.documentElement).appendChild(link)
+        link.click()
+      } finally {
+        link.remove()
+        // Keep the URL alive until the browser has picked up the download.
+        setTimeout(() => URL.revokeObjectURL(objectUrl), 10000)
       }
     }).catch((error) => {
       console.warn('[YouTube Player Tweaks] Screenshot failed:', error)
@@ -1052,6 +1047,22 @@
 
     const buttons = ensureButtons()
     bindButtonEvents(buttons, signal)
+
+    // Pay worker startup before the first click (including keyboard captures).
+    // The worker allocates its full-size canvas only when a screenshot is taken.
+    const warmScreenshotWorker = () => {
+      if (signal.aborted) return
+      try {
+        getScreenshotWorker()
+      } catch (_) {}
+    }
+    if (typeof requestIdleCallback === 'function') {
+      const warmupId = requestIdleCallback(warmScreenshotWorker, { timeout: 1000 })
+      signal.addEventListener('abort', () => cancelIdleCallback(warmupId), { once: true })
+    } else {
+      const warmupId = setTimeout(warmScreenshotWorker, 250)
+      signal.addEventListener('abort', () => clearTimeout(warmupId), { once: true })
+    }
 
     // Document-level capture on purpose: wheel events can be stopped before
     // they ever reach #movie_player, so a player-scoped listener misses them.

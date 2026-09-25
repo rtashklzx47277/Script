@@ -44,7 +44,7 @@ javascript:(()=>{const m=/(^|\.)(youtube\.com|youtu\.be)$/.test(location.hostnam
 
 - **LiveClock 依賴 PlayerTweaks 的 DVR 解鎖**:直播「經過時間」取自進度條位置,只有在 DVR 視窗涵蓋整場直播時才等於真實經過時間;超過 13 小時的直播需要 PlayerTweaks 放寬的回看視窗才準確。
 - **字幕功能分工**:PlayerTweaks 用 CSS 隱藏字幕「按鈕」,AutoDisableSubtitles 負責關閉字幕「狀態」,兩者互補而非重複。
-- **PlayerTweaks 截圖**:優先直接擷取影片影格並在背景編碼,保留原解析度 PNG,剪貼簿與下載共用同一份圖片。不支援相關瀏覽器功能時自動使用相容流程;PNG 編碼、剪貼簿與下載仍需要時間。
+- **YouTube / Twitch 截圖**:播放器就緒後預先啟動背景編碼 Worker,截圖保留原解析度 PNG,剪貼簿與下載共用同一份圖片。PNG 完成後直接由瀏覽器下載,省去 Tampermonkey 下載流程的等待;檔案存到瀏覽器設定的下載位置,不再自動放入 `ScreenShot/` 子資料夾。不支援相關瀏覽器功能時自動使用相容流程;PNG 編碼與瀏覽器存檔仍需要時間。
 - **PlayerTweaks 會覆寫頁面的 `JSON.parse` 並攔截 `ytInitialPlayerResponse`**:這是 player response 送達的僅有兩條路徑。副作用:接手 `ytInitialPlayerResponse` 後,先前掛在該屬性上的其他攔截器(如 uBO scriptlet)之後的 setter 只會被通知一次。
 - 所有腳本都依賴 YouTube / Twitch 的內部 DOM 結構與非公開 API,**上游改版隨時可能使功能失效**,失效模式以「靜默不動作」為主,不會弄壞頁面本身。
 

@@ -1,14 +1,14 @@
 // ==UserScript==
 // @name        Twitch Player Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.2.2
+// @version     0.2.3
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchPlayerTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchPlayerTweaks.user.js
 // @description Hide clips and interactive extensions, add screenshot button, support wheel volume, and use native-like tooltips.
 // @author      Derek
 // @match       *://www.twitch.tv/*
 // @run-at      document-idle
-// @grant       GM_download
+// @grant       none
 // @noframes
 // ==/UserScript==
 
@@ -30,8 +30,15 @@
   const VOLUME_STEP = 0.05
   const VOLUME_BAR_DURATION = 3000
   const TOOLTIP_VERTICAL_GAP = 10
+  const SCREENSHOT_WORKER_TIMEOUT = 15000
 
   const playerStates = new WeakMap()
+  const screenshotWorkerJobs = new Map()
+  let screenshotWorker = null
+  let screenshotWorkerAvailable = true
+  let screenshotWorkerJobId = 0
+  let screenshotInFlight = false
+  let screenshotWarmupScheduled = false
 
   const $ = (selector, root = document) => root.querySelector(selector)
   const $$ = (selector, root = document) => [...root.querySelectorAll(selector)]
@@ -292,45 +299,206 @@
     return `${channel}-${stamp}.png`
   }
 
-  const takeScreenshot = (player) => {
-    const video = $('video', player)
-    if (!video || !video.videoWidth || !video.videoHeight) return
+  const stopScreenshotWorker = (error, disable = false) => {
+    screenshotWorker?.terminate()
+    screenshotWorker = null
+    if (disable) screenshotWorkerAvailable = false
 
-    const canvas = document.createElement('canvas')
-    const context = canvas.getContext('2d')
+    for (const { reject, timer } of screenshotWorkerJobs.values()) {
+      clearTimeout(timer)
+      reject(error)
+    }
+    screenshotWorkerJobs.clear()
+  }
 
-    canvas.width = video.videoWidth
-    canvas.height = video.videoHeight
-    context.drawImage(video, 0, 0)
+  const getScreenshotWorker = () => {
+    if (
+      !screenshotWorkerAvailable ||
+      typeof Worker !== 'function' ||
+      typeof OffscreenCanvas !== 'function'
+    ) {
+      return null
+    }
+    if (screenshotWorker) return screenshotWorker
 
-    const fileName = `ScreenShot/${getScreenshotFileName()}`
+    const workerSource = `
+      let canvas
+      let context
 
-    canvas.toBlob((blob) => {
-      if (!blob) return
+      self.onmessage = async ({ data }) => {
+        const { id, frame, width, height } = data
+        try {
+          try {
+            if (!canvas || canvas.width !== width || canvas.height !== height) {
+              canvas = new OffscreenCanvas(width, height)
+              context = canvas.getContext('2d', { alpha: false })
+            }
+            if (!context) throw new Error('Canvas 2D is unavailable')
+            context.drawImage(frame, 0, 0, width, height)
+          } finally {
+            frame.close()
+          }
 
-      const objectUrl = URL.createObjectURL(blob)
-      const revokeObjectUrl = () => URL.revokeObjectURL(objectUrl)
-      const downloadFallback = () => {
-        revokeObjectUrl()
-
-        GM_download({
-          url: canvas.toDataURL('image/png'),
-          name: fileName,
-        })
+          const blob = await canvas.convertToBlob({ type: 'image/png' })
+          self.postMessage({ id, blob })
+        } catch (error) {
+          self.postMessage({ id, error: error?.message || 'PNG encode failed' })
+        }
       }
+    `
+
+    const workerUrl = URL.createObjectURL(
+      new Blob([workerSource], { type: 'text/javascript' })
+    )
+
+    try {
+      const worker = new Worker(workerUrl)
+
+      worker.addEventListener('message', ({ data }) => {
+        const job = screenshotWorkerJobs.get(data.id)
+        if (!job) return
+
+        screenshotWorkerJobs.delete(data.id)
+        clearTimeout(job.timer)
+        if (data.blob) job.resolve(data.blob)
+        else job.reject(new Error(data.error || 'PNG encode failed'))
+      })
+
+      const handleWorkerError = () => {
+        if (screenshotWorker !== worker) return
+        stopScreenshotWorker(new Error('Screenshot worker failed'), true)
+      }
+      worker.addEventListener('error', handleWorkerError)
+      worker.addEventListener('messageerror', handleWorkerError)
+
+      screenshotWorker = worker
+      return worker
+    } catch (error) {
+      screenshotWorkerAvailable = false
+      throw error
+    } finally {
+      URL.revokeObjectURL(workerUrl)
+    }
+  }
+
+  const encodeScreenshotInWorker = (worker, frame, width, height) => {
+    if (worker !== screenshotWorker) {
+      return Promise.reject(new Error('Screenshot worker is unavailable'))
+    }
+    const id = ++screenshotWorkerJobId
+
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        stopScreenshotWorker(new Error('Screenshot worker timed out'), true)
+      }, SCREENSHOT_WORKER_TIMEOUT)
+      screenshotWorkerJobs.set(id, { resolve, reject, timer })
 
       try {
-        GM_download({
-          url: objectUrl,
-          name: fileName,
-          onload: revokeObjectUrl,
-          onerror: downloadFallback,
-          ontimeout: downloadFallback,
-        })
-      } catch (_) {
-        downloadFallback()
+        // Keep our frame reference for a fallback on worker failure.
+        worker.postMessage({ id, frame, width, height })
+      } catch (error) {
+        screenshotWorkerJobs.delete(id)
+        clearTimeout(timer)
+        reject(error)
       }
-    }, 'image/png')
+    })
+  }
+
+  const encodeScreenshotOnMainThread = (source, width, height) => {
+    const canvas = document.createElement('canvas')
+    canvas.width = width
+    canvas.height = height
+    const context = canvas.getContext('2d', { alpha: false })
+    if (!context) throw new Error('Canvas 2D is unavailable')
+    context.drawImage(source, 0, 0, width, height)
+
+    return new Promise((resolve, reject) => {
+      canvas.toBlob((blob) => {
+        if (blob) resolve(blob)
+        else reject(new Error('PNG encode failed'))
+      }, 'image/png')
+    })
+  }
+
+  const encodeScreenshot = async (video) => {
+    const width = video.videoWidth
+    const height = video.videoHeight
+    let frame
+
+    try {
+      const worker = getScreenshotWorker()
+      if (!worker) return encodeScreenshotOnMainThread(video, width, height)
+
+      if (typeof VideoFrame === 'function') {
+        try {
+          frame = new VideoFrame(video)
+        } catch (_) {}
+      }
+      if (!frame) frame = await createImageBitmap(video)
+
+      return await encodeScreenshotInWorker(worker, frame, width, height)
+    } catch (_) {
+      return encodeScreenshotOnMainThread(frame || video, width, height)
+    } finally {
+      // The main-thread fallback draws before its PNG promise is returned.
+      frame?.close()
+    }
+  }
+
+  const scheduleScreenshotWorkerWarmup = () => {
+    if (screenshotWarmupScheduled) return
+    screenshotWarmupScheduled = true
+
+    const warm = () => {
+      try {
+        getScreenshotWorker()
+      } catch (_) {}
+    }
+    if (typeof requestIdleCallback === 'function') {
+      requestIdleCallback(warm, { timeout: 1000 })
+    } else {
+      setTimeout(warm, 250)
+    }
+  }
+
+  const takeScreenshot = (player) => {
+    const video = $('video', player)
+    if (screenshotInFlight || !video || !video.videoWidth || !video.videoHeight) {
+      return
+    }
+
+    screenshotInFlight = true
+    const fileName = getScreenshotFileName()
+    const blobPromise = encodeScreenshot(video).finally(() => {
+      screenshotInFlight = false
+    })
+
+    // Start the clipboard write within the click's user gesture.
+    try {
+      navigator.clipboard
+        .write([new ClipboardItem({ 'image/png': blobPromise })])
+        .catch(() => {})
+    } catch (_) {
+      // Download still works when clipboard access is unavailable.
+    }
+
+    blobPromise.then((blob) => {
+      const objectUrl = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = objectUrl
+      link.download = fileName
+      link.hidden = true
+
+      try {
+        ;(document.body || document.documentElement).appendChild(link)
+        link.click()
+      } finally {
+        link.remove()
+        setTimeout(() => URL.revokeObjectURL(objectUrl), 10000)
+      }
+    }).catch((error) => {
+      console.warn('[Twitch Player Tweaks] Screenshot failed:', error)
+    })
   }
 
   const createScreenshotButton = (theaterButton, player) => {
@@ -397,6 +565,7 @@
       screenshotButtonWrapper.appendChild(screenshotButton)
       screenshotSlot.appendChild(screenshotButtonWrapper)
       controls.insertBefore(screenshotSlot, theaterSlot)
+      scheduleScreenshotWorkerWarmup()
     }
   }
 
