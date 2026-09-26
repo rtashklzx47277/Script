@@ -38,7 +38,7 @@ javascript:(()=>{const m=/(^|\.)(youtube\.com|youtu\.be)$/.test(location.hostnam
 
 - **YouTubeLiveClock**:改檔頭的 `FORMAT` 常數(1–6)切換日期格式,選項見檔內註解。
 - **YouTubeLiveLayout**:`PRIMARY_RATIO` 控制寬視窗中播放器與聊天室的寬度比(預設 0.75);頁面寬度低於螢幕可用寬度的 `MAX_STACKED_VIEWPORT_RATIO`(預設 0.75),且側欄低於 `MIN_SIDE_CHAT_WIDTH`(預設 400px)時,聊天室改排在影片正下方並使用完整寬度。
-- **YouTubePlayerTweaks**:`MAX_DVR_SECONDS` 為 DVR 回看上限(預設 7 天);`LIVE_CATCHUP_RATE` 控制追直播速度,`LIVE_CATCHUP_TARGET_DELAY` 為距直播端的目標秒數,`LIVE_CATCHUP_TARGET_BUFFER` 為停止加速的緩衝門檻。抵達直播端、緩衝不足或播放停滯時會結束追平;直播端位置暫時無法取得時可依緩衝狀態追平。
+- **YouTubePlayerTweaks**:`MAX_DVR_SECONDS` 為 DVR 回看上限(預設 7 天);`LIVE_CATCHUP_RATE` 控制追直播速度,`LIVE_CATCHUP_TARGET_BUFFER` 為可播放緩衝的追平門檻(預設 0.5 秒)。達到門檻時會停止追平並恢復原本速度。
 
 ## 腳本間的關聯與已知取捨
 

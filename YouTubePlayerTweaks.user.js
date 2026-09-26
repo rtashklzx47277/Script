@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Player Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.2.8
+// @version     0.2.9
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubePlayerTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubePlayerTweaks.user.js
 // @description Adds player controls (screenshot, wheel speed/volume, live catch-up) and unlocks live DVR with extended rewind on YouTube.
@@ -198,13 +198,9 @@
   const SCREENSHOT_WORKER_TIMEOUT = 15000
   const TOOLTIP_VERTICAL_GAP = 22
   const FEEDBACK_DURATION = 3000
-  const LIVE_CATCHUP_TARGET_DELAY = 0.5
-  // At 1.5x, less than 1.5s of media buffer is under one second of playback.
-  // Stop before a normal-latency live stream reaches the buffering spinner.
-  const LIVE_CATCHUP_TARGET_BUFFER = 1.5
+  const LIVE_CATCHUP_TARGET_BUFFER = 0.5
   const LIVE_CATCHUP_RATE = 1.5
   const LIVE_CATCHUP_INTERVAL = 250
-  const LIVE_CATCHUP_STALL_TICKS = 8
 
   let container
   let sizeBtn
@@ -221,8 +217,6 @@
   let persistentFloatingBarText = ''
   let liveCatchupTimer = 0
   let liveCatchupPreviousRate = null
-  let liveCatchupLastTime = null
-  let liveCatchupStalledTicks = 0
   let screenshotWorker = null
   let screenshotWorkerAvailable = true
   let screenshotWorkerJobId = 0
@@ -691,22 +685,6 @@
     return getProgressBufferHealth()
   }
 
-  const getLiveEdgeDistance = () => {
-    const ranges = videoPlayer?.seekable
-    if (!ranges?.length) return null
-
-    let liveEdge
-    try {
-      liveEdge = ranges.end(ranges.length - 1)
-    } catch (_) {
-      return null
-    }
-    const currentTime = Number(videoPlayer.currentTime)
-    if (!Number.isFinite(liveEdge) || !Number.isFinite(currentTime)) return null
-
-    return Math.max(0, liveEdge - currentTime)
-  }
-
   const getPlaybackRate = () => {
     const playerRate = Number(moviePlayer?.getPlaybackRate?.())
 
@@ -755,8 +733,6 @@
     }
 
     liveCatchupPreviousRate = null
-    liveCatchupLastTime = null
-    liveCatchupStalledTicks = 0
     updateLiveButtonState()
     hidePersistentFloatingBar()
 
@@ -771,38 +747,13 @@
       return
     }
 
-    const distance = getLiveEdgeDistance()
-    if (Number.isFinite(distance) && distance <= LIVE_CATCHUP_TARGET_DELAY) {
+    const bufferHealth = getLiveBufferHealth()
+    if (!Number.isFinite(bufferHealth)) return
+
+    if (bufferHealth <= LIVE_CATCHUP_TARGET_BUFFER) {
       stopLiveCatchup('最低延遲', true)
       return
     }
-
-    const bufferHealth = getLiveBufferHealth()
-    if (
-      !Number.isFinite(bufferHealth) ||
-      bufferHealth <= LIVE_CATCHUP_TARGET_BUFFER
-    ) {
-      // The playable edge can lag behind seekable.end(). Leaving the timer
-      // active here kept the button pressed after we had returned to 1x.
-      stopLiveCatchup('追直播已停止', true)
-      return
-    }
-
-    const currentTime = Number(videoPlayer.currentTime)
-    if (!Number.isFinite(currentTime)) {
-      stopLiveCatchup('無法取得播放進度', true)
-      return
-    }
-    if (liveCatchupLastTime !== null && currentTime <= liveCatchupLastTime + 0.01) {
-      liveCatchupStalledTicks++
-      if (liveCatchupStalledTicks >= LIVE_CATCHUP_STALL_TICKS) {
-        stopLiveCatchup('播放停滯，已停止追直播', true)
-        return
-      }
-    } else {
-      liveCatchupStalledTicks = 0
-    }
-    liveCatchupLastTime = currentTime
 
     // Only touch the player API when the rate actually drifted, instead of
     // re-issuing setPlaybackRate 4x per second.
@@ -819,20 +770,15 @@
       return
     }
 
-    const distance = getLiveEdgeDistance()
-    if (Number.isFinite(distance) && distance <= LIVE_CATCHUP_TARGET_DELAY) {
+    const bufferHealth = getLiveBufferHealth()
+    if (!Number.isFinite(bufferHealth)) return
+
+    if (bufferHealth <= LIVE_CATCHUP_TARGET_BUFFER) {
       floatingBarTimer = showFloatingBar(floatingBarTimer, '已是最低延遲')
       return
     }
 
-    if (!Number.isFinite(distance) && !Number.isFinite(getLiveBufferHealth())) {
-      floatingBarTimer = showFloatingBar(floatingBarTimer, '無法取得直播進度')
-      return
-    }
-
     liveCatchupPreviousRate = getPlaybackRate()
-    liveCatchupLastTime = null
-    liveCatchupStalledTicks = 0
     liveCatchupTimer = setInterval(runLiveCatchupStep, LIVE_CATCHUP_INTERVAL)
 
     updateLiveButtonState()

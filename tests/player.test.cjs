@@ -143,7 +143,7 @@ function boot(file, mode = 'worker') {
 
   const exposure = isYouTube
     ? `globalThis.__test = {
-        restorePlaybackRate, getLiveEdgeDistance, getLiveBufferHealth,
+        restorePlaybackRate, getLiveBufferHealth,
         runLiveCatchupStep, toggleLiveCatchup, stopLiveCatchup, waitElements,
         setPlayers: (video, player) => {
           videoPlayer = video; moviePlayer = player; floatingBar = { style: {} };
@@ -238,7 +238,7 @@ for (const selectedRate of [1.5, 2]) {
   })
 }
 
-test('YouTube: a normal-latency stream stops before its 0.66s buffer runs dry', () => {
+test('YouTube: 0.2.4 buffer threshold stops catch-up and clears its button', () => {
   const env = boot(scripts[0])
   const video = setLivePlayer(env)
   const attributes = {}
@@ -257,27 +257,33 @@ test('YouTube: a normal-latency stream stops before its 0.66s buffer runs dry', 
   video.seekable = range(0, 36.13)
   video.buffered = range(0, 30.86)
   env.api.runLiveCatchupStep()
+  assert.equal(env.api.catching(), true)
+  assert.equal(video.playbackRate, 1.5)
+  video.currentTime = 30.4
+  video.seekable = range(0, 36.33)
+  video.buffered = range(0, 30.8)
+  env.api.runLiveCatchupStep()
   assert.equal(env.api.catching(), false)
   assert.equal(video.playbackRate, 1)
   assert.equal(attributes['aria-pressed'], 'false')
 })
 
-test('YouTube: the seekable edge stops catch-up even while buffer is healthy', () => {
+test('YouTube: seekable edge does not stop catch-up while buffer is healthy', () => {
   const env = boot(scripts[0])
   const video = setLivePlayer(env)
   env.api.toggleLiveCatchup()
   video.currentTime = 99.6
+  video.buffered = range(0, 102)
   env.api.runLiveCatchupStep()
-  assert.equal(env.api.catching(), false)
-  assert.equal(video.playbackRate, 1)
+  assert.equal(env.api.catching(), true)
+  assert.equal(video.playbackRate, 1.5)
 })
 
-test('YouTube: a stalled live stream stops catch-up despite a distant seekable edge', () => {
+test('YouTube: low buffer at activation does not start catch-up', () => {
   const env = boot(scripts[0])
   const video = setLivePlayer(env)
+  video.buffered = range(0, 10.4)
   env.api.toggleLiveCatchup()
-  assert.equal(video.playbackRate, 1.5)
-  for (let tick = 0; tick < 8; tick++) env.api.runLiveCatchupStep()
   assert.equal(env.api.catching(), false)
   assert.equal(video.playbackRate, 1)
 })
