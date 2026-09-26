@@ -148,6 +148,7 @@ function boot(file, mode = 'worker') {
         setPlayers: (video, player) => {
           videoPlayer = video; moviePlayer = player; floatingBar = { style: {} };
         },
+        setButton: (button) => { liveBtn = button; },
         cancelWait: () => pendingWaitCancel?.(),
         catching: () => Boolean(liveCatchupTimer),
         encode: (video) => { videoPlayer = video; return encodeScreenshot(); },
@@ -237,27 +238,59 @@ for (const selectedRate of [1.5, 2]) {
   })
 }
 
-test('YouTube: low buffer does not mean live edge; healthy buffer accelerates and reaching edge restores', () => {
+test('YouTube: a normal-latency stream stops before its 0.66s buffer runs dry', () => {
   const env = boot(scripts[0])
   const video = setLivePlayer(env)
-  video.buffered = range(0, 10.4)
+  const attributes = {}
+  env.api.setButton({ setAttribute(name, value) { attributes[name] = value } })
   env.api.toggleLiveCatchup()
   assert.equal(env.api.catching(), true)
-  assert.equal(video.playbackRate, 1)
-  video.buffered = range(0, 40)
-  env.api.runLiveCatchupStep()
   assert.equal(video.playbackRate, 1.5)
+  assert.equal(attributes['aria-pressed'], 'true')
+  video.currentTime = 30
+  video.seekable = range(0, 35.93)
+  video.buffered = range(0, 32)
+  env.api.runLiveCatchupStep()
+  assert.equal(env.api.catching(), true)
+  assert.equal(video.playbackRate, 1.5)
+  video.currentTime = 30.2
+  video.seekable = range(0, 36.13)
+  video.buffered = range(0, 30.86)
+  env.api.runLiveCatchupStep()
+  assert.equal(env.api.catching(), false)
+  assert.equal(video.playbackRate, 1)
+  assert.equal(attributes['aria-pressed'], 'false')
+})
+
+test('YouTube: the seekable edge stops catch-up even while buffer is healthy', () => {
+  const env = boot(scripts[0])
+  const video = setLivePlayer(env)
+  env.api.toggleLiveCatchup()
   video.currentTime = 99.6
   env.api.runLiveCatchupStep()
   assert.equal(env.api.catching(), false)
   assert.equal(video.playbackRate, 1)
 })
 
-test('YouTube: missing live-edge information does not start catchup', () => {
+test('YouTube: a stalled live stream stops catch-up despite a distant seekable edge', () => {
+  const env = boot(scripts[0])
+  const video = setLivePlayer(env)
+  env.api.toggleLiveCatchup()
+  assert.equal(video.playbackRate, 1.5)
+  for (let tick = 0; tick < 8; tick++) env.api.runLiveCatchupStep()
+  assert.equal(env.api.catching(), false)
+  assert.equal(video.playbackRate, 1)
+})
+
+test('YouTube: no seekable edge can still catch up using the playable buffer', () => {
   const env = boot(scripts[0])
   const video = setLivePlayer(env)
   video.seekable = { length: 0 }
   env.api.toggleLiveCatchup()
+  assert.equal(env.api.catching(), true)
+  assert.equal(video.playbackRate, 1.5)
+  video.currentTime = 39.7
+  env.api.runLiveCatchupStep()
   assert.equal(env.api.catching(), false)
   assert.equal(video.playbackRate, 1)
 })
