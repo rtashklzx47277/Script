@@ -21,7 +21,12 @@ function createBrowser() {
       this.children = []
       this.attrs = new Map()
       this.listeners = []
-      this.style = { setProperty() {}, removeProperty() {} }
+      const properties = new Map()
+      this.style = {
+        setProperty(name, value) { properties.set(name, value) },
+        removeProperty(name) { properties.delete(name) },
+        getPropertyValue(name) { return properties.get(name) || '' },
+      }
       this.isConnected = true
       this.scrollHeight = 1000
       this.scrollTop = 900
@@ -105,7 +110,7 @@ function createBrowser() {
     document, window, location, MutationObserver, HTMLElement: Element,
     Node: { ELEMENT_NODE: 1 }, AbortController, Event, URL,
     screen: { availWidth: 1920 }, console,
-    getComputedStyle: () => ({ display: 'block', visibility: 'visible', color: 'white' }),
+    getComputedStyle: (element) => ({ display: 'block', visibility: 'visible', color: 'white', ...element.computedStyle }),
     setTimeout: (callback, delay) => { timeouts.set(++nextId, { callback, delay }); return nextId },
     clearTimeout: (id) => timeouts.delete(id),
     setInterval: (callback, delay) => { intervals.set(++nextId, { callback, delay }); return nextId },
@@ -343,4 +348,80 @@ test('layout: navigation invalidates an already queued automatic theater click',
   assert.equal(browser.selectors.has('#yt-chat-theater'), false)
   assert.equal(browser.intervals.size, 0)
   assert.equal(browser.timeouts.size, 0)
+})
+
+test('layout: portrait trailer returns to landscape waiting slate, then restores playback ratio', async () => {
+  const browser = createBrowser()
+  const { flexy } = addLayoutChrome(browser, true)
+  flexy.theater = true
+  const player = browser.selectors.get('#movie_player')
+  const video = browser.selectors.get('#movie_player video')
+  Object.assign(video, { videoWidth: 360, videoHeight: 640 })
+  const slate = new browser.Element()
+  const background = new browser.Element()
+  background.computedStyle = { display: 'none' }
+  player.queries = { '.ytp-offline-slate': slate }
+  slate.queries = { '.ytp-offline-slate-background': background }
+  const height = () => browser.document.documentElement.style
+    .getPropertyValue('--yt-live-layout-player-height')
+
+  browser.run('YouTubeLiveLayout.user.js')
+  await settle()
+  assert.equal(height(), '1080px')
+
+  // Ending does not replace metadata: the 360x640 trailer stays in the video.
+  background.computedStyle.display = 'block'
+  video.dispatchEvent(browser.event('ended'))
+  browser.flushFrames()
+  assert.equal(height(), '810px')
+
+  // A narrow split view uses its full width for the landscape waiting image.
+  browser.window.innerWidth = 1000
+  browser.window.innerHeight = 900
+  browser.window.dispatchEvent(browser.event('resize'))
+  browser.flushFrames()
+  assert.equal(height(), '562.5px')
+
+  // The same player can start the portrait trailer again without new metadata.
+  background.computedStyle.display = 'none'
+  video.dispatchEvent(browser.event('play'))
+  browser.flushFrames()
+  assert.equal(height(), '900px')
+
+  background.computedStyle.display = 'block'
+  browser.mutate(player)
+  browser.flushFrames()
+  assert.equal(height(), '562.5px')
+
+  // A background inside a hidden slate must not override a real portrait video.
+  slate.computedStyle = { display: 'none' }
+  browser.mutate(player)
+  browser.flushFrames()
+  assert.equal(height(), '900px')
+
+  browser.navigate('/')
+  await settle()
+  assert.equal(height(), '')
+  assert.equal(video.activeListenerCount('play'), 0)
+  assert.equal(video.activeListenerCount('ended'), 0)
+  assert.equal(browser.selectors.has('#yt-waiting-thumbnail'), false)
+  assert.equal(browser.observers.filter(observer => observer.active).length, 0)
+})
+
+test('layout: normal landscape playback keeps its ratio when the waiting background is hidden', async () => {
+  const browser = createBrowser()
+  const { flexy } = addLayoutChrome(browser, true)
+  flexy.theater = true
+  Object.assign(browser.selectors.get('#movie_player video'), {
+    videoWidth: 2560, videoHeight: 1080,
+  })
+  const slate = new browser.Element()
+  const background = new browser.Element()
+  background.computedStyle = { visibility: 'hidden' }
+  browser.selectors.get('#movie_player').queries = { '.ytp-offline-slate': slate }
+  slate.queries = { '.ytp-offline-slate-background': background }
+  browser.run('YouTubeLiveLayout.user.js')
+  await settle()
+  assert.equal(browser.document.documentElement.style
+    .getPropertyValue('--yt-live-layout-player-height'), '607.5px')
 })

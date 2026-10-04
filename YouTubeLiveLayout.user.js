@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Live Layout
 // @namespace   https://tampermonkey.net/
-// @version     0.2.6
+// @version     0.2.7
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveLayout.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveLayout.user.js
 // @description Keeps default mode intact and fills theater mode, with responsive layouts when chat is visible.
@@ -275,6 +275,18 @@
     }
   `
 
+  // Upcoming streams can retain a portrait trailer's dimensions after it ends.
+  // YouTube's default cover background then crops the landscape waiting image.
+  // Keep this fix in every watch layout, including default mode and fullscreen.
+  const waitingThumbnailCSS = `
+    #movie_player .ytp-offline-slate-background {
+      background-size: contain !important;
+      background-position: center !important;
+      background-repeat: no-repeat !important;
+      background-color: #000 !important;
+    }
+  `
+
   const isWatchPage = () =>
     location.pathname === '/watch' || location.pathname.startsWith('/live/')
 
@@ -288,6 +300,24 @@
     )
 
   const getVideoAspectRatio = () => {
+    const slate = moviePlayer?.querySelector('.ytp-offline-slate')
+    const background = slate?.querySelector('.ytp-offline-slate-background')
+
+    // The video element still describes the trailer while the waiting slate is
+    // showing. Check rendered styles: the slate also exists during playback.
+    if (background) {
+      const slateStyle = getComputedStyle(slate)
+      const backgroundStyle = getComputedStyle(background)
+      if (
+        slateStyle.display !== 'none' &&
+        slateStyle.visibility === 'visible' &&
+        backgroundStyle.display !== 'none' &&
+        backgroundStyle.visibility === 'visible'
+      ) {
+        return FALLBACK_ASPECT_RATIO
+      }
+    }
+
     if (video?.videoWidth && video?.videoHeight) {
       return video.videoWidth / video.videoHeight
     }
@@ -512,6 +542,7 @@
 
   const monitorLayout = () => {
     const observer = new MutationObserver(queueLayoutSync)
+    const playerObserver = new MutationObserver(queueLayoutSync)
     const monitoredVideo = video
 
     // ponytail: drop the childList firehose (fired on every comment/related-video
@@ -521,6 +552,13 @@
       attributes: true,
       subtree: true,
       attributeFilter: ['theater', 'collapsed']
+    })
+
+    // Starting/ending a trailer changes player classes without loading new
+    // metadata. Recompute the height immediately when the waiting image toggles.
+    playerObserver.observe(moviePlayer, {
+      attributes: true,
+      attributeFilter: ['class']
     })
 
     // #chat can be inserted late and already expanded — a childList change
@@ -533,17 +571,23 @@
     const onResize = queueLayoutSync
 
     const onLoadedMetadata = queueLayoutSync
+    const onPlaybackState = queueLayoutSync
 
     document.addEventListener('fullscreenchange', queueLayoutSync)
     window.addEventListener('resize', onResize)
     monitoredVideo.addEventListener('loadedmetadata', onLoadedMetadata)
+    monitoredVideo.addEventListener('play', onPlaybackState)
+    monitoredVideo.addEventListener('ended', onPlaybackState)
 
     return () => {
       observer.disconnect()
+      playerObserver.disconnect()
       clearInterval(heartbeat)
       document.removeEventListener('fullscreenchange', queueLayoutSync)
       window.removeEventListener('resize', onResize)
       monitoredVideo.removeEventListener('loadedmetadata', onLoadedMetadata)
+      monitoredVideo.removeEventListener('play', onPlaybackState)
+      monitoredVideo.removeEventListener('ended', onPlaybackState)
 
       if (layoutSyncFrame) {
         cancelAnimationFrame(layoutSyncFrame)
@@ -561,6 +605,7 @@
     if (!ready || token !== navigationToken) return null
 
     beginAutoTheaterWindow()
+    setStyle('yt-waiting-thumbnail', waitingThumbnailCSS)
     syncLayout()
 
     const stopMonitoring = monitorLayout()
@@ -582,6 +627,7 @@
       removeStyle('yt-theater-fill')
       removeStyle('yt-chat-theater')
       removeStyle('yt-video-only-fullscreen')
+      removeStyle('yt-waiting-thumbnail')
     }
   }
 
