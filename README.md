@@ -18,6 +18,7 @@
 | [YouTubeDefaultMaxQuality](https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeDefaultMaxQuality.user.js) | YouTube | 自動切到最高畫質 |
 | [YouTubeChannelAutoPause](https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeChannelAutoPause.user.js) | YouTube | 頻道頁自動暫停自動播放的預告影片 |
 | [TwitchPlayerTweaks](https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchPlayerTweaks.user.js) | Twitch | 隱藏剪輯按鈕與互動擴充、截圖按鈕、滾輪調音量、原生風格 tooltip |
+| [TwitchLiveChatTweaks](https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js) | Twitch 聊天室 | 上方篩選按鈕切換一般／指定用戶聊天室，保留管理員、頻道主及指定帳號的本次頁面發言紀錄；直接在篩選視窗內管理目標用戶 |
 | [pixiv](https://raw.githubusercontent.com/rtashklzx47277/Script/main/pixiv.user.js) | Pixiv | `jump.php` 跳轉頁直接前往目標網址 |
 
 `Other/` 內另有幾支站點腳本,不納入版控。
@@ -37,6 +38,7 @@ javascript:(()=>{const m=/(^|\.)(youtube\.com|youtu\.be)$/.test(location.hostnam
 ## 設定
 
 - **YouTubeLiveClock**:改檔頭的 `FORMAT` 常數(1–6)切換日期格式,選項見檔內註解。
+- **TwitchLiveChatTweaks**:按聊天室上方社群按鈕旁的漏斗圖示切換篩選模式；篩選選項依序為 Broadcaster／Moderator。在同一篩選視窗內展開「目標用戶」，選「＋ 包含」管理要顯示的帳號，選「－ 排除」管理不要顯示的帳號。排除名單優先於 Broadcaster、Moderator 及包含名單，即使該帳號符合其他條件也不會顯示。可新增、搜尋及逐一移除帳號；每次填一個 Twitch 英文登入帳號後按「新增」，多個帳號或無效輸入不會加入。新增與搜尋的標籤和輸入框排在同一行，目標用戶區可收合以留出聊天空間。設定依頻道儲存在瀏覽器，並同步到同一瀏覽器中已開啟的聊天室；切回一般聊天室仍持續收集管理員、頻道主與已指定帳號的訊息，保留表情與徽章。手動上捲暫停跟隨，按「回到最新訊息」恢復。紀錄僅保留本次頁面期間，重新整理清空；每頻道最多 2,000 則，最多保留最近使用的 5 個頻道。無法補抓載入前或指定帳號加入前已從原聊天室移除的發言。另支援 `/popout/帳號/chat` 彈出聊天室。
 - **YouTubeLiveLayout**:`PRIMARY_RATIO` 控制寬視窗中播放器與聊天室的寬度比(預設 0.75);頁面寬度低於螢幕可用寬度的 `MAX_STACKED_VIEWPORT_RATIO`(預設 0.75),且側欄低於 `MIN_SIDE_CHAT_WIDTH`(預設 400px)時,聊天室改排在影片正下方並使用完整寬度。
 - **YouTubePlayerTweaks**:`MAX_DVR_SECONDS` 為 DVR 回看上限(預設 7 天);`LIVE_CATCHUP_RATE` 控制追直播速度,`LIVE_CATCHUP_TARGET_BUFFER` 為可播放緩衝的追平門檻(預設 0.5 秒)。達到門檻時會停止追平並恢復原本速度。
 
@@ -59,6 +61,8 @@ node --test tests/*.test.cjs
 測試涵蓋播放器追平與速度恢復、截圖 Worker 及失敗回退、SPA 導覽與等待清理、聊天室跟隨、時鐘重建、版面初始化、字幕與畫質就緒、網址跳轉,以及 `Other/` 的圖片和側欄操作。`Other/` 不在版控中,缺少這些本機腳本時會略過對應測試。
 
 測試在 Node.js VM 中模擬瀏覽器 API;實際網站 DOM、CSS 排版、剪貼簿權限與 PNG 像素仍需在瀏覽器驗證。
+
+Twitch 篩選聊天室另有 `tests/fixtures/twitch-chat.html` 測試頁，搭配本機靜態伺服器將該頁提供在 `/fixture_channel`，並將新腳本提供在 `/TwitchLiveChatTweaks.user.js`，可驗證指定帳號管理、訊息清理、聊天室重建、頻道切換及跨分頁同步。此頁不會傳送聊天訊息。
 
 ## 版本
 

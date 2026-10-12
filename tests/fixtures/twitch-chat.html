@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-TW">
+<meta charset="utf-8">
+<title>Twitch 聊天室篩選驗證</title>
+<style>
+  :root { --color-background-base: #18181b; --color-text-base: #efeff1; --color-text-alt-2: #adadb8; }
+  body { margin: 32px; color: #efeff1; background: #0e0e10; font: 14px Arial, sans-serif; }
+  .stream-chat { width: 340px; border: 1px solid #45454a; }
+  .stream-chat-header { position: relative; display: flex; height: 60px; justify-content: center; align-items: center; }
+  .actions { display: flex; position: absolute; right: 8px; align-items: center; }
+  .actions button { color: inherit; background: none; border: 0; cursor: pointer; }
+  .chat-host, [data-a-target="chat-scroller"] { height: 430px; }
+  [data-a-target="chat-scroller"] { overflow: auto; }
+  .chat-line__message { padding: 8px 10px; }
+  .chat-badge { width: 18px; vertical-align: middle; }
+  .chat-image { width: 28px; vertical-align: middle; }
+  .input-area { padding: 14px; border-top: 1px solid #45454a; }
+  .input-area input { box-sizing: border-box; width: 100%; padding: 8px; color: inherit; background: #303034; border: 0; }
+  .fixture-tools { margin-top: 20px; display: flex; gap: 8px; flex-wrap: wrap; }
+</style>
+<h2>聊天室測試頁</h2>
+<div class="stream-chat">
+  <div class="stream-chat-header">
+    <h4 id="chat-room-header-label">實況聊天室</h4>
+    <div class="actions"><div><button data-test-selector="chat-viewer-list" aria-label="社群">♙</button></div></div>
+  </div>
+  <section class="chat-room"><div class="chat-host"><div data-a-target="chat-scroller"></div></div></section>
+  <div class="input-area"><input aria-label="傳送訊息" placeholder="傳送訊息（測試頁不傳送）"></div>
+</div>
+<div class="fixture-tools">
+  <button id="add-mod">新增管理員訊息</button>
+  <button id="add-user">新增指定帳號 alice 訊息</button>
+  <button id="add-ordinary">新增一般用戶訊息</button>
+  <button id="prune">清空原聊天室 DOM</button>
+  <button id="remount">重建聊天室</button>
+  <button id="navigate">切換頻道</button>
+</div>
+<script>
+  const scroller = () => document.querySelector('[data-a-target="chat-scroller"]')
+  let serial = 0
+  function addMessage(user, role = '') {
+    const line = document.createElement('div')
+    line.className = 'chat-line__message'
+    line.dataset.aTarget = 'chat-line-message'
+    line.dataset.aUser = user
+    const badge = role ? `<button data-a-target="chat-badge"><img class="chat-badge" alt="管理員" src="https://static-cdn.jtvnw.net/badges/v1/3267646d-33f0-4b17-b3df-f923a41db1d0/1"></button>` : ''
+    line.innerHTML = `<span class="chat-line__username-container">${badge}<span data-a-target="chat-message-username" data-a-user="${user}" style="color:#ffb86c">${user}</span></span>: <span data-a-target="chat-line-message-body">測試訊息 ${++serial} <img class="chat-image" alt="Kappa" src="https://static-cdn.jtvnw.net/emoticons/v2/25/default/dark/1.0"></span>`
+    scroller().appendChild(line)
+  }
+  addMessage('mod_account', 'moderator')
+  addMessage('fixture_channel')
+  addMessage('ordinary')
+  document.getElementById('add-mod').onclick = () => addMessage('mod_account', 'moderator')
+  document.getElementById('add-user').onclick = () => addMessage('alice')
+  document.getElementById('add-ordinary').onclick = () => addMessage('ordinary')
+  document.getElementById('prune').onclick = () => scroller().replaceChildren()
+  document.getElementById('remount').onclick = () => {
+    const chat = document.querySelector('.stream-chat')
+    // The application does not reproduce the userscript's injected controls.
+    const copy = chat.cloneNode(true)
+    copy.querySelectorAll('.ttc-panel, .ttc-toggle').forEach(node => node.remove())
+    copy.querySelector('.chat-host').className = 'chat-host'
+    copy.querySelector('[data-a-target="chat-scroller"]').className = ''
+    copy.querySelector('[data-a-target="chat-scroller"]').replaceChildren()
+    chat.replaceWith(copy)
+  }
+  document.getElementById('navigate').onclick = () => {
+    history.pushState({}, '', location.pathname === '/fixture_channel' ? '/other_channel' : '/fixture_channel')
+    scroller().replaceChildren()
+  }
+</script>
+<script src="/TwitchLiveChatTweaks.user.js"></script>
+</html>
