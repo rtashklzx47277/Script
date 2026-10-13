@@ -13,6 +13,8 @@
   #close-button button { color: #efeff1; border: 0; background: transparent; font-size: 20px; }
   #live-chat-header-context-menu { color: #efeff1; border: 0; background: transparent; font-size: 20px; }
   #chat-contents, #item-scroller { height: 430px; }
+  yt-live-chat-renderer.summary-open #chat-contents, yt-live-chat-renderer.summary-open #item-scroller { height: 210px; }
+  #fixture-summary { box-sizing: border-box; height: 220px; padding: 20px; background: #282828; border-radius: 20px; }
   #item-scroller { overflow: auto; }
   yt-live-chat-text-message-renderer { display: flex; position: relative; padding: 8px 12px; }
   yt-live-chat-text-message-renderer > #content { flex: 1; min-width: 0; }
@@ -59,7 +61,8 @@
     <div id="close-button"><button aria-label="關閉聊天室">×</button></div>
   </yt-live-chat-header-renderer>
   <div id="chat-contents"><div id="item-scroller"><div id="item-offset"><div id="items"></div></div></div><button id="show-more" disabled hidden>顯示更多</button></div>
-  <div class="input-area"><input aria-label="傳送訊息" placeholder="傳送訊息（測試頁不傳送）"></div>
+  <div id="fixture-summary" hidden>✦ チャットの要約<br>摘要測試：這個原生區塊會占用 220px，縮小訊息區；篩選模式應繼續填滿原有範圍。</div>
+  <div class="input-area" id="input-panel"><input aria-label="傳送訊息" placeholder="傳送訊息（測試頁不傳送）"></div>
 </yt-live-chat-renderer>
 <tp-yt-iron-dropdown style="left: 24px; top: 52px; max-width: 400px;" hidden>
   <ytd-menu-popup-renderer role="menu" style="max-width: 215px; max-height: 160px; box-sizing: border-box;">
@@ -77,12 +80,23 @@
   <button id="prune">清空原聊天室 DOM</button>
   <button id="remount">重建聊天室</button>
   <button id="overlay-toggle">顯示遮擋測試物件</button>
+  <button id="summary-toggle">切換聊天摘要</button>
+  <button id="width-toggle">切換聊天室寬度</button>
 </div>
 <div class="fixture-overlay" id="fixture-overlay" hidden>原生浮動物件遮擋測試</div>
 <p id="fixture-requests" data-profiles="0" data-menus="0">名稱查詢 0 次 · 操作選單 0 次</p>
 <p id="fixture-native-result" role="status"></p>
 <script>
   const fixtureParams = new URL(location.href).searchParams
+  document.getElementById('width-toggle').onclick = () => {
+    const renderer = document.querySelector('yt-live-chat-renderer')
+    renderer.style.width = renderer.style.width === '500px' ? '340px' : '500px'
+  }
+  document.getElementById('summary-toggle').onclick = () => {
+    const summary = document.getElementById('fixture-summary')
+    summary.hidden = !summary.hidden
+    document.querySelector('yt-live-chat-renderer').classList.toggle('summary-open', !summary.hidden)
+  }
   document.getElementById('overlay-toggle').onclick = () => {
     const overlay = document.getElementById('fixture-overlay')
     overlay.hidden = !overlay.hidden
@@ -103,8 +117,9 @@
     if (!String(url).startsWith('/youtubei/v1/browse')) return originalFetch(url, options)
     countRequest('profiles')
     const id = JSON.parse(options.body).browseId
-    const profile = id === 'UCAbCdEfGhIjKlMnOpQrStUv' ? ['Alice 的頻道', '@alice']
+    let profile = id === 'UCAbCdEfGhIjKlMnOpQrStUv' ? ['Alice 的頻道', '@alice']
       : id === 'UCZYXWVUTSRQPONMLKJIHGFE' ? ['聊天室管理員', '@mod_account'] : ['測試實況主', '@fixture_channel']
+    if (fixtureParams.has('longName')) profile = ['這是一個非常長的頻道名稱 Long Channel Name With Many Characters', '@VeryLongAccountHandleForSingleLineLayout']
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => fixtureParams.has('failProfile') ? reject(new Error('fixture offline'))
         : resolve(new Response(JSON.stringify({ metadata: { channelMetadataRenderer: {

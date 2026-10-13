@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.4.2
+// @version     0.4.3
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @description Adds author profile cards, live chat account filters and session history, hides the chat mode menu, improves emoji copying and auto-follow, and adds reload.
@@ -794,6 +794,22 @@
       return request
     }
 
+    const fitCardText = state => {
+      for (const [node, size] of [[state.title, 18], [state.handle, 13], [state.id, 12]]) {
+        if (!node) continue
+        node.style.fontSize = `${size}px`
+        const available = node.clientWidth
+        if (!(available > 0)) continue
+        let fitted = size
+        // Measure actual glyphs rather than guessing from character count.
+        // Recheck after scaling to account for rounding and font metrics.
+        for (let pass = 0; pass < 3 && node.scrollWidth > available; pass++) {
+          fitted *= Math.max(0.1, available - 1) / node.scrollWidth
+          node.style.fontSize = `${fitted}px`
+        }
+      }
+    }
+
     const positionCard = state => {
       const width = document.documentElement?.clientWidth || window.innerWidth || 400
       const height = document.documentElement?.clientHeight || window.innerHeight || 600
@@ -801,6 +817,7 @@
       const left = chat?.left || 0
       const cardWidth = chat?.width || width
       state.card.style.width = `${cardWidth}px`
+      fitCardText(state)
       const cardHeight = state.card.getBoundingClientRect().height
       let top = state.anchor.bottom + 6
       if (top + cardHeight > height - 8) top = state.anchor.top - cardHeight - 6
@@ -813,6 +830,7 @@
       if (!state || state.closed) return
       state.closed = true
       state.card.hidden = true
+      state.resizeObserver?.disconnect()
       clearTimeout(state.menuTimer)
       if (activeCard === state) activeCard = null
       if (restoreFocus && state.opener.isConnected) state.opener.focus()
@@ -904,10 +922,11 @@
       const nameRow = element('div', { class: 'ytuc-name-row' }, [title])
       const identity = element('div', { class: 'ytuc-identity' }, [nameRow, handle, id])
       const badges = [...(author.badges || [])]
+      let badgeList
       if (author.broadcaster && !badges.some(badge => badge.type === 'owner')) badges.push({ label: 'Broadcaster', color: author.color })
       if (author.moderator && !badges.some(badge => badge.type === 'moderator')) badges.push({ label: 'Moderator', color: author.color })
       if (badges.length) {
-        const badgeList = element('div', { class: 'ytuc-badges', role: 'list', 'aria-label': '徽章' })
+        badgeList = element('div', { class: 'ytuc-badges', role: 'list', 'aria-label': '徽章' })
         for (const badge of badges) {
           const item = element('span', { class: 'ytuc-badge', role: 'listitem', 'aria-label': badge.label, title: badge.label })
           if (badge.color) item.style.color = badge.color
@@ -916,7 +935,6 @@
           } else item.textContent = badge.label
           badgeList.appendChild(item)
         }
-        nameRow.appendChild(badgeList)
       }
       identity.appendChild(profileStatus)
       identity.appendChild(profileRetry)
@@ -925,8 +943,9 @@
       const menuRetry = element('button', { class: 'ytuc-retry', type: 'button', hidden: '' }, ['重試操作'])
       const menuHost = element('div', { class: 'ytuc-actions' }, [menuStatus, menuRetry])
       card.appendChild(header)
+      if (badgeList) card.appendChild(element('div', { class: 'ytuc-badge-section' }, [badgeList]))
       card.appendChild(menuHost)
-      const state = { author, opener, anchor: opener.getBoundingClientRect(), card, title, handle,
+      const state = { author, opener, anchor: opener.getBoundingClientRect(), card, title, handle, id,
         profileStatus, profileRetry, menuHost, menuStatus, menuRetry, menuRun: 0, closed: false }
       cardStates.set(card, state)
       activeCard = state
@@ -960,6 +979,12 @@
       })
       app.appendChild(card)
       positionCard(state)
+      const chat = $('yt-live-chat-renderer')
+      if (chat && typeof ResizeObserver === 'function') {
+        state.resizeObserver = new ResizeObserver(() => { if (!state.closed) positionCard(state) })
+        state.resizeObserver.observe(chat)
+      }
+      document.fonts?.ready.then(() => { if (!state.closed) positionCard(state) })
       card.focus({ preventScroll: true })
       if (author.channelId) loadProfile()
       loadCardMenu(state)
@@ -1125,9 +1150,15 @@
     let panelFramePending = false
     const positionFilterPanel = state => {
       if (!state.inTopLayer) return
-      const rect = state.host.getBoundingClientRect()
+      // Native summaries/banners can shrink the message scroller. Cover the
+      // whole chat between its header and actual input, independent of them.
+      const rect = state.renderer?.getBoundingClientRect() || state.host.getBoundingClientRect()
+      const header = state.header?.getBoundingClientRect()
+      const input = state.renderer && $('#input-panel', state.renderer)?.getBoundingClientRect()
+      const top = header ? Math.max(rect.top, header.bottom) : rect.top
+      const bottom = input?.height > 0 && input.top >= top ? input.top : rect.bottom ?? rect.top + rect.height
       Object.assign(state.panel.style, { position: 'fixed', inset: 'auto', margin: '0',
-        left: `${rect.left}px`, top: `${rect.top}px`, width: `${rect.width}px`, height: `${rect.height}px` })
+        left: `${rect.left}px`, top: `${top}px`, width: `${rect.width}px`, height: `${Math.max(0, bottom - top)}px` })
     }
     const schedulePanelPosition = () => {
       if (!mounted?.inTopLayer || panelFramePending) return
@@ -1156,6 +1187,10 @@
         if (typeof ResizeObserver === 'function') {
           state.layerObserver = new ResizeObserver(schedulePanelPosition)
           state.layerObserver.observe(state.host)
+          if (state.renderer) state.layerObserver.observe(state.renderer)
+          if (state.header) state.layerObserver.observe(state.header)
+          const input = state.renderer && $('#input-panel', state.renderer)
+          if (input) state.layerObserver.observe(input)
         }
       }
       positionFilterPanel(state)
@@ -1352,6 +1387,7 @@
         mounted.scroller !== scroller || mounted.items !== sourceItems || !mounted.button.isConnected || !mounted.panel.isConnected)) unmount()
       if (mounted || !header || !menu || !sourceItems || !scroller?.parentElement) return
       const state = { history: getHistory(channel), header, scroller, items: sourceItems,
+        renderer: scroller.closest('yt-live-chat-renderer'),
         host: scroller.parentElement, sourceInert: scroller.inert,
         sourceAriaHidden: scroller.getAttribute('aria-hidden') }
       state.host.classList.add('ytcf-host')
@@ -1448,17 +1484,18 @@
       .ytuc-header { display: flex; align-items: flex-start; gap: 12px; padding: 16px 12px; }
       .ytuc-photo { display: flex; align-items: center; justify-content: center; flex: 0 0 56px; width: 56px; height: 56px; overflow: hidden; border-radius: 50%; background: var(--yt-live-chat-button-default-background-color, #8883); font-size: 24px; }
       .ytuc-photo img { display: block; width: 100%; height: 100%; object-fit: cover; }
-      .ytuc-name-row { line-height: 1.4; overflow-wrap: anywhere; }
-      .ytuc-name { color: inherit; text-decoration: none; font-size: 18px; font-weight: 600; overflow-wrap: anywhere; }
+      .ytuc-name-row { line-height: 1.4; }
+      .ytuc-name { display: block; width: 100%; white-space: nowrap; color: inherit; text-decoration: none; font-size: 18px; font-weight: 600; }
       .ytuc-name:hover { text-decoration: underline; }
       .ytuc-card .ytuc-close { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 28px; width: 28px; height: 28px; margin: 0; padding: 0; border: 0; border-radius: 50%; color: inherit; background: none; cursor: pointer; font: 24px/1 Arial, sans-serif; }
       .ytuc-close:hover { background: var(--yt-live-chat-button-default-background-color, #8882); }
       .ytuc-identity { flex: 1; min-width: 0; padding-top: 4px; }
-      .ytuc-handle { margin-top: 6px; overflow-wrap: anywhere; }
-      .ytuc-id { margin-top: 4px; color: var(--yt-live-chat-secondary-text-color, #606060); overflow-wrap: anywhere; user-select: text; font: 12px/1.5 ui-monospace, Consolas, monospace; }
-      .ytuc-badges { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 3px; margin-left: 4px; vertical-align: middle; }
-      .ytuc-badge { display: inline-flex; align-items: center; justify-content: center; font-size: 11px; }
-      .ytuc-badge img, .ytuc-badge svg { display: block; width: 16px !important; height: 16px !important; object-fit: contain; }
+      .ytuc-handle { margin-top: 6px; width: 100%; white-space: nowrap; }
+      .ytuc-id { margin-top: 4px; width: 100%; white-space: nowrap; color: var(--yt-live-chat-secondary-text-color, #606060); user-select: text; font: 12px/1.5 ui-monospace, Consolas, monospace; }
+      .ytuc-badge-section { padding: 0 12px 12px; }
+      .ytuc-badges { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+      .ytuc-badge { display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box; min-width: 36px; min-height: 36px; padding: 4px; border: 1px solid var(--yt-live-chat-message-input-border-color, #8884); border-radius: 4px; font-size: 11px; }
+      .ytuc-badge img, .ytuc-badge svg { display: block; width: 26px !important; height: 26px !important; object-fit: contain; }
       .ytuc-badge svg { fill: currentColor; }
       .ytuc-actions { padding: 12px; border-top: 1px solid var(--yt-live-chat-message-input-border-color, #8883); background: var(--yt-live-chat-action-panel-background-color, #8881); }
       .ytuc-status { margin: 0; color: var(--yt-live-chat-secondary-text-color, #606060); font-size: 12px; }

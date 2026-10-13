@@ -167,7 +167,7 @@ function boot({ saved, blocked = false, trustedTypes = false, parentWindow, fetc
     globalThis.api = { normalizeAccount, getChannel, getHistory, loadSettings, saveSettings,
       readMessage, matchesFilter, captureLine, captureTree, renderMessages, changeTargetUsers,
       refresh, refreshHeader, setEnabled, showTargetStatus, guardMessageMenu, guardMenuDismissal,
-      getProfile, showAuthorCard, authorSnapshot, dismissCard, getAuthorCard, setPanelLayer, positionFilterPanel,
+      getProfile, showAuthorCard, authorSnapshot, dismissCard, getAuthorCard, setPanelLayer, positionFilterPanel, fitCardText,
       setMounted: state => { mounted = state },
       get mounted() { return mounted } };
     // End YouTube chat filtering.`), context)
@@ -580,7 +580,7 @@ test('YouTube author snapshots: preserve the clicked message and badge visuals w
   assert.equal(snapshot.badges[0].visual.parentElement, null)
 })
 
-test('YouTube author cards: keep native role colors and inline badges after the channel name loads', async () => {
+test('YouTube author cards: keep native role colors and badges below identity without a heading', async () => {
   for (const [role, color] of [['member', 'rgb(43, 166, 64)'], ['moderator', 'rgb(62, 166, 255)'], ['owner', 'rgb(255, 214, 0)']]) {
     const env = boot({ fetchProfile: () => Promise.resolve({ ok: true, json: async () => ({ metadata: {
       channelMetadataRenderer: { externalId: channelA, title: '頻道名稱', vanityChannelUrl: 'https://www.youtube.com/@example' },
@@ -601,12 +601,13 @@ test('YouTube author cards: keep native role colors and inline badges after the 
     const identity = state.card.querySelector('.ytuc-identity')
     const nameRow = identity.querySelector('.ytuc-name-row')
     assert.equal(nameRow.children[0], state.title)
-    assert.equal(nameRow.children[1].className, 'ytuc-badges')
-    assert.equal(nameRow.querySelector('.ytuc-badge').style.color, color)
+    assert.equal(nameRow.children.length, 1)
+    assert.equal(state.card.querySelector('.ytuc-badge').style.color, color)
     assert.equal(identity.children[1].className, 'ytuc-handle')
     assert.equal(identity.children[2].className, 'ytuc-id')
     assert.equal(identity.parentElement.className, 'ytuc-header')
-    assert.equal(state.card.querySelector('.ytuc-badge-section'), null)
+    assert.equal(state.card.querySelector('.ytuc-badge-section').parentElement, state.card)
+    assert.equal(state.card.querySelector('.ytuc-badge-heading'), null)
   }
 })
 
@@ -656,6 +657,50 @@ test('YouTube filter layer: use the browser top layer, track the chat bounds and
   assert.equal(closed, 1)
   assert.equal(panel.style.position, '')
   assert.equal(panel.getAttribute('popover'), null)
+})
+
+test('YouTube filter layer: summaries can shrink the native scroller without shrinking the filter', () => {
+  const env = boot()
+  const renderer = new env.Element('yt-live-chat-renderer')
+  renderer.getBoundingClientRect = () => ({ left: 20, top: 10, width: 330, bottom: 650, height: 640 })
+  const input = renderer.appendChild(new env.Element())
+  input.id = 'input-panel'
+  input.getBoundingClientRect = () => ({ top: 590, height: 60 })
+  const header = new env.Element()
+  header.getBoundingClientRect = () => ({ bottom: 60 })
+  const host = new env.Element()
+  host.getBoundingClientRect = () => ({ left: 20, top: 60, width: 330, height: 530 })
+  const state = { renderer, header, host, panel: new env.Element(), inTopLayer: true }
+  env.api.positionFilterPanel(state)
+  assert.equal(state.panel.style.top, '60px')
+  assert.equal(state.panel.style.height, '530px')
+  host.getBoundingClientRect = () => ({ left: 20, top: 60, width: 330, height: 200 })
+  env.api.positionFilterPanel(state)
+  assert.equal(state.panel.style.height, '530px')
+  // Some native panels replace the input instead of keeping it visible.
+  input.getBoundingClientRect = () => ({ top: 0, height: 0 })
+  env.api.positionFilterPanel(state)
+  assert.equal(state.panel.style.height, '590px')
+})
+
+test('YouTube author cards: shrink actual text widths to one line and restore sizes when the card widens', () => {
+  const env = boot()
+  let available = 120
+  const text = (length) => {
+    const node = new env.Element()
+    Object.defineProperty(node, 'clientWidth', { get: () => available })
+    Object.defineProperty(node, 'scrollWidth', { get: () => Math.ceil(length * parseFloat(node.style.fontSize) * 0.6) })
+    return node
+  }
+  const state = { title: text(40), handle: text(30), id: text(24) }
+  env.api.fitCardText(state)
+  for (const node of Object.values(state)) assert.ok(node.scrollWidth <= node.clientWidth)
+  assert.ok(parseFloat(state.title.style.fontSize) < 18)
+  available = 600
+  env.api.fitCardText(state)
+  assert.equal(state.title.style.fontSize, '18px')
+  assert.equal(state.handle.style.fontSize, '13px')
+  assert.equal(state.id.style.fontSize, '12px')
 })
 
 test('YouTube user cards: exactly match chat bounds without an inset or width cap', () => {
