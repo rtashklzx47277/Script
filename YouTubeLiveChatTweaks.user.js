@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.3.4
+// @version     0.3.5
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @description Adds live chat include/exclude account filters and session history, hides the chat mode menu, improves emoji copying and auto-follow, and adds reload.
@@ -157,9 +157,46 @@
   }
   document.addEventListener('click', guardMessageMenu, true)
 
+  const getOpenChatMenu = () => [...document.querySelectorAll('tp-yt-iron-dropdown')]
+    .find(menu => !menu.id && menu.parentElement?.matches('yt-live-chat-app') &&
+      !menu.hidden && menu.getAttribute('aria-hidden') !== 'true' && menu.getClientRects().length > 0)
+
+  const guardMenuDismissal = event => {
+    const menu = getOpenChatMenu()
+    if (!menu || menu.contains(event.target)) return
+    // Keep the popup open through pointerdown/mousedown so the final click
+    // can dismiss it without reaching or focusing the control underneath.
+    event.preventDefault()
+    event.stopImmediatePropagation()
+    if (event.type === 'click') {
+      if (typeof menu.close === 'function') menu.close()
+      else document.dispatchEvent(new KeyboardEvent('keydown', {
+        key: 'Escape', code: 'Escape', bubbles: true,
+      }))
+    }
+  }
+  for (const type of ['pointerdown', 'mousedown', 'click']) {
+    window.addEventListener(type, guardMenuDismissal, true)
+  }
+  // An embedded chat also dismisses before a click reaches the watch page.
+  try {
+    const parentWindow = window.parent
+    if (parentWindow && parentWindow !== window && parentWindow.document) {
+      const bindParent = attach => {
+        for (const type of ['pointerdown', 'mousedown', 'click']) {
+          parentWindow[attach ? 'addEventListener' : 'removeEventListener'](type, guardMenuDismissal, true)
+        }
+      }
+      bindParent(true)
+      window.addEventListener('pagehide', () => bindParent(false))
+      window.addEventListener('pageshow', () => bindParent(true))
+    }
+  } catch (_) {} // Cross-origin embeds keep the guards inside the chat.
+
   addStyle(`
     #item-scroller #items > :is(${NATIVE_MESSAGE_SELECTOR}):has(> #menu) {
       position: relative !important;
+      line-height: 1.5;
       padding-inline-end: calc(var(--chat-inline-padding) + 32px) !important;
     }
     #item-scroller #items > :is(${NATIVE_MESSAGE_SELECTOR}) > #content {
@@ -170,6 +207,31 @@
       inset-inline-end: var(--chat-inline-padding) !important;
       top: var(--chat-message-padding-block) !important;
       width: 32px;
+      height: 1.5em;
+      display: flex !important;
+      align-items: center;
+      transform: none !important;
+      transition: none !important;
+      visibility: visible !important;
+      opacity: 0 !important;
+      pointer-events: none;
+    }
+    #item-scroller #items > :is(${NATIVE_MESSAGE_SELECTOR}):is(:hover, :focus-within) > #menu {
+      opacity: 1 !important;
+      pointer-events: auto;
+    }
+    #item-scroller #items > :is(${NATIVE_MESSAGE_SELECTOR}) > #menu #menu-button {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex: 0 0 32px;
+      box-sizing: border-box;
+      width: 32px;
+      height: 32px;
+      padding: 4px;
+    }
+    @media (hover: none) {
+      #item-scroller #items > :is(${NATIVE_MESSAGE_SELECTOR}) > #menu { opacity: 1 !important; pointer-events: auto; }
     }
   `)
 
@@ -1054,7 +1116,7 @@
       .ytcf-users input { display: block; box-sizing: border-box; flex: 1; min-width: 0; width: 100%; padding: 5px 8px; border: 1px solid var(--yt-live-chat-message-input-border-color, #8886); border-radius: 4px; color: inherit; background: var(--yt-live-chat-background-color, #fff); font-size: 12px; }
       .ytcf-panel button { padding: 6px 10px; border: 0; border-radius: 4px; color: var(--yt-live-chat-button-default-text-color, #065fd4); background: var(--yt-live-chat-action-panel-background-color, #8882); cursor: pointer; }
       .ytcf-users input, .ytcf-users button[type="submit"] { box-sizing: border-box; height: 30px; font: inherit; }
-      .ytcf-users button[type="submit"] { flex-shrink: 0; padding: 0 12px; border: 1px solid var(--yt-live-chat-message-input-border-color, #8886); border-radius: 15px; color: var(--yt-live-chat-primary-text-color, #0f0f0f); background: var(--yt-live-chat-button-default-background-color, #8882); font-weight: 600; }
+      .ytcf-users button[type="submit"] { flex-shrink: 0; padding: 0 10px; border: 1px solid var(--yt-live-chat-message-input-border-color, #8886); border-radius: 4px; color: var(--yt-live-chat-primary-text-color, #0f0f0f); background: var(--yt-live-chat-button-default-background-color, #8882); font-weight: 600; }
       .ytcf-users button[type="submit"]:hover { filter: brightness(1.2); }
       .ytcf-empty { padding: 16px 12px; color: var(--yt-live-chat-secondary-text-color, #606060); }
       .ytcf-list { flex: 1; min-height: 0; overflow: auto; overflow-anchor: none; padding: 6px 0; }

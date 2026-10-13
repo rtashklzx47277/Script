@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="zh-TW">
+<meta charset="utf-8">
+<title>YouTube 嵌入聊天室選單驗證</title>
+<style>
+  body { margin: 24px; background: #0f0f0f; color: #fff; font: 14px Arial, sans-serif; }
+  iframe { width: 340px; height: 550px; border: 1px solid #555; }
+  button { margin: 12px; padding: 8px; }
+</style>
+<h2>嵌入聊天室：外側第一次點擊只關閉選單</h2>
+<iframe title="YouTube 聊天室" src="/live_chat?v=fixture_video&amp;embedded=1"></iframe>
+<button id="parent-action">外側操作：0 次</button>
+<script>
+  let count = 0
+  document.getElementById('parent-action').onclick = event => {
+    event.currentTarget.textContent = `外側操作：${++count} 次`
+  }
+</script>
+</html>

@@ -4,7 +4,7 @@ const fs = require('node:fs')
 const vm = require('node:vm')
 const path = require('node:path')
 
-function boot({ saved, blocked = false, trustedTypes = false } = {}) {
+function boot({ saved, blocked = false, trustedTypes = false, parentWindow } = {}) {
   class Element {
     constructor(tag = 'div') {
       this.tagName = tag
@@ -25,6 +25,7 @@ function boot({ saved, blocked = false, trustedTypes = false } = {}) {
       this._innerHTML = value
     }
     get isConnected() { return this === document || !!this.parentElement?.isConnected }
+    getClientRects() { return this.isConnected && !this.hidden ? [{}] : [] }
     get classList() {
       const apply = (name, enabled) => {
         const classes = new Set((this.className || '').split(' ').filter(Boolean))
@@ -124,7 +125,7 @@ function boot({ saved, blocked = false, trustedTypes = false } = {}) {
   let nextTimer = 0
   const context = {
     document, location: { pathname: '/live_chat', href: 'https://www.youtube.com/live_chat?v=sample_video', origin: 'https://www.youtube.com' }, console, URL,
-    window: { addEventListener(name, fn) { listeners.set(name, fn) } },
+    window: { parent: parentWindow, addEventListener(name, fn) { listeners.set(name, fn) } },
     setTimeout(fn, delay) { const id = ++nextTimer; timers.set(id, { fn, delay }); return id },
     clearTimeout(id) { timers.delete(id) }, setInterval() {}, requestAnimationFrame() {},
     Node: { ELEMENT_NODE: 1 }, HTMLElement: Element, AbortController,
@@ -140,7 +141,8 @@ function boot({ saved, blocked = false, trustedTypes = false } = {}) {
   vm.runInContext(source.replace('    // End YouTube chat filtering.', `
     globalThis.api = { normalizeAccount, getChannel, getHistory, loadSettings, saveSettings,
       readMessage, matchesFilter, captureLine, captureTree, renderMessages, changeTargetUsers,
-      refresh, refreshHeader, setEnabled, showTargetStatus, guardMessageMenu, get mounted() { return mounted } };
+      refresh, refreshHeader, setEnabled, showTargetStatus, guardMessageMenu, guardMenuDismissal,
+      get mounted() { return mounted } };
     // End YouTube chat filtering.`), context)
   const message = (user, text, role = '', id = '') => {
     const line = new Element('yt-live-chat-text-message-renderer')
@@ -156,7 +158,7 @@ function boot({ saved, blocked = false, trustedTypes = false } = {}) {
     body.textContent = text
     return { line, body, author, chip }
   }
-  return { api: context.api, message, Element, storage, timers, location: context.location, document, window: context.window }
+  return { api: context.api, message, Element, storage, timers, listeners, location: context.location, document, window: context.window }
 }
 
 test('YouTube filters: mount, toggle and remount when Trusted Types rejects HTML strings', () => {
@@ -230,6 +232,50 @@ test('YouTube message actions: only the message menu propagates, links keep thei
     assert.equal(stopped, expected)
     assert.equal(prevented, false)
   }
+})
+
+test('YouTube menus: an outside gesture only closes the popup; inside clicks and the next click work', () => {
+  const { api, Element, document } = boot()
+  const app = document.body.appendChild(new Element('yt-live-chat-app'))
+  const popup = app.appendChild(new Element('tp-yt-iron-dropdown'))
+  let closes = 0
+  popup.close = () => { closes++; popup.hidden = true }
+  const item = popup.appendChild(new Element('button'))
+  const outside = app.appendChild(new Element('button'))
+  const fire = (type, target) => {
+    let stopped = false
+    let prevented = false
+    api.guardMenuDismissal({ type, target, stopImmediatePropagation() { stopped = true }, preventDefault() { prevented = true } })
+    return [stopped, prevented]
+  }
+  assert.deepEqual(fire('click', item), [false, false])
+  for (const type of ['pointerdown', 'mousedown']) {
+    assert.deepEqual(fire(type, outside), [true, true])
+    assert.equal(closes, 0)
+  }
+  assert.deepEqual(fire('click', outside), [true, true])
+  assert.equal(closes, 1)
+  assert.deepEqual(fire('click', outside), [false, false])
+  popup.hidden = false
+  popup.setAttribute('aria-hidden', 'true')
+  assert.deepEqual(fire('click', outside), [false, false])
+})
+
+test('YouTube menus: parent-page guards are released on pagehide and restored on pageshow', () => {
+  const parentHandlers = new Map()
+  const parentWindow = {
+    document: { querySelector: () => null }, location: { href: 'https://www.youtube.com/watch?v=sample_video' },
+    addEventListener(name, fn) { parentHandlers.set(name, fn) },
+    removeEventListener(name, fn) { if (parentHandlers.get(name) === fn) parentHandlers.delete(name) },
+  }
+  const { api, listeners } = boot({ parentWindow })
+  assert.equal(parentHandlers.get('click'), api.guardMenuDismissal)
+  assert.equal(parentHandlers.size, 3)
+  listeners.get('pagehide')()
+  assert.equal(parentHandlers.size, 0)
+  listeners.get('pageshow')()
+  assert.equal(parentHandlers.get('pointerdown'), api.guardMenuDismissal)
+  assert.equal(parentHandlers.size, 3)
 })
 
 test('YouTube target status: clear after three seconds and cancel the previous notice timer', () => {

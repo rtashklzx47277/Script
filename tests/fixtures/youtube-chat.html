@@ -60,7 +60,7 @@
     <tp-yt-paper-item role="menuitem">▣ <span>フィードバックを送信</span></tp-yt-paper-item>
   </ytd-menu-popup-renderer>
 </tp-yt-iron-dropdown>
-<div id="message-action-menu" role="menu" hidden><button role="menuitem">報告</button><button role="menuitem">ブロック</button></div>
+<tp-yt-iron-dropdown hidden><div id="message-action-menu" role="menu"><button role="menuitem">報告</button><button role="menuitem">ブロック</button></div></tp-yt-iron-dropdown>
 </yt-live-chat-app>
 <div class="fixture-tools">
   <button id="add-mod">新增 Moderator 訊息</button>
@@ -70,6 +70,7 @@
 </div>
 <script>
   if (new URL(location.href).searchParams.has('embedded')) document.body.classList.add('embedded')
+  for (const popup of document.querySelectorAll('tp-yt-iron-dropdown')) popup.close = () => { popup.hidden = true }
   document.getElementById('live-chat-header-context-menu').onclick = () => {
     const popup = document.querySelector('tp-yt-iron-dropdown')
     popup.hidden = !popup.hidden
@@ -81,7 +82,7 @@
     line.id = `message-${++serial}`
     line.setAttribute('author-type', role)
     line.setAttribute('whole-message-clickable', 'fixture')
-    line.addEventListener('click', () => { document.getElementById('message-action-menu').hidden = false })
+    line.addEventListener('click', () => { document.getElementById('message-action-menu').parentElement.hidden = false })
     line.data = { authorExternalChannelId: user === '@alice'
       ? 'UCAbCdEfGhIjKlMnOpQrStUv' : user === '@mod_account'
       ? 'UCZYXWVUTSRQPONMLKJIHGFE' : 'UC1234567890123456789012' }

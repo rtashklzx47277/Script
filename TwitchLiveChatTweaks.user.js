@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        Twitch Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.4.4
+// @version     0.4.5
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
 // @description Filter chat by broadcaster, moderator and include/exclude account lists, with session history and a header toggle.
@@ -445,7 +445,7 @@
     .ttc-users input { display: block; box-sizing: border-box; flex: 1; min-width: 0; width: 100%; padding: 5px 8px; border: 1px solid var(--color-border-base, #ffffff44); border-radius: 4px; color: inherit; background: var(--color-background-input, #ffffff11); font-size: 12px; }
     .ttc-panel button { padding: 6px 10px; border: 0; border-radius: 4px; color: #fff; background: #9147ff; cursor: pointer; }
     .ttc-users input, .ttc-users button[type="submit"] { box-sizing: border-box; height: 30px; font: inherit; }
-    .ttc-users button[type="submit"] { flex-shrink: 0; padding: 0 10px; }
+    .ttc-users button[type="submit"] { flex-shrink: 0; padding: 0 10px; border: 1px solid transparent; border-radius: 4px; font-weight: 600; }
     .ttc-empty { padding: 16px 12px; color: var(--color-text-alt-2, #adadb8); }
     .ttc-list { flex: 1; min-height: 0; overflow: auto; overflow-anchor: none; padding: 6px 0; }
     .ttc-message { padding: 5px 10px; overflow-wrap: anywhere; line-height: 1.6; }
