@@ -611,6 +611,29 @@ test('YouTube author cards: keep native role colors and badges below identity wi
   }
 })
 
+test('YouTube author cards: highlighted owner names and verified badges never copy dark chip ink onto the card', () => {
+  const env = boot()
+  const app = env.document.body.appendChild(new env.Element('yt-live-chat-app'))
+  const message = env.message('@BlueSR', 'CHAT', 'owner')
+  message.chip.setAttribute('is-highlighted', '')
+  message.author.style.color = 'rgb(15, 15, 15)'
+  const verified = message.author.appendChild(new env.Element('yt-live-chat-author-badge-renderer'))
+  verified.setAttribute('type', 'verified')
+  verified.setAttribute('aria-label', '確認済み')
+  verified.style.color = 'rgb(15, 15, 15)'
+  verified.appendChild(new env.Element('svg')).appendChild(new env.Element('path'))
+  app.appendChild(message.line)
+  const snapshot = env.api.authorSnapshot(env.api.readMessage(message.line))
+  const state = env.api.showAuthorCard(snapshot, message.author)
+  assert.equal(state.title.style.color, 'var(--yt-live-chat-owner-color, #ffd600)')
+  const badges = state.card.querySelectorAll('.ytuc-badge')
+  assert.equal(badges[0].style.color, undefined)
+  assert.ok(badges[0].querySelector('svg'))
+  assert.equal(badges[1].textContent, 'Broadcaster')
+  assert.equal(badges[1].style.color, 'var(--yt-live-chat-owner-color, #ffd600)')
+  assert.equal(message.author.style.color, 'rgb(15, 15, 15)')
+})
+
 test('YouTube filter mode: close existing cards and never open cards or native menu guards over the filter', () => {
   const env = boot()
   const app = env.document.body.appendChild(new env.Element('yt-live-chat-app'))

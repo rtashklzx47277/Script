@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.4.5
+// @version     0.4.6
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @description Adds author profile cards, live chat account filters and session history, hides the chat mode menu, improves emoji copying and auto-follow, and adds reload.
@@ -741,20 +741,33 @@
       return value
     }
 
-    const authorSnapshot = message => ({
-      user: message.user, channelId: message.channelId, name: message.author.textContent,
-      color: getComputedStyle(message.author).color,
-      avatar: message.avatar, broadcaster: message.broadcaster, moderator: message.moderator,
-      badges: message.badges.map(badge => {
-        const visual = $('img, svg', badge)
-        return { type: badge.getAttribute('type'), color: getComputedStyle(badge).color,
-          label: badge.getAttribute('aria-label') || badge.getAttribute('shared-tooltip-text') || '徽章',
-          visual: visual ? clonePresentation(visual) : null }
-      }),
-      // Retained messages must not keep the original renderer/DOM alive.
-      contextMenuEndpoint: message.contextMenuEndpoint
-        ? JSON.parse(JSON.stringify(message.contextMenuEndpoint)) : null,
-    })
+    const CARD_ROLE_COLORS = {
+      owner: 'var(--yt-live-chat-owner-color, #ffd600)',
+      moderator: 'var(--yt-live-chat-moderator-color, #5e84f1)',
+      member: 'var(--yt-live-chat-sponsor-color, #2ba640)',
+    }
+    const authorSnapshot = message => {
+      const highlighted = message.author.closest('yt-live-chat-author-chip')?.hasAttribute('is-highlighted')
+      const role = message.broadcaster ? 'owner' : message.moderator ? 'moderator'
+        : message.badges.some(badge => badge.getAttribute('type') === 'member') ? 'member' : ''
+      return {
+        user: message.user, channelId: message.channelId, name: message.author.textContent,
+        // Highlighted native chips use dark ink on a light background. The card
+        // has its own background, so use role colors and its own neutral ink.
+        color: highlighted ? CARD_ROLE_COLORS[role] || '' : getComputedStyle(message.author).color,
+        avatar: message.avatar, broadcaster: message.broadcaster, moderator: message.moderator,
+        badges: message.badges.map(badge => {
+          const visual = $('img, svg', badge)
+          const type = badge.getAttribute('type')
+          return { type, color: highlighted ? CARD_ROLE_COLORS[type] || '' : getComputedStyle(badge).color,
+            label: badge.getAttribute('aria-label') || badge.getAttribute('shared-tooltip-text') || '徽章',
+            visual: visual ? clonePresentation(visual) : null }
+        }),
+        // Retained messages must not keep the original renderer/DOM alive.
+        contextMenuEndpoint: message.contextMenuEndpoint
+          ? JSON.parse(JSON.stringify(message.contextMenuEndpoint)) : null,
+      }
+    }
 
     const getProfile = channelId => {
       if (!/^UC[\w-]{22}$/.test(channelId)) return Promise.resolve(null)
