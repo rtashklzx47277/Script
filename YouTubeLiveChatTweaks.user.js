@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.3.2
+// @version     0.3.3
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @description Adds live chat include/exclude account filters and session history, hides the chat mode menu, improves emoji copying and auto-follow, and adds reload.
@@ -182,7 +182,6 @@
     const reloadButton = document.createElement('button')
     reloadButton.id = RELOAD_BUTTON_ID
     reloadButton.type = 'button'
-    reloadButton.title = '重新載入聊天室'
     reloadButton.setAttribute('aria-label', '重新載入聊天室')
     reloadButton.appendChild(createReloadIcon())
 
@@ -190,7 +189,9 @@
       location.reload()
     })
 
-    contextMenu.insertAdjacentElement('afterend', reloadButton)
+    const filterButton = $('#yt-chat-tweaks-filter-button')
+    const anchor = filterButton?.parentElement === contextMenu.parentElement ? filterButton : contextMenu
+    anchor.insertAdjacentElement('afterend', reloadButton)
     syncReloadButtonColor()
   }
 
@@ -763,8 +764,16 @@
       }
       state.panel.hidden = !enabled
       state.button.setAttribute('aria-pressed', String(enabled))
-      state.button.title = enabled ? '顯示一般聊天室' : '只看 Broadcaster、Moderator 與指定用戶'
       if (enabled) renderMessages(state)
+    }
+
+    const showTargetStatus = (state, message = '') => {
+      clearTimeout(state.statusTimer)
+      state.status.textContent = message
+      state.statusTimer = message ? setTimeout(() => {
+        state.status.textContent = ''
+        state.statusTimer = 0
+      }, 3000) : 0
     }
 
     const renderTargets = (state) => {
@@ -850,12 +859,12 @@
       const users = $('[name="users"]', panel)
       moderators.checked = state.history.settings.moderators
       broadcaster.checked = state.history.settings.broadcaster
-      const status = $('.ytcf-target-status', panel)
+      state.status = $('.ytcf-target-status', panel)
       state.targetMode = 'include'
       state.updateSettings = (settings, message = '') => {
         state.history.settings = settings
         const saved = saveSettings(state.history)
-        status.textContent = saved ? message : '此瀏覽器無法儲存設定；設定僅保留至本次頁面結束。'
+        showTargetStatus(state, saved ? message : '此瀏覽器無法儲存設定；設定僅保留至本次頁面結束。')
         renderTargets(state)
         captureTree(state.scroller, state.history)
         renderMessages(state, true)
@@ -870,7 +879,7 @@
         const key = exclude ? 'excludedUsers' : 'users'
         const nextSettings = changeTargetUsers(state.history.settings, users.value, false, exclude)
         if (!nextSettings) {
-          status.textContent = '請輸入一個頻道 ID、頻道網址或 @帳號。'
+          showTargetStatus(state, '請輸入一個頻道 ID、頻道網址或 @帳號。')
           return
         }
         const added = nextSettings[key].length - (state.history.settings[key] || []).length
@@ -881,7 +890,7 @@
       })
       const setTargetMode = mode => {
         state.targetMode = mode
-        status.textContent = ''
+        showTargetStatus(state)
         renderTargets(state)
       }
       $('.ytcf-mode-include', panel).addEventListener('click', () => setTargetMode('include'))
@@ -910,6 +919,7 @@
 
     const unmount = () => {
       if (!mounted) return
+      clearTimeout(mounted.statusTimer)
       mounted.observer.disconnect()
       mounted.button.remove()
       mounted.panel.remove()
@@ -948,7 +958,7 @@
       icon.appendChild(path)
       button.appendChild(icon)
       state.button = button
-      menu.insertAdjacentElement('beforebegin', button)
+      menu.insertAdjacentElement('afterend', button)
       const nativeButton = $('#close-button button')
       button.style.color = nativeButton ? getComputedStyle(nativeButton).color : 'var(--yt-live-chat-primary-text-color, #fff)'
       button.addEventListener('click', () => setEnabled(state, !state.history.enabled))
@@ -989,9 +999,17 @@
 
     const style = document.createElement('style')
     style.textContent = `
-      #yt-chat-tweaks-filter-button { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 40px; width: 40px; height: 40px; padding: 8px; border: 0; border-radius: 4px; color: inherit; background: transparent; cursor: pointer; }
-      #yt-chat-tweaks-filter-button:hover { background: var(--yt-live-chat-action-panel-background-color, #8882); }
-      #yt-chat-tweaks-filter-button[aria-pressed="true"] { color: var(--yt-live-chat-button-default-text-color, #065fd4) !important; background: var(--yt-live-chat-action-panel-background-color, #8882); }
+      #yt-chat-tweaks-filter-button { display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box; flex: 0 0 40px; width: 40px; height: 40px; min-width: 40px; min-height: 40px; margin: 0; padding: 8px; border: 0; border-radius: 50%; color: inherit; background: transparent; cursor: pointer; }
+      #yt-chat-tweaks-filter-button:hover, #yt-chat-tweaks-reload-button:hover { background: var(--yt-live-chat-button-default-background-color, #8882); }
+      #yt-chat-tweaks-filter-button:active, #yt-chat-tweaks-reload-button:active { background: var(--yt-live-chat-button-default-background-color, #8884); }
+      #yt-chat-tweaks-filter-button[aria-pressed="true"] { color: var(--yt-live-chat-link-text-color, #3ea6ff) !important; }
+      /* The native popup caches small limits after header buttons are injected.
+         Keep it inside the iframe and let its content use the available space. */
+      yt-live-chat-app > tp-yt-iron-dropdown:not([id]):has(yt-live-chat-toggle-renderer) { left: auto !important; right: 8px !important; max-width: calc(100vw - 16px) !important; }
+      yt-live-chat-app > tp-yt-iron-dropdown:not([id]):has(yt-live-chat-toggle-renderer) ytd-menu-popup-renderer { box-sizing: border-box; width: max-content !important; max-width: calc(100vw - 16px) !important; max-height: calc(100vh - 68px) !important; overflow-x: hidden !important; overflow-y: auto !important; }
+      yt-live-chat-app > tp-yt-iron-dropdown:not([id]):has(yt-live-chat-toggle-renderer) tp-yt-paper-item { white-space: normal !important; }
+      yt-live-chat-app > tp-yt-iron-dropdown:not([id]):has(yt-live-chat-toggle-renderer) .text-wrapper { min-width: 0; }
+      yt-live-chat-app > tp-yt-iron-dropdown:not([id]):has(yt-live-chat-toggle-renderer) yt-formatted-string { white-space: normal !important; overflow-wrap: anywhere; }
       #yt-chat-tweaks-filter-button:focus-visible, .ytcf-panel button:focus-visible { outline: 2px solid var(--yt-live-chat-button-default-text-color, #065fd4); outline-offset: -2px; }
       .ytcf-host { position: relative; }
       .ytcf-active > .ytcf-source { pointer-events: none; isolation: isolate; }

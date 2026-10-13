@@ -84,10 +84,13 @@ function boot({ saved, blocked = false } = {}) {
   document.createTextNode = text => Object.assign(new Element('#text'), { textContent: text })
   const storage = new Map(saved ? [['twitch-live-chat-tweaks-settings-v1', saved]] : [])
   const listeners = new Map()
+  const timers = new Map()
+  let nextTimer = 0
   const context = {
     document, location: { pathname: '/sample_channel' }, console,
     window: { addEventListener(name, fn) { listeners.set(name, fn) } },
-    setTimeout() {}, setInterval() {},
+    setTimeout(fn, delay) { const id = ++nextTimer; timers.set(id, { fn, delay }); return id },
+    clearTimeout(id) { timers.delete(id) }, setInterval() {},
     MutationObserver: class { observe() {} },
     localStorage: {
       getItem(key) { if (blocked) throw Error('Blocked'); return storage.get(key) || null },
@@ -98,7 +101,7 @@ function boot({ saved, blocked = false } = {}) {
   vm.createContext(context)
   vm.runInContext(source.replace(/\}\)\(\)\s*$/, `globalThis.api = {
     normalizeUsers, getChannel, getHistory, loadSettings, saveSettings, readMessage,
-    matchesFilter, captureLine, captureTree, renderMessages, changeTargetUsers,
+    matchesFilter, captureLine, captureTree, renderMessages, changeTargetUsers, showTargetStatus,
     setMounted: state => { mounted = state }
   }; })()`), context)
   const message = (user, text, role = '') => {
@@ -124,8 +127,22 @@ function boot({ saved, blocked = false } = {}) {
     body.textContent = text
     return { line, body, authorContainer }
   }
-  return { api: context.api, message, Element, storage, location: context.location, listeners }
+  return { api: context.api, message, Element, storage, timers, location: context.location, listeners }
 }
+
+test('Twitch target status: replacing a notice restarts its three-second lifetime', () => {
+  const { api, Element, timers } = boot()
+  const state = { status: new Element('p') }
+  api.showTargetStatus(state, '已新增帳號。')
+  const first = state.statusTimer
+  assert.equal(timers.get(first).delay, 3000)
+  api.showTargetStatus(state, '已移除帳號。')
+  assert.equal(timers.has(first), false)
+  assert.equal(state.status.textContent, '已移除帳號。')
+  timers.get(state.statusTimer).fn()
+  assert.equal(state.status.textContent, '')
+  assert.equal(state.statusTimer, 0)
+})
 
 test('Twitch chat: normalize login names and tolerate corrupt/unavailable storage', () => {
   const env = boot({ saved: 'broken JSON' })

@@ -77,10 +77,10 @@ function boot({ saved, blocked = false, trustedTypes = false } = {}) {
       return child
     }
     insertAdjacentElement(position, child) {
-      assert.equal(position, 'beforebegin')
+      assert.ok(['beforebegin', 'afterend'].includes(position))
       child.remove()
       const parent = this.parentElement
-      parent.children.splice(parent.children.indexOf(this), 0, child)
+      parent.children.splice(parent.children.indexOf(this) + (position === 'afterend' ? 1 : 0), 0, child)
       child.parentElement = parent
     }
     remove() {
@@ -119,10 +119,13 @@ function boot({ saved, blocked = false, trustedTypes = false } = {}) {
   document.createTextNode = text => Object.assign(new Element('#text'), { textContent: text })
   const storage = new Map(saved ? [['youtube-live-chat-tweaks-settings-v1', saved]] : [])
   const listeners = new Map()
+  const timers = new Map()
+  let nextTimer = 0
   const context = {
     document, location: { pathname: '/live_chat', href: 'https://www.youtube.com/live_chat?v=sample_video', origin: 'https://www.youtube.com' }, console, URL,
     window: { addEventListener(name, fn) { listeners.set(name, fn) } },
-    setTimeout() {}, setInterval() {}, requestAnimationFrame() {},
+    setTimeout(fn, delay) { const id = ++nextTimer; timers.set(id, { fn, delay }); return id },
+    clearTimeout(id) { timers.delete(id) }, setInterval() {}, requestAnimationFrame() {},
     Node: { ELEMENT_NODE: 1 }, HTMLElement: Element, AbortController,
     getComputedStyle: () => ({ color: 'white', display: 'block', visibility: 'visible' }),
     MutationObserver: class { observe() {} disconnect() {} },
@@ -136,7 +139,7 @@ function boot({ saved, blocked = false, trustedTypes = false } = {}) {
   vm.runInContext(source.replace('    // End YouTube chat filtering.', `
     globalThis.api = { normalizeAccount, getChannel, getHistory, loadSettings, saveSettings,
       readMessage, matchesFilter, captureLine, captureTree, renderMessages, changeTargetUsers,
-      refresh, setEnabled, get mounted() { return mounted } };
+      refresh, refreshHeader, setEnabled, showTargetStatus, get mounted() { return mounted } };
     // End YouTube chat filtering.`), context)
   const message = (user, text, role = '', id = '') => {
     const line = new Element('yt-live-chat-text-message-renderer')
@@ -152,7 +155,7 @@ function boot({ saved, blocked = false, trustedTypes = false } = {}) {
     body.textContent = text
     return { line, body, author, chip }
   }
-  return { api: context.api, message, Element, storage, location: context.location, document, window: context.window }
+  return { api: context.api, message, Element, storage, timers, location: context.location, document, window: context.window }
 }
 
 test('YouTube filters: mount, toggle and remount when Trusted Types rejects HTML strings', () => {
@@ -161,6 +164,8 @@ test('YouTube filters: mount, toggle and remount when Trusted Types rejects HTML
   const header = document.body.appendChild(new Element('yt-live-chat-header-renderer'))
   const menu = header.appendChild(new Element('yt-live-chat-button'))
   menu.id = 'live-chat-header-context-menu'
+  const close = header.appendChild(new Element('div'))
+  close.id = 'close-button'
   const host = document.body.appendChild(new Element('div'))
   const scroller = host.appendChild(new Element('div'))
   scroller.id = 'item-scroller'
@@ -174,6 +179,11 @@ test('YouTube filters: mount, toggle and remount when Trusted Types rejects HTML
   let state = api.mounted
   assert.ok(state.button.isConnected)
   assert.ok(state.button.querySelector('svg').querySelector('path'))
+  api.refreshHeader()
+  assert.equal(header.children.map(node => node.id).join(','),
+    'live-chat-header-context-menu,yt-chat-tweaks-filter-button,yt-chat-tweaks-reload-button,close-button')
+  assert.equal(state.button.title, undefined)
+  assert.equal(header.querySelector('#yt-chat-tweaks-reload-button').title, undefined)
   assert.ok(state.panel.isConnected)
   assert.ok(state.panel.querySelector('.ytcf-targets').querySelector('[name="broadcaster"]'))
   assert.equal(state.panel.querySelector('.ytcf-options').querySelector('[name="moderators"]'), null)
@@ -184,17 +194,41 @@ test('YouTube filters: mount, toggle and remount when Trusted Types rejects HTML
   assert.equal(state.panel.className.includes('ytcf-managing'), false)
   assert.equal(state.panel.hidden, true)
   api.setEnabled(state, true)
+  assert.equal(state.button.getAttribute('aria-pressed'), 'true')
   assert.equal(state.panel.hidden, false)
   assert.equal(state.count.textContent, '1 則')
   assert.equal(scroller.getAttribute('aria-hidden'), 'true')
   state.button.remove()
+  state.updateSettings(state.history.settings, '已移除帳號。')
+  const oldTimer = state.statusTimer
   api.refresh()
+  assert.equal(env.timers.has(oldTimer), false)
   state = api.mounted
   assert.equal(header.querySelectorAll('#yt-chat-tweaks-filter-button').length, 1)
   assert.equal(host.querySelectorAll('.ytcf-panel').length, 1)
   assert.equal(state.count.textContent, '1 則')
   api.setEnabled(state, false)
+  assert.equal(state.button.getAttribute('aria-pressed'), 'false')
   assert.equal(scroller.getAttribute('aria-hidden'), null)
+})
+
+test('YouTube target status: clear after three seconds and cancel the previous notice timer', () => {
+  const { api, Element, timers } = boot()
+  const state = { status: new Element('p') }
+  api.showTargetStatus(state, '已新增帳號。')
+  const first = state.statusTimer
+  assert.equal(timers.get(first).delay, 3000)
+  api.showTargetStatus(state, '已移除帳號。')
+  assert.equal(timers.has(first), false)
+  assert.equal(state.status.textContent, '已移除帳號。')
+  timers.get(state.statusTimer).fn()
+  assert.equal(state.status.textContent, '')
+  assert.equal(state.statusTimer, 0)
+  api.showTargetStatus(state, '新的提示')
+  const pending = state.statusTimer
+  api.showTargetStatus(state)
+  assert.equal(timers.has(pending), false)
+  assert.equal(state.status.textContent, '')
 })
 
 test('YouTube filters: normalize Unicode handles and accept one account at a time', () => {

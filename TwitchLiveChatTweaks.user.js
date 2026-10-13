@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        Twitch Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.4.2
+// @version     0.4.3
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
 // @description Filter chat by broadcaster, moderator and include/exclude account lists, with session history and a header toggle.
@@ -247,6 +247,15 @@
       : exclude ? '尚未排除任何帳號。' : '尚未新增目標帳號。'
   }
 
+  const showTargetStatus = (state, message = '') => {
+    clearTimeout(state.statusTimer)
+    state.status.textContent = message
+    state.statusTimer = message ? setTimeout(() => {
+      state.status.textContent = ''
+      state.statusTimer = 0
+    }, 3000) : 0
+  }
+
   const createPanel = (state) => {
     const panel = document.createElement('section')
     panel.className = 'ttc-panel'
@@ -289,12 +298,12 @@
     const users = $('[name="users"]', panel)
     moderators.checked = state.history.settings.moderators
     broadcaster.checked = state.history.settings.broadcaster
-    const status = $('.ttc-target-status', panel)
+    state.status = $('.ttc-target-status', panel)
     state.targetMode = 'include'
     state.updateSettings = (settings, message = '') => {
       state.history.settings = settings
       const saved = saveSettings(state.history)
-      status.textContent = saved ? message : '此瀏覽器無法儲存設定；設定僅保留至本次頁面結束。'
+      showTargetStatus(state, saved ? message : '此瀏覽器無法儲存設定；設定僅保留至本次頁面結束。')
       renderTargets(state)
       captureTree(state.scroller, state.history)
       renderMessages(state, true)
@@ -309,7 +318,7 @@
       const key = exclude ? 'excludedUsers' : 'users'
       const nextSettings = changeTargetUsers(state.history.settings, users.value, false, exclude)
       if (!nextSettings) {
-        status.textContent = '請輸入一個英文帳號。'
+        showTargetStatus(state, '請輸入一個英文帳號。')
         return
       }
       const added = nextSettings[key].length - (state.history.settings[key] || []).length
@@ -320,7 +329,7 @@
     })
     const setTargetMode = mode => {
       state.targetMode = mode
-      status.textContent = ''
+      showTargetStatus(state)
       renderTargets(state)
     }
     $('.ttc-mode-include', panel).addEventListener('click', () => setTargetMode('include'))
@@ -349,6 +358,7 @@
 
   const unmount = () => {
     if (!mounted) return
+    clearTimeout(mounted.statusTimer)
     mounted.observer.disconnect()
     mounted.button.remove()
     mounted.panel.remove()

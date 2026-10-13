@@ -4,7 +4,7 @@
 <meta http-equiv="Content-Security-Policy" content="require-trusted-types-for 'script'; trusted-types 'none'">
 <title>YouTube 聊天室篩選驗證</title>
 <style>
-  :root { --yt-live-chat-primary-text-color: #fff; --yt-live-chat-background-color: #0f0f0f; --yt-live-chat-secondary-text-color: #aaa; --yt-live-chat-button-default-text-color: #3ea6ff; }
+  :root { --yt-live-chat-primary-text-color: #fff; --yt-live-chat-background-color: #0f0f0f; --yt-live-chat-secondary-text-color: #aaa; --yt-live-chat-button-default-text-color: #fff; --yt-live-chat-link-text-color: #3ea6ff; --yt-live-chat-button-default-background-color: #ffffff33; }
   body { margin: 32px; color: #efeff1; background: #0f0f0f; font: 14px Arial, sans-serif; }
   yt-live-chat-renderer { display: block; width: 340px; border: 1px solid #45454a; }
   yt-live-chat-header-renderer { display: flex; align-items: center; gap: 4px; height: 52px; padding: 0 10px; border-bottom: 1px solid #45454a; }
@@ -22,9 +22,20 @@
   .input-area { padding: 14px; border-top: 1px solid #45454a; }
   .input-area input { box-sizing: border-box; width: 100%; padding: 8px; color: inherit; background: #303034; border: 0; }
   .fixture-tools { margin-top: 20px; display: flex; gap: 8px; flex-wrap: wrap; }
+  yt-live-chat-app { display: block; }
+  tp-yt-iron-dropdown { position: fixed; z-index: 10; }
+  ytd-menu-popup-renderer { display: block; background: #282828; border-radius: 12px; overflow: auto; }
+  tp-yt-paper-item { display: flex; align-items: center; gap: 16px; padding: 10px 16px; white-space: nowrap; font-size: 16px; }
+  tp-yt-paper-item span { min-width: 0; overflow-wrap: anywhere; }
+  yt-live-chat-toggle-renderer { display: block; }
+  body.embedded { margin: 0; }
+  body.embedded h2, body.embedded .fixture-tools { display: none; }
+  body.embedded yt-live-chat-renderer { width: 100%; box-sizing: border-box; }
+  body.embedded #chat-contents, body.embedded #item-scroller { height: calc(100vh - 126px); }
 </style>
 <h2>YouTube 聊天室測試頁</h2>
 <div id="owner" hidden><a href="/@fixture_channel">測試頻道</a></div>
+<yt-live-chat-app>
 <yt-live-chat-renderer>
   <yt-live-chat-header-renderer>
     <div id="primary-content"><span id="view-selector"><button>トップチャット ▾</button></span></div>
@@ -35,6 +46,15 @@
   <div id="chat-contents"><div id="item-scroller"><div id="item-offset"><div id="items"></div></div></div><button id="show-more" disabled hidden>顯示更多</button></div>
   <div class="input-area"><input aria-label="傳送訊息" placeholder="傳送訊息（測試頁不傳送）"></div>
 </yt-live-chat-renderer>
+<tp-yt-iron-dropdown style="left: 24px; top: 52px; max-width: 400px;" hidden>
+  <ytd-menu-popup-renderer role="menu" style="max-width: 215px; max-height: 160px; box-sizing: border-box;">
+    <tp-yt-paper-item role="menuitem">♙ <span>参加者</span></tp-yt-paper-item>
+    <yt-live-chat-toggle-renderer><tp-yt-paper-item role="menuitem">♡ <span>リアクション</span><input type="checkbox" checked aria-label="リアクション"></tp-yt-paper-item></yt-live-chat-toggle-renderer>
+    <tp-yt-paper-item role="menuitem">↗ <span>チャットをポップアウト</span></tp-yt-paper-item>
+    <tp-yt-paper-item role="menuitem">▣ <span>フィードバックを送信</span></tp-yt-paper-item>
+  </ytd-menu-popup-renderer>
+</tp-yt-iron-dropdown>
+</yt-live-chat-app>
 <div class="fixture-tools">
   <button id="add-mod">新增 Moderator 訊息</button>
   <button id="add-user">新增 @alice 訊息</button>
@@ -42,6 +62,11 @@
   <button id="remount">重建聊天室</button>
 </div>
 <script>
+  if (new URL(location.href).searchParams.has('embedded')) document.body.classList.add('embedded')
+  document.getElementById('live-chat-header-context-menu').onclick = () => {
+    const popup = document.querySelector('tp-yt-iron-dropdown')
+    popup.hidden = !popup.hidden
+  }
   let serial = 0
   const items = () => document.querySelector('#item-scroller #items')
   function addMessage(user, role = '') {
