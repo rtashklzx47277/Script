@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-TW">
+<meta charset="utf-8">
+<title>新增按鈕文字置中量測</title>
+<style>
+  @font-face { font-family: Roboto; font-weight: 400; src: url('https://fonts.gstatic.com/s/roboto/v48/KFO7CnqEu92Fr1ME7kSn66aGLdTylUAMa3yUBA.woff2') format('woff2'); unicode-range: U+0-FF; }
+  @font-face { font-family: Roboto; font-weight: 500; src: url('https://fonts.gstatic.com/s/roboto/v48/KFO7CnqEu92Fr1ME7kSn66aGLdTylUAMa3yUBA.woff2') format('woff2'); unicode-range: U+0-FF; }
+  @font-face { font-family: Inter; font-weight: 600; src: url('https://assets.twitch.tv/assets/inter-latin-variable-wghtOnly-normal-a05a0d687a088c4efed3.woff2') format('woff2-variations'); unicode-range: U+0-FF; }
+  @font-face { font-family: Roobert; font-weight: 600; src: url('https://assets.twitch.tv/assets/Roobert-SemiBold-2c9de19c87721c9bcb39.woff2') format('woff2'); }
+  body { background: #0f0f0f; color: #eee; margin: 32px; font: 14px Arial, sans-serif; }
+  .samples { display: flex; gap: 32px; }
+  .sample { width: 340px; }
+  table { margin-top: 24px; border-collapse: collapse; }
+  th, td { padding: 8px 16px; border: 1px solid #555; text-align: right; }
+</style>
+<h2>新增按鈕文字置中量測</h2>
+<p>使用實際網站的字型來源；正值為偏下，負值為偏上。單位：CSS px。</p>
+<div class="samples">
+  <div class="sample" data-site="YouTube"><h3>YouTube</h3><div class="ytcf-panel"><form class="ytcf-users"><label>新增帳號<input placeholder="頻道 ID 或 @帳號"></label><button type="submit">新增</button></form></div></div>
+  <div class="sample" data-site="Twitch"><h3>Twitch</h3><div class="ttc-panel"><form class="ttc-users"><label>新增帳號<input placeholder="英文帳號"></label><button type="submit">新增</button></form></div></div>
+</div>
+<table><thead><tr><th>平台</th><th>按鈕高</th><th>上留白</th><th>下留白</th><th>水平偏差</th><th>垂直偏差</th></tr></thead><tbody id="results"></tbody></table>
+<script src="/YouTubeLiveChatTweaks.user.js"></script>
+<script src="/TwitchLiveChatTweaks.user.js"></script>
+<style>
+  .sample .ytcf-panel, .sample .ttc-panel { position: static; display: block; padding: 10px; }
+  .sample .ytcf-panel { font: 13px Roboto, Arial, sans-serif; }
+  .sample .ttc-panel { font: 13px/22px Inter, 'Noto Sans Arabic', Roobert, 'Helvetica Neue', Helvetica, Arial, sans-serif; }
+  .sample .ttc-users { margin: 0; }
+</style>
+<script>
+  document.querySelectorAll('form').forEach(form => form.addEventListener('submit', event => event.preventDefault()))
+  async function measure() {
+    await document.fonts.ready
+    const results = document.getElementById('results')
+    results.replaceChildren()
+    for (const sample of document.querySelectorAll('.sample')) {
+      const button = sample.querySelector('button')
+      const rect = button.getBoundingClientRect()
+      const range = document.createRange()
+      range.selectNodeContents(button)
+      const text = range.getBoundingClientRect()
+      const row = document.createElement('tr')
+      for (const value of [sample.dataset.site, rect.height, text.top - rect.top, rect.bottom - text.bottom,
+        text.x + text.width / 2 - rect.x - rect.width / 2, text.y + text.height / 2 - rect.y - rect.height / 2]) {
+        const cell = row.appendChild(document.createElement('td'))
+        cell.textContent = typeof value === 'number' ? value.toFixed(3) : value
+      }
+      results.appendChild(row)
+    }
+  }
+  measure()
+  window.addEventListener('resize', measure)
+</script>
+</html>

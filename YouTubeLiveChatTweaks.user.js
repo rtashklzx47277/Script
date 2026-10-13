@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.3.5
+// @version     0.3.6
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @description Adds live chat include/exclude account filters and session history, hides the chat mode menu, improves emoji copying and auto-follow, and adds reload.
@@ -1116,7 +1116,7 @@
       .ytcf-users input { display: block; box-sizing: border-box; flex: 1; min-width: 0; width: 100%; padding: 5px 8px; border: 1px solid var(--yt-live-chat-message-input-border-color, #8886); border-radius: 4px; color: inherit; background: var(--yt-live-chat-background-color, #fff); font-size: 12px; }
       .ytcf-panel button { padding: 6px 10px; border: 0; border-radius: 4px; color: var(--yt-live-chat-button-default-text-color, #065fd4); background: var(--yt-live-chat-action-panel-background-color, #8882); cursor: pointer; }
       .ytcf-users input, .ytcf-users button[type="submit"] { box-sizing: border-box; height: 30px; font: inherit; }
-      .ytcf-users button[type="submit"] { flex-shrink: 0; padding: 0 10px; border: 1px solid var(--yt-live-chat-message-input-border-color, #8886); border-radius: 4px; color: var(--yt-live-chat-primary-text-color, #0f0f0f); background: var(--yt-live-chat-button-default-background-color, #8882); font-weight: 600; }
+      .ytcf-users button[type="submit"] { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; padding: 0 10px; border: 1px solid var(--yt-live-chat-message-input-border-color, #8886); border-radius: 4px; color: var(--yt-live-chat-primary-text-color, #0f0f0f); background: var(--yt-live-chat-button-default-background-color, #8882); font-weight: 600; line-height: 1; }
       .ytcf-users button[type="submit"]:hover { filter: brightness(1.2); }
       .ytcf-empty { padding: 16px 12px; color: var(--yt-live-chat-secondary-text-color, #606060); }
       .ytcf-list { flex: 1; min-height: 0; overflow: auto; overflow-anchor: none; padding: 6px 0; }
