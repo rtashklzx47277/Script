@@ -1,6 +1,7 @@
 <!doctype html>
 <html lang="zh-TW">
 <meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="require-trusted-types-for 'script'; trusted-types 'none'">
 <title>YouTube 聊天室篩選驗證</title>
 <style>
   :root { --yt-live-chat-primary-text-color: #efeff1; --yt-live-chat-background-color: #18181b; }
@@ -31,7 +32,7 @@
     <button id="live-chat-header-context-menu" aria-label="聊天室選項">⋮</button>
     <div id="close-button"><button aria-label="關閉聊天室">×</button></div>
   </yt-live-chat-header-renderer>
-  <div id="chat-contents"><div id="item-scroller"><div id="items"></div></div><button id="show-more" disabled hidden>顯示更多</button></div>
+  <div id="chat-contents"><div id="item-scroller"><div id="item-offset"><div id="items"></div></div></div><button id="show-more" disabled hidden>顯示更多</button></div>
   <div class="input-area"><input aria-label="傳送訊息" placeholder="傳送訊息（測試頁不傳送）"></div>
 </yt-live-chat-renderer>
 <div class="fixture-tools">
@@ -47,7 +48,22 @@
     const line = document.createElement('yt-live-chat-text-message-renderer')
     line.id = `message-${++serial}`
     line.setAttribute('author-type', role)
-    line.innerHTML = `<span id="timestamp">14:${String(serial).padStart(2, '0')}</span><yt-live-chat-author-chip><span id="author-name">${user}</span></yt-live-chat-author-chip>: <span id="message">測試訊息 ${serial} <img class="emoji" alt="😀" shared-tooltip-text=":grinning:" src="https://fonts.gstatic.com/s/e/notoemoji/15.1/1f600/72.png"></span>`
+    const time = line.appendChild(document.createElement('span'))
+    time.id = 'timestamp'
+    time.textContent = `14:${String(serial).padStart(2, '0')}`
+    const chip = line.appendChild(document.createElement('yt-live-chat-author-chip'))
+    const author = chip.appendChild(document.createElement('span'))
+    author.id = 'author-name'
+    author.textContent = user
+    line.appendChild(document.createTextNode(': '))
+    const message = line.appendChild(document.createElement('span'))
+    message.id = 'message'
+    message.textContent = `測試訊息 ${serial} `
+    const emoji = message.appendChild(document.createElement('img'))
+    emoji.className = 'emoji'
+    emoji.alt = '😀'
+    emoji.setAttribute('shared-tooltip-text', ':grinning:')
+    emoji.src = 'https://fonts.gstatic.com/s/e/notoemoji/15.1/1f600/72.png'
     items().appendChild(line)
   }
   addMessage('@fixture_channel', 'owner')

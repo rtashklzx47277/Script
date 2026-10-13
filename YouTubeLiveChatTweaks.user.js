@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.3.0
+// @version     0.3.1
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @description Adds live chat include/exclude account filters and session history, hides the chat mode menu, improves emoji copying and auto-follow, and adds reload.
@@ -462,6 +462,14 @@
 
     const $ = (selector, root = document) => root.querySelector(selector)
     const $$ = (selector, root = document) => [...root.querySelectorAll(selector)]
+    // YouTube enforces Trusted Types. Build UI without HTML string sinks.
+    const element = (tag, attributes = {}, children = []) => {
+      const node = document.createElement(tag)
+      for (const [name, value] of Object.entries(attributes)) node.setAttribute(name, value)
+      for (const child of children) node.appendChild(typeof child === 'string'
+        ? document.createTextNode(child) : child)
+      return node
+    }
     const normalizeAccount = (input) => {
       const raw = String(input || '').trim().normalize('NFC').replace(/^@/, '').toLowerCase()
       return /^[^\s@/\\,，;；?#&]{1,100}$/u.test(raw) ? `@${raw}` : ''
@@ -785,32 +793,36 @@
       const panel = document.createElement('section')
       panel.className = 'ytcf-panel'
       panel.setAttribute('aria-label', '指定用戶聊天室')
-      panel.innerHTML = `
-        <div class="ytcf-toolbar">
-          <div class="ytcf-options">
-            <label><input type="checkbox" name="broadcaster"> Broadcaster</label>
-            <label><input type="checkbox" name="moderators"> Moderator</label>
-            <button type="button" class="ytcf-target-summary" aria-label="目標用戶" aria-controls="ytcf-target-settings" aria-expanded="false">目標用戶</button>
-            <span class="ytcf-count"></span>
-          </div>
-          <div class="ytcf-targets" id="ytcf-target-settings" hidden>
-            <div class="ytcf-target-modes" role="group" aria-label="帳號篩選方式">
-              <button type="button" class="ytcf-mode-include" aria-label="＋ 包含">＋ 包含</button>
-              <button type="button" class="ytcf-mode-exclude" aria-label="－ 排除">－ 排除</button>
-            </div>
-            <form class="ytcf-users">
-              <label>新增帳號<input type="text" name="users" placeholder="@帳號" autocomplete="off" spellcheck="false"></label>
-              <button type="submit">新增</button>
-            </form>
-            <label class="ytcf-target-search">搜尋帳號<input type="search" name="search-users" placeholder="搜尋目標帳號" autocomplete="off"></label>
-            <ul class="ytcf-target-list" aria-label="目標用戶清單"></ul>
-            <p class="ytcf-target-empty"></p>
-            <p class="ytcf-target-status" role="status" aria-live="polite"></p>
-          </div>
-        </div>
-        <p class="ytcf-empty">尚無符合條件的發言。新增目標帳號後開始收集。</p>
-        <div class="ytcf-list" role="log" aria-label="篩選後的聊天訊息" aria-live="off"></div>
-        <button class="ytcf-latest" type="button" hidden>回到最新訊息</button>`
+      panel.appendChild(element('div', { class: 'ytcf-toolbar' }, [
+        element('div', { class: 'ytcf-options' }, [
+          element('label', {}, [element('input', { type: 'checkbox', name: 'broadcaster' }), ' Broadcaster']),
+          element('label', {}, [element('input', { type: 'checkbox', name: 'moderators' }), ' Moderator']),
+          element('button', { type: 'button', class: 'ytcf-target-summary', 'aria-label': '目標用戶',
+            'aria-controls': 'ytcf-target-settings', 'aria-expanded': 'false' }, ['目標用戶']),
+          element('span', { class: 'ytcf-count' }),
+        ]),
+        element('div', { class: 'ytcf-targets', id: 'ytcf-target-settings', hidden: '' }, [
+          element('div', { class: 'ytcf-target-modes', role: 'group', 'aria-label': '帳號篩選方式' }, [
+            element('button', { type: 'button', class: 'ytcf-mode-include', 'aria-label': '＋ 包含' }, ['＋ 包含']),
+            element('button', { type: 'button', class: 'ytcf-mode-exclude', 'aria-label': '－ 排除' }, ['－ 排除']),
+          ]),
+          element('form', { class: 'ytcf-users' }, [
+            element('label', {}, ['新增帳號', element('input', { type: 'text', name: 'users',
+              placeholder: '@帳號', autocomplete: 'off', spellcheck: 'false' })]),
+            element('button', { type: 'submit' }, ['新增']),
+          ]),
+          element('label', { class: 'ytcf-target-search' }, ['搜尋帳號', element('input', {
+            type: 'search', name: 'search-users', placeholder: '搜尋目標帳號', autocomplete: 'off',
+          })]),
+          element('ul', { class: 'ytcf-target-list', 'aria-label': '目標用戶清單' }),
+          element('p', { class: 'ytcf-target-empty' }),
+          element('p', { class: 'ytcf-target-status', role: 'status', 'aria-live': 'polite' }),
+        ]),
+      ]))
+      panel.appendChild(element('p', { class: 'ytcf-empty' }, ['尚無符合條件的發言。新增目標帳號後開始收集。']))
+      panel.appendChild(element('div', { class: 'ytcf-list', role: 'log',
+        'aria-label': '篩選後的聊天訊息', 'aria-live': 'off' }))
+      panel.appendChild(element('button', { class: 'ytcf-latest', type: 'button', hidden: '' }, ['回到最新訊息']))
       state.panel = panel
       state.list = $('.ytcf-list', panel)
       state.empty = $('.ytcf-empty', panel)
@@ -907,7 +919,16 @@
       button.id = 'yt-chat-tweaks-filter-button'
       button.type = 'button'
       button.setAttribute('aria-label', '切換指定用戶聊天室')
-      button.innerHTML = `<svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M3 4h18v2l-7 8v6l-4 2v-8L3 6V4zm3 2 6 7 6-7H6z"/></svg>`
+      const icon = document.createElementNS(SVG_NS, 'svg')
+      icon.setAttribute('width', '24')
+      icon.setAttribute('height', '24')
+      icon.setAttribute('viewBox', '0 0 24 24')
+      icon.setAttribute('aria-hidden', 'true')
+      const path = document.createElementNS(SVG_NS, 'path')
+      path.setAttribute('fill', 'currentColor')
+      path.setAttribute('d', 'M3 4h18v2l-7 8v6l-4 2v-8L3 6V4zm3 2 6 7 6-7H6z')
+      icon.appendChild(path)
+      button.appendChild(icon)
       state.button = button
       menu.insertAdjacentElement('beforebegin', button)
       const nativeButton = $('#close-button button')

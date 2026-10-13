@@ -4,7 +4,7 @@ const fs = require('node:fs')
 const vm = require('node:vm')
 const path = require('node:path')
 
-function boot({ saved, blocked = false } = {}) {
+function boot({ saved, blocked = false, trustedTypes = false } = {}) {
   class Element {
     constructor(tag = 'div') {
       this.tagName = tag
@@ -13,14 +13,33 @@ function boot({ saved, blocked = false } = {}) {
       this.attrs = new Map()
       this.style = {}
       this.textContent = ''
-      this.innerHTML = ''
+      this._innerHTML = ''
       this.hidden = false
       this.value = ''
     }
     get attributes() { return [...this.attrs].map(([name, value]) => ({ name, value })) }
     get firstChild() { return this.children[0] }
+    get innerHTML() { return this._innerHTML }
+    set innerHTML(value) {
+      if (trustedTypes) throw new TypeError('This document requires TrustedHTML assignment')
+      this._innerHTML = value
+    }
+    get isConnected() { return this === document || !!this.parentElement?.isConnected }
+    get classList() {
+      const apply = (name, enabled) => {
+        const classes = new Set((this.className || '').split(' ').filter(Boolean))
+        if (enabled) classes.add(name)
+        else classes.delete(name)
+        this.className = [...classes].join(' ')
+      }
+      return { add: (...names) => names.forEach(name => apply(name, true)),
+        remove: (...names) => names.forEach(name => apply(name, false)), toggle: apply }
+    }
     addEventListener() {}
-    setAttribute(name, value) { this.attrs.set(name, value) }
+    setAttribute(name, value) {
+      this.attrs.set(name, value)
+      if (name === 'class') this.className = value
+    }
     getAttribute(name) { return this.attrs.get(name) || null }
     removeAttribute(name) { this.attrs.delete(name) }
     hasAttribute(name) { return this.attrs.has(name) }
@@ -54,6 +73,13 @@ function boot({ saved, blocked = false } = {}) {
       child.parentElement = this
       return child
     }
+    insertAdjacentElement(position, child) {
+      assert.equal(position, 'beforebegin')
+      child.remove()
+      const parent = this.parentElement
+      parent.children.splice(parent.children.indexOf(this), 0, child)
+      child.parentElement = parent
+    }
     remove() {
       if (this.parentElement) {
         this.parentElement.children = this.parentElement.children.filter(child => child !== this)
@@ -73,7 +99,7 @@ function boot({ saved, blocked = false } = {}) {
       copy.attrs = new Map(this.attrs)
       copy.className = this.className
       copy.style = { ...this.style }
-      copy.innerHTML = this.innerHTML
+      copy._innerHTML = this.innerHTML
       copy.textContent = this.textContent
       if (deep) for (const child of this.children) copy.appendChild(child.cloneNode(true))
       return copy
@@ -82,6 +108,8 @@ function boot({ saved, blocked = false } = {}) {
   const document = new Element('document')
   document.head = new Element('head')
   document.body = new Element('body')
+  document.appendChild(document.head)
+  document.appendChild(document.body)
   document.referrer = ''
   document.createElementNS = (_, tag) => new Element(tag)
   document.createElement = tag => new Element(tag)
@@ -94,7 +122,7 @@ function boot({ saved, blocked = false } = {}) {
     setTimeout() {}, setInterval() {}, requestAnimationFrame() {},
     Node: { ELEMENT_NODE: 1 }, HTMLElement: Element, AbortController,
     getComputedStyle: () => ({ color: 'white', display: 'block', visibility: 'visible' }),
-    MutationObserver: class { observe() {} },
+    MutationObserver: class { observe() {} disconnect() {} },
     localStorage: {
       getItem(key) { if (blocked) throw Error('Blocked'); return storage.get(key) || null },
       setItem(key, value) { if (blocked) throw Error('Blocked'); storage.set(key, value) },
@@ -104,7 +132,8 @@ function boot({ saved, blocked = false } = {}) {
   vm.createContext(context)
   vm.runInContext(source.replace('    // End YouTube chat filtering.', `
     globalThis.api = { normalizeAccount, getChannel, getHistory, loadSettings, saveSettings,
-      readMessage, matchesFilter, captureLine, captureTree, renderMessages, changeTargetUsers };
+      readMessage, matchesFilter, captureLine, captureTree, renderMessages, changeTargetUsers,
+      refresh, setEnabled, get mounted() { return mounted } };
     // End YouTube chat filtering.`), context)
   const message = (user, text, role = '', id = '') => {
     const line = new Element('yt-live-chat-text-message-renderer')
@@ -116,12 +145,47 @@ function boot({ saved, blocked = false } = {}) {
     author.textContent = user
     const body = line.appendChild(new Element('span'))
     body.id = 'message'
-    body.innerHTML = text
+    body._innerHTML = text
     body.textContent = text
     return { line, body, author, chip }
   }
   return { api: context.api, message, Element, storage, location: context.location, document, window: context.window }
 }
+
+test('YouTube filters: mount, toggle and remount when Trusted Types rejects HTML strings', () => {
+  const env = boot({ trustedTypes: true })
+  const { document, Element, api } = env
+  const header = document.body.appendChild(new Element('yt-live-chat-header-renderer'))
+  const menu = header.appendChild(new Element('yt-live-chat-button'))
+  menu.id = 'live-chat-header-context-menu'
+  const host = document.body.appendChild(new Element('div'))
+  const scroller = host.appendChild(new Element('div'))
+  scroller.id = 'item-scroller'
+  const offset = scroller.appendChild(new Element('div'))
+  offset.id = 'item-offset'
+  const items = offset.appendChild(new Element('div'))
+  items.id = 'items'
+  items.appendChild(env.message('@host', 'hello', 'owner', 'owner-1').line)
+  assert.throws(() => { menu.innerHTML = '<span>blocked</span>' }, /TrustedHTML/)
+  api.refresh()
+  let state = api.mounted
+  assert.ok(state.button.isConnected)
+  assert.ok(state.button.querySelector('svg').querySelector('path'))
+  assert.ok(state.panel.isConnected)
+  assert.equal(state.panel.hidden, true)
+  api.setEnabled(state, true)
+  assert.equal(state.panel.hidden, false)
+  assert.equal(state.count.textContent, '1 則')
+  assert.equal(scroller.getAttribute('aria-hidden'), 'true')
+  state.button.remove()
+  api.refresh()
+  state = api.mounted
+  assert.equal(header.querySelectorAll('#yt-chat-tweaks-filter-button').length, 1)
+  assert.equal(host.querySelectorAll('.ytcf-panel').length, 1)
+  assert.equal(state.count.textContent, '1 則')
+  api.setEnabled(state, false)
+  assert.equal(scroller.getAttribute('aria-hidden'), null)
+})
 
 test('YouTube filters: normalize Unicode handles and accept one account at a time', () => {
   const env = boot()
