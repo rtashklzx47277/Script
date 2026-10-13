@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        Twitch Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.4.7
+// @version     0.5.0
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
 // @description Filter chat by broadcaster, moderator and include/exclude account lists, with session history and a header toggle.
@@ -22,6 +22,7 @@
   const MAX_CHANNELS = 5
   const MODERATOR_BADGE = '3267646d-33f0-4b17-b3df-f923a41db1d0'
   const histories = new Map()
+  let globalTargets = { users: [], excludedUsers: [] }
   let mounted = null
   let refreshTimer = 0
 
@@ -51,31 +52,45 @@
 
   const loadSettings = (channel) => {
     try {
-      const saved = readSavedSettings()[channel]
+      const stored = readSavedSettings()
+      const saved = stored[channel]
+      const global = stored['@global'] || globalTargets
+      globalTargets = {
+        users: normalizeUsers(Array.isArray(global.users) ? global.users.join(' ') : ''),
+        excludedUsers: normalizeUsers(Array.isArray(global.excludedUsers) ? global.excludedUsers.join(' ') : ''),
+      }
       return {
         moderators: saved?.moderators !== false,
         broadcaster: saved?.broadcaster !== false,
         users: normalizeUsers(Array.isArray(saved?.users) ? saved.users.join(' ') : ''),
         excludedUsers: normalizeUsers(Array.isArray(saved?.excludedUsers) ? saved.excludedUsers.join(' ') : ''),
+        globalUsers: globalTargets.users, globalExcludedUsers: globalTargets.excludedUsers,
       }
     } catch (_) {
-      return { moderators: true, broadcaster: true, users: [], excludedUsers: [] }
+      return { moderators: true, broadcaster: true, users: [], excludedUsers: [],
+        globalUsers: globalTargets.users, globalExcludedUsers: globalTargets.excludedUsers }
     }
   }
 
-  const saveSettings = (history) => {
+  const saveSettings = (history, global = false) => {
+    const { moderators, broadcaster, users, excludedUsers = [], globalUsers = [], globalExcludedUsers = [] } = history.settings
+    if (global) {
+      globalTargets = { users: globalUsers, excludedUsers: globalExcludedUsers }
+      for (const item of histories.values()) Object.assign(item.settings, { globalUsers, globalExcludedUsers })
+    }
     try {
       const saved = readSavedSettings()
-      saved[history.channel] = history.settings
+      if (global) saved['@global'] = globalTargets
+      else saved[history.channel] = { moderators, broadcaster, users, excludedUsers }
       localStorage.setItem(STORAGE_KEY, JSON.stringify(saved))
       return true
     } catch (_) { return false }
   }
 
-  const changeTargetUsers = (settings, input, remove = false, exclude = false) => {
+  const changeTargetUsers = (settings, input, remove = false, exclude = false, global = false) => {
     const user = String(input || '').trim().toLowerCase().replace(/^@/, '')
     if (!/^[a-z0-9_]{1,25}$/.test(user)) return null
-    const key = exclude ? 'excludedUsers' : 'users'
+    const key = global ? exclude ? 'globalExcludedUsers' : 'globalUsers' : exclude ? 'excludedUsers' : 'users'
     const users = settings[key] || []
     return { ...settings, [key]: remove
       ? users.filter(name => name !== user)
@@ -113,9 +128,9 @@
   }
 
   const matchesFilter = (message, settings) =>
-    !(settings.excludedUsers || []).includes(message.user) && (
+    !(settings.excludedUsers || []).includes(message.user) && !(settings.globalExcludedUsers || []).includes(message.user) && (
       (settings.moderators && message.moderator) ||
-      (settings.broadcaster && message.broadcaster) || settings.users.includes(message.user)
+      (settings.broadcaster && message.broadcaster) || settings.users.includes(message.user) || (settings.globalUsers || []).includes(message.user)
     )
 
   const makeMessageView = (message) => {
@@ -156,7 +171,8 @@
     const message = readMessage(line, history.channel)
     if (!message) return false
     // Keep both roles even when unchecked so turning a role back on restores its history.
-    if (!message.moderator && !message.broadcaster && !history.settings.users.includes(message.user)) return false
+    if (!message.moderator && !message.broadcaster && !history.settings.users.includes(message.user) &&
+      !(history.settings.globalUsers || []).includes(message.user)) return false
     const fingerprint = `${message.user}\n${message.body.innerHTML}`
     const previous = history.nodes.get(line)
     if (previous?.fingerprint === fingerprint) return false
@@ -250,14 +266,20 @@
     if (enabled) renderMessages(state)
   }
 
+  const targetSettings = state => state.targetScope === 'global'
+    ? { users: state.history.settings.globalUsers || [], excludedUsers: state.history.settings.globalExcludedUsers || [] }
+    : state.history.settings
+
   const renderTargets = (state) => {
     const { panel, history } = state
     const exclude = state.targetMode === 'exclude'
-    const targets = exclude ? history.settings.excludedUsers || [] : history.settings.users
+    const global = state.targetScope === 'global'
+    const settings = targetSettings(state)
+    const targets = exclude ? settings.excludedUsers || [] : settings.users
     const includeButton = $('.ttc-mode-include', panel)
     const excludeButton = $('.ttc-mode-exclude', panel)
-    includeButton.textContent = `＋ 包含（${history.settings.users.length}）`
-    excludeButton.textContent = `－ 排除（${(history.settings.excludedUsers || []).length}）`
+    includeButton.textContent = `＋ 包含（${settings.users.length}）`
+    excludeButton.textContent = `－ 排除（${(settings.excludedUsers || []).length}）`
     includeButton.setAttribute('aria-pressed', String(!exclude))
     excludeButton.setAttribute('aria-pressed', String(exclude))
     const query = $('[name="search-users"]', panel).value.trim().toLowerCase().replace(/^@/, '')
@@ -274,8 +296,8 @@
       remove.textContent = '移除'
       remove.setAttribute('aria-label', `移除 ${user}`)
       remove.addEventListener('click', () => {
-        state.updateSettings(changeTargetUsers(history.settings, user, true, exclude),
-          exclude ? `已取消排除 ${user}。` : `已移除 ${user}。`)
+        state.updateSettings(changeTargetUsers(history.settings, user, true, exclude, global),
+          exclude ? `已取消排除 ${user}。` : `已移除 ${user}。`, global)
       })
       row.appendChild(name)
       row.appendChild(remove)
@@ -311,6 +333,7 @@
             <label><input type="checkbox" name="broadcaster"> Broadcaster</label>
             <label><input type="checkbox" name="moderators"> Moderator</label>
           </div>
+          <label class="ttc-target-scope">名單範圍<select name="target-scope"><option value="channel">目前頻道</option><option value="global">全域</option></select></label>
           <div class="ttc-target-modes" role="group" aria-label="帳號篩選方式">
             <button type="button" class="ttc-mode-include" aria-label="＋ 包含">＋ 包含</button>
             <button type="button" class="ttc-mode-exclude" aria-label="－ 排除">－ 排除</button>
@@ -340,9 +363,10 @@
     broadcaster.checked = state.history.settings.broadcaster
     state.status = $('.ttc-target-status', panel)
     state.targetMode = 'include'
-    state.updateSettings = (settings, message = '') => {
+    state.targetScope = 'channel'
+    state.updateSettings = (settings, message = '', global = false) => {
       state.history.settings = settings
-      const saved = saveSettings(state.history)
+      const saved = saveSettings(state.history, global)
       showTargetStatus(state, saved ? message : '此瀏覽器無法儲存設定；設定僅保留至本次頁面結束。')
       renderTargets(state)
       captureTree(state.scroller, state.history)
@@ -355,8 +379,9 @@
     $('.ttc-users', panel).addEventListener('submit', event => {
       event.preventDefault()
       const exclude = state.targetMode === 'exclude'
-      const key = exclude ? 'excludedUsers' : 'users'
-      const nextSettings = changeTargetUsers(state.history.settings, users.value, false, exclude)
+      const global = state.targetScope === 'global'
+      const key = global ? exclude ? 'globalExcludedUsers' : 'globalUsers' : exclude ? 'excludedUsers' : 'users'
+      const nextSettings = changeTargetUsers(state.history.settings, users.value, false, exclude, global)
       if (!nextSettings) {
         showTargetStatus(state, '請輸入一個英文帳號。')
         return
@@ -364,7 +389,7 @@
       const added = nextSettings[key].length - (state.history.settings[key] || []).length
       state.updateSettings(nextSettings, added
         ? exclude ? '已排除帳號。' : '已新增帳號。'
-        : '此帳號已在名單中。')
+        : '此帳號已在名單中。', global)
       users.value = ''
     })
     const setTargetMode = mode => {
@@ -374,6 +399,11 @@
     }
     $('.ttc-mode-include', panel).addEventListener('click', () => setTargetMode('include'))
     $('.ttc-mode-exclude', panel).addEventListener('click', () => setTargetMode('exclude'))
+    $('[name="target-scope"]', panel).addEventListener('change', event => {
+      state.targetScope = event.target.value === 'global' ? 'global' : 'channel'
+      showTargetStatus(state)
+      renderTargets(state)
+    })
     $('[name="search-users"]', panel).addEventListener('input', () => renderTargets(state))
     const targetSettings = $('.ttc-targets', panel)
     const targetButton = $('.ttc-target-summary', panel)
@@ -383,7 +413,7 @@
       panel.classList.toggle('ttc-managing', open)
     }
     targetButton.addEventListener('click', () => setTargetsOpen(targetSettings.hidden))
-    setTargetsOpen(state.history.settings.users.length === 0)
+    setTargetsOpen(state.history.settings.users.length === 0 && (state.history.settings.globalUsers || []).length === 0)
     renderTargets(state)
     state.list.addEventListener('scroll', () => {
       state.history.follow = state.list.scrollHeight - state.list.scrollTop - state.list.clientHeight < 40
@@ -455,6 +485,7 @@
   }
 
   const syncSettings = () => {
+    globalTargets = { users: [], excludedUsers: [] }
     for (const history of histories.values()) history.settings = loadSettings(history.channel)
     if (!mounted) return
     const { panel, history } = mounted
@@ -503,6 +534,8 @@
     .ttc-target-summary[aria-expanded="true"]::before { content: '▾'; }
     .ttc-targets { margin-top: 12px; flex: 1; min-height: 0; display: flex; flex-direction: column; }
     .ttc-targets > :not(.ttc-target-list) { flex-shrink: 0; }
+    .ttc-target-scope { display: flex; align-items: center; gap: 6px; margin-bottom: 12px; }
+    .ttc-target-scope select { flex: 1; min-width: 0; height: 30px; padding: 4px 8px; border: 1px solid var(--color-border-input, #8886); border-radius: 4px; color: inherit; background: var(--color-background-input, #18181b); font: inherit; }
     .ttc-target-modes { display: flex; gap: 6px; margin-bottom: 8px; }
     .ttc-target-modes button { flex: 1; padding: 4px 8px; color: inherit; background: var(--color-background-button-text-hover, #ffffff22); font-size: 12px; }
     .ttc-target-modes button[aria-pressed="true"] { color: #fff; background: #9147ff; }

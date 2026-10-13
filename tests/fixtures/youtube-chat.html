@@ -91,6 +91,8 @@
 <p id="fixture-native-result" role="status"></p>
 <script>
   const fixtureParams = new URL(location.href).searchParams
+  const fixtureChannel = fixtureParams.get('channel')
+  if (/^[a-z0-9_]+$/i.test(fixtureChannel || '')) document.querySelector('#owner a').href = `/@${fixtureChannel}`
   if (fixtureParams.has('light')) {
     for (const [key, value] of Object.entries({
       '--yt-live-chat-primary-text-color': '#0f0f0f', '--yt-live-chat-background-color': '#fff',

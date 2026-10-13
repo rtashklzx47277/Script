@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.4.6
+// @version     0.5.0
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @description Adds author profile cards, live chat account filters and session history, hides the chat mode menu, improves emoji copying and auto-follow, and adds reload.
@@ -535,6 +535,7 @@
     const MAX_CHANNELS = 5
     const STREAMS_KEY = 'youtube-live-chat-tweaks-streams-v1'
     const histories = new Map()
+    let globalTargets = { users: [], excludedUsers: [] }
     let unresolvedScope = ''
     let mounted = null
     isFilteredChat = () => !!mounted?.history.enabled
@@ -627,31 +628,45 @@
 
     const loadSettings = (channel) => {
       try {
-        const saved = readSavedSettings()[channel]
+        const stored = readSavedSettings()
+        const saved = stored[channel]
+        const global = stored['@global'] || globalTargets
+        globalTargets = {
+          users: normalizeUsers(Array.isArray(global.users) ? global.users.join(' ') : ''),
+          excludedUsers: normalizeUsers(Array.isArray(global.excludedUsers) ? global.excludedUsers.join(' ') : ''),
+        }
         return {
           moderators: saved?.moderators !== false,
           broadcaster: saved?.broadcaster !== false,
           users: normalizeUsers(Array.isArray(saved?.users) ? saved.users.join(' ') : ''),
           excludedUsers: normalizeUsers(Array.isArray(saved?.excludedUsers) ? saved.excludedUsers.join(' ') : ''),
+          globalUsers: globalTargets.users, globalExcludedUsers: globalTargets.excludedUsers,
         }
       } catch (_) {
-        return { moderators: true, broadcaster: true, users: [], excludedUsers: [] }
+        return { moderators: true, broadcaster: true, users: [], excludedUsers: [],
+          globalUsers: globalTargets.users, globalExcludedUsers: globalTargets.excludedUsers }
       }
     }
 
-    const saveSettings = (history) => {
+    const saveSettings = (history, global = false) => {
+      const { moderators, broadcaster, users, excludedUsers = [], globalUsers = [], globalExcludedUsers = [] } = history.settings
+      if (global) {
+        globalTargets = { users: globalUsers, excludedUsers: globalExcludedUsers }
+        for (const item of histories.values()) Object.assign(item.settings, { globalUsers, globalExcludedUsers })
+      }
       try {
         const saved = readSavedSettings()
-        saved[history.channel] = history.settings
+        if (global) saved['@global'] = globalTargets
+        else saved[history.channel] = { moderators, broadcaster, users, excludedUsers }
         localStorage.setItem(STORAGE_KEY, JSON.stringify(saved))
         return true
       } catch (_) { return false }
     }
 
-    const changeTargetUsers = (settings, input, remove = false, exclude = false) => {
+    const changeTargetUsers = (settings, input, remove = false, exclude = false, global = false) => {
       const user = normalizeAccount(input)
       if (!user) return null
-      const key = exclude ? 'excludedUsers' : 'users'
+      const key = global ? exclude ? 'globalExcludedUsers' : 'globalUsers' : exclude ? 'excludedUsers' : 'users'
       const users = settings[key] || []
       return { ...settings, [key]: remove
         ? users.filter(name => name !== user)
@@ -1064,9 +1079,9 @@
       (!!message.channelId && users.includes(message.channelId))
 
     const matchesFilter = (message, settings) =>
-      !includesAuthor(settings.excludedUsers || [], message) && (
+      !includesAuthor(settings.excludedUsers || [], message) && !includesAuthor(settings.globalExcludedUsers || [], message) && (
         (settings.moderators && message.moderator) ||
-        (settings.broadcaster && message.broadcaster) || includesAuthor(settings.users, message)
+        (settings.broadcaster && message.broadcaster) || includesAuthor(settings.users, message) || includesAuthor(settings.globalUsers || [], message)
       )
 
     const clonePresentation = source => {
@@ -1118,7 +1133,8 @@
         if (author.getAttribute('aria-label') !== '查看用戶資訊') author.setAttribute('aria-label', '查看用戶資訊')
       }
       const message = readMessage(line)
-      if (!message || (!message.moderator && !message.broadcaster && !includesAuthor(history.settings.users, message))) return false
+      if (!message || (!message.moderator && !message.broadcaster && !includesAuthor(history.settings.users, message) &&
+        !includesAuthor(history.settings.globalUsers || [], message))) return false
       const fingerprint = `${message.user}\n${message.channelId}\n${message.deleted}\n${message.body.innerHTML}`
       const previous = message.id ? history.ids.get(message.id) : history.nodes.get(line)
       if (previous?.fingerprint === fingerprint) {
@@ -1255,14 +1271,20 @@
       }, 3000) : 0
     }
 
+    const targetSettings = state => state.targetScope === 'global'
+      ? { users: state.history.settings.globalUsers || [], excludedUsers: state.history.settings.globalExcludedUsers || [] }
+      : state.history.settings
+
     const renderTargets = (state) => {
       const { panel, history } = state
       const exclude = state.targetMode === 'exclude'
-      const targets = exclude ? history.settings.excludedUsers || [] : history.settings.users
+      const global = state.targetScope === 'global'
+      const settings = targetSettings(state)
+      const targets = exclude ? settings.excludedUsers || [] : settings.users
       const includeButton = $('.ytcf-mode-include', panel)
       const excludeButton = $('.ytcf-mode-exclude', panel)
-      includeButton.textContent = `＋ 包含（${history.settings.users.length}）`
-      excludeButton.textContent = `－ 排除（${(history.settings.excludedUsers || []).length}）`
+      includeButton.textContent = `＋ 包含（${settings.users.length}）`
+      excludeButton.textContent = `－ 排除（${(settings.excludedUsers || []).length}）`
       includeButton.setAttribute('aria-pressed', String(!exclude))
       excludeButton.setAttribute('aria-pressed', String(exclude))
       const query = $('[name="search-users"]', panel).value.trim().toLowerCase().replace(/^@/, '')
@@ -1279,8 +1301,8 @@
         remove.textContent = '移除'
         remove.setAttribute('aria-label', `移除 ${user}`)
         remove.addEventListener('click', () => {
-          state.updateSettings(changeTargetUsers(history.settings, user, true, exclude),
-            exclude ? `已取消排除 ${user}。` : `已移除 ${user}。`)
+          state.updateSettings(changeTargetUsers(history.settings, user, true, exclude, global),
+            exclude ? `已取消排除 ${user}。` : `已移除 ${user}。`, global)
         })
         row.appendChild(name)
         row.appendChild(remove)
@@ -1307,6 +1329,10 @@
             element('label', {}, [element('input', { type: 'checkbox', name: 'broadcaster' }), ' Broadcaster']),
             element('label', {}, [element('input', { type: 'checkbox', name: 'moderators' }), ' Moderator']),
           ]),
+          element('label', { class: 'ytcf-target-scope' }, ['名單範圍', element('select', { name: 'target-scope' }, [
+            element('option', { value: 'channel' }, ['目前頻道']),
+            element('option', { value: 'global' }, ['全域']),
+          ])]),
           element('div', { class: 'ytcf-target-modes', role: 'group', 'aria-label': '帳號篩選方式' }, [
             element('button', { type: 'button', class: 'ytcf-mode-include', 'aria-label': '＋ 包含' }, ['＋ 包含']),
             element('button', { type: 'button', class: 'ytcf-mode-exclude', 'aria-label': '－ 排除' }, ['－ 排除']),
@@ -1340,9 +1366,10 @@
       broadcaster.checked = state.history.settings.broadcaster
       state.status = $('.ytcf-target-status', panel)
       state.targetMode = 'include'
-      state.updateSettings = (settings, message = '') => {
+      state.targetScope = 'channel'
+      state.updateSettings = (settings, message = '', global = false) => {
         state.history.settings = settings
-        const saved = saveSettings(state.history)
+        const saved = saveSettings(state.history, global)
         showTargetStatus(state, saved ? message : '此瀏覽器無法儲存設定；設定僅保留至本次頁面結束。')
         renderTargets(state)
         captureTree(state.scroller, state.history)
@@ -1355,8 +1382,9 @@
       $('.ytcf-users', panel).addEventListener('submit', event => {
         event.preventDefault()
         const exclude = state.targetMode === 'exclude'
-        const key = exclude ? 'excludedUsers' : 'users'
-        const nextSettings = changeTargetUsers(state.history.settings, users.value, false, exclude)
+        const global = state.targetScope === 'global'
+        const key = global ? exclude ? 'globalExcludedUsers' : 'globalUsers' : exclude ? 'excludedUsers' : 'users'
+        const nextSettings = changeTargetUsers(state.history.settings, users.value, false, exclude, global)
         if (!nextSettings) {
           showTargetStatus(state, '請輸入一個頻道 ID、頻道網址或 @帳號。')
           return
@@ -1364,7 +1392,7 @@
         const added = nextSettings[key].length - (state.history.settings[key] || []).length
         state.updateSettings(nextSettings, added
           ? exclude ? '已排除帳號。' : '已新增帳號。'
-          : '此帳號已在名單中。')
+          : '此帳號已在名單中。', global)
         users.value = ''
       })
       const setTargetMode = mode => {
@@ -1374,6 +1402,11 @@
       }
       $('.ytcf-mode-include', panel).addEventListener('click', () => setTargetMode('include'))
       $('.ytcf-mode-exclude', panel).addEventListener('click', () => setTargetMode('exclude'))
+      $('[name="target-scope"]', panel).addEventListener('change', event => {
+        state.targetScope = event.target.value === 'global' ? 'global' : 'channel'
+        showTargetStatus(state)
+        renderTargets(state)
+      })
       $('[name="search-users"]', panel).addEventListener('input', () => renderTargets(state))
       const targetSettings = $('.ytcf-targets', panel)
       const targetButton = $('.ytcf-target-summary', panel)
@@ -1383,7 +1416,7 @@
         panel.classList.toggle('ytcf-managing', open)
       }
       targetButton.addEventListener('click', () => setTargetsOpen(targetSettings.hidden))
-      setTargetsOpen(state.history.settings.users.length === 0)
+      setTargetsOpen(state.history.settings.users.length === 0 && (state.history.settings.globalUsers || []).length === 0)
       renderTargets(state)
       state.list.addEventListener('scroll', () => {
         state.history.follow = state.list.scrollHeight - state.list.scrollTop - state.list.clientHeight < 40
@@ -1469,6 +1502,7 @@
     }
 
     const syncSettings = () => {
+      globalTargets = { users: [], excludedUsers: [] }
       for (const history of histories.values()) history.settings = loadSettings(history.channel)
       if (!mounted) return
       const { panel, history } = mounted
@@ -1562,6 +1596,8 @@
       .ytcf-target-summary[aria-expanded="true"]::before { content: '▾'; }
       .ytcf-targets { margin-top: 12px; flex: 1; min-height: 0; display: flex; flex-direction: column; }
       .ytcf-targets > :not(.ytcf-target-list) { flex-shrink: 0; }
+      .ytcf-target-scope { display: flex; align-items: center; gap: 6px; margin-bottom: 12px; }
+      .ytcf-target-scope select { flex: 1; min-width: 0; height: 30px; padding: 4px 8px; border: 1px solid var(--yt-live-chat-message-input-border-color, #8886); border-radius: 4px; color: inherit; background: var(--yt-live-chat-background-color, #fff); font: inherit; }
       .ytcf-target-modes { display: flex; gap: 6px; margin-bottom: 8px; }
       .ytcf-target-modes button { flex: 1; padding: 4px 8px; color: inherit; background: var(--yt-live-chat-action-panel-background-color, #8882); font-size: 12px; }
       .ytcf-target-modes button[aria-pressed="true"] { color: var(--yt-live-chat-background-color, #fff); background: var(--yt-live-chat-button-default-text-color, #065fd4); }
