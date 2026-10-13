@@ -17,6 +17,7 @@
   .input-area { padding: 14px; border-top: 1px solid #45454a; }
   .input-area input { box-sizing: border-box; width: 100%; padding: 8px; color: inherit; background: #303034; border: 0; }
   .fixture-tools { margin-top: 20px; display: flex; gap: 8px; flex-wrap: wrap; }
+  .fixture-overlay { position: fixed; z-index: 2147483647; left: 32px; top: 170px; box-sizing: border-box; width: 320px; height: 220px; padding: 20px; background: #71412d; }
 </style>
 <h2>聊天室測試頁</h2>
 <div class="stream-chat">
@@ -34,8 +35,15 @@
   <button id="prune">清空原聊天室 DOM</button>
   <button id="remount">重建聊天室</button>
   <button id="navigate">切換頻道</button>
+  <button id="overlay-toggle">顯示遮擋測試物件</button>
 </div>
+<div class="fixture-overlay" id="fixture-overlay" hidden>原生浮動物件遮擋測試</div>
 <script>
+  document.getElementById('overlay-toggle').onclick = () => {
+    const overlay = document.getElementById('fixture-overlay')
+    overlay.hidden = !overlay.hidden
+  }
+  if (new URL(location.href).searchParams.has('overlay')) document.getElementById('fixture-overlay').hidden = false
   const scroller = () => document.querySelector('[data-a-target="chat-scroller"]')
   let serial = 0
   function addMessage(user, role = '') {

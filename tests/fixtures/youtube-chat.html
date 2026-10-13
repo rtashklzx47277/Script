@@ -22,6 +22,8 @@
   .fixture-dialog { position: fixed; top: 140px; left: 40px; z-index: 3000; max-width: 280px; padding: 20px; color: #fff; background: #282828; border: 1px solid #555; border-radius: 12px; }
   .fixture-dialog button { margin-top: 12px; padding: 8px 16px; border: 0; border-radius: 18px; color: inherit; background: #555; }
   #fixture-requests { margin-top: 14px; color: #aaa; font-size: 12px; }
+  .fixture-overlay { position: fixed; z-index: 2147483647; left: 32px; top: 170px; box-sizing: border-box; width: 320px; height: 220px; padding: 20px; background: #71412d; }
+  body:has(.fixture-overlay:not([hidden])) #item-scroller { isolation: isolate; }
   #message-action-menu { position: fixed; top: 160px; right: 8px; z-index: 20; padding: 8px; border-radius: 12px; background: #282828; }
   #message-action-menu button { display: block; padding: 10px 20px; color: inherit; background: none; border: 0; }
   #timestamp { color: #adadb8; font-size: 10px; margin-right: 5px; }
@@ -70,11 +72,18 @@
   <button id="add-user">新增 @alice 訊息</button>
   <button id="prune">清空原聊天室 DOM</button>
   <button id="remount">重建聊天室</button>
+  <button id="overlay-toggle">顯示遮擋測試物件</button>
 </div>
+<div class="fixture-overlay" id="fixture-overlay" hidden>原生浮動物件遮擋測試</div>
 <p id="fixture-requests" data-profiles="0" data-menus="0">名稱查詢 0 次 · 操作選單 0 次</p>
 <p id="fixture-native-result" role="status"></p>
 <script>
   const fixtureParams = new URL(location.href).searchParams
+  document.getElementById('overlay-toggle').onclick = () => {
+    const overlay = document.getElementById('fixture-overlay')
+    overlay.hidden = !overlay.hidden
+  }
+  if (fixtureParams.has('overlay')) document.getElementById('fixture-overlay').hidden = false
   if (fixtureParams.has('embedded')) document.body.classList.add('embedded')
   const fixtureRequests = document.getElementById('fixture-requests')
   const countRequest = type => {
@@ -175,6 +184,16 @@
     const author = chip.appendChild(document.createElement('span'))
     author.id = 'author-name'
     author.textContent = user
+    if (role === 'moderator') {
+      const badge = chip.appendChild(document.createElement('yt-live-chat-author-badge-renderer'))
+      badge.setAttribute('type', 'moderator')
+      badge.setAttribute('aria-label', 'Moderator')
+      const svg = badge.appendChild(document.createElementNS('http://www.w3.org/2000/svg', 'svg'))
+      svg.setAttribute('viewBox', '0 0 24 24')
+      const path = svg.appendChild(document.createElementNS('http://www.w3.org/2000/svg', 'path'))
+      path.setAttribute('fill', 'currentColor')
+      path.setAttribute('d', 'M4 3h6v7H4zm10 0h6v7h-6zM4 14h6v7H4zm10 0h6v7h-6z')
+    }
     content.appendChild(document.createTextNode(': '))
     const message = content.appendChild(document.createElement('span'))
     message.id = 'message'

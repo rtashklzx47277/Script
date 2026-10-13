@@ -12,6 +12,7 @@ function boot({ saved, blocked = false, trustedTypes = false, parentWindow, fetc
       this.tagName = tag
       this.nodeType = 1
       this.children = []
+      this.parentElement = null
       this.attrs = new Map()
       this.style = {}
       this.textContent = ''
@@ -166,7 +167,8 @@ function boot({ saved, blocked = false, trustedTypes = false, parentWindow, fetc
     globalThis.api = { normalizeAccount, getChannel, getHistory, loadSettings, saveSettings,
       readMessage, matchesFilter, captureLine, captureTree, renderMessages, changeTargetUsers,
       refresh, refreshHeader, setEnabled, showTargetStatus, guardMessageMenu, guardMenuDismissal,
-      getProfile, showAuthorCard, authorSnapshot, dismissCard, getAuthorCard,
+      getProfile, showAuthorCard, authorSnapshot, dismissCard, getAuthorCard, setPanelLayer, positionFilterPanel,
+      setMounted: state => { mounted = state },
       get mounted() { return mounted } };
     // End YouTube chat filtering.`), context)
   const message = (user, text, role = '', id = '') => {
@@ -543,7 +545,7 @@ test('YouTube user cards: open immediately under Trusted Types; late results can
   assert.equal(stateB.menuHost.querySelector('ytd-menu-popup-renderer').data.items[0].menuServiceItemRenderer.serviceEndpoint.fixtureReport.params, 'second-message')
 })
 
-test('YouTube retained authors: card actions keep the clicked message after DOM pruning and renderer reuse', async () => {
+test('YouTube author snapshots: preserve the clicked message and badge visuals without retaining live DOM', async () => {
   const env = boot({ nativeMenu: endpoint => Promise.resolve(menuResult(endpoint.liveChatItemContextMenuEndpoint.params)) })
   const app = env.document.body.appendChild(new env.Element('yt-live-chat-app'))
   const history = env.api.getHistory('channel:@host')
@@ -551,6 +553,12 @@ test('YouTube retained authors: card actions keep the clicked message after DOM 
   message.line.data = { authorExternalChannelId: channelA,
     contextMenuEndpoint: { liveChatItemContextMenuEndpoint: { params: 'first-message' } } }
   app.appendChild(message.line)
+  const badge = message.chip.appendChild(new env.Element('yt-live-chat-author-badge-renderer'))
+  badge.setAttribute('type', 'member')
+  badge.setAttribute('aria-label', '會員 2 年')
+  const icon = badge.appendChild(new env.Element('svg'))
+  icon.appendChild(new env.Element('path')).setAttribute('d', 'M0 0h1v1z')
+  const snapshot = env.api.authorSnapshot(env.api.readMessage(message.line))
   env.api.captureLine(message.line, history)
   assert.equal(env.profileCalls.length, 0)
   assert.equal(message.author.getAttribute('tabindex'), '0')
@@ -558,11 +566,92 @@ test('YouTube retained authors: card actions keep the clicked message after DOM 
   app.appendChild(view)
   message.line.remove()
   message.line.data.contextMenuEndpoint.liveChatItemContextMenuEndpoint.params = 'different-message'
-  const author = view.querySelector('.ytuc-author')
-  author.listeners.get('click')({ target: author })
+  const author = view.querySelector('strong')
+  assert.equal(view.querySelector('button'), null)
+  assert.equal(author.listeners?.get('click'), undefined)
+  env.api.showAuthorCard(snapshot, author)
   await settle()
   assert.equal(env.menuCalls[0].liveChatItemContextMenuEndpoint.params, 'first-message')
   assert.equal(env.api.getAuthorCard().querySelector('.ytuc-id').textContent, channelA)
+  const copiedIcon = env.api.getAuthorCard().querySelector('.ytuc-badge').querySelector('svg')
+  assert.notEqual(copiedIcon, icon)
+  assert.notEqual(copiedIcon, snapshot.badges[0].visual)
+  assert.equal(copiedIcon.querySelector('path').getAttribute('d'), 'M0 0h1v1z')
+  assert.equal(snapshot.badges[0].visual.parentElement, null)
+})
+
+test('YouTube filter mode: close existing cards and never open cards or native menu guards over the filter', () => {
+  const env = boot()
+  const app = env.document.body.appendChild(new env.Element('yt-live-chat-app'))
+  const opener = app.appendChild(new env.Element('button'))
+  env.api.showAuthorCard({ user: '@alice', name: '@alice', channelId: '' }, opener)
+  assert.ok(env.api.getAuthorCard())
+  const state = { history: env.api.getHistory('channel:@host'), panel: new env.Element(), host: new env.Element(),
+    button: new env.Element(), scroller: new env.Element(), sourceAriaHidden: null,
+    list: new env.Element(), empty: {}, count: {}, latest: {} }
+  env.api.setMounted(state)
+  env.api.setEnabled(state, true)
+  assert.equal(env.api.getAuthorCard(), null)
+  assert.equal(env.api.showAuthorCard({ user: '@alice', name: '@alice', channelId: channelA }, opener), undefined)
+  assert.equal(env.profileCalls.length, 0)
+  const popup = app.appendChild(new env.Element('tp-yt-iron-dropdown'))
+  let blocked = false
+  env.api.guardMenuDismissal({ type: 'click', target: state.panel, preventDefault() {}, stopImmediatePropagation() { blocked = true } })
+  assert.equal(blocked, false)
+  assert.equal(popup.hidden, false)
+  env.api.setMounted(null)
+})
+
+test('YouTube filter layer: use the browser top layer, track the chat bounds and release it on disable', () => {
+  const env = boot()
+  const panel = new env.Element()
+  let opened = 0, closed = 0
+  panel.showPopover = () => { opened++ }
+  panel.hidePopover = () => { closed++ }
+  const host = new env.Element()
+  host.getBoundingClientRect = () => ({ left: 40, top: 80, width: 410, height: 500 })
+  const state = { panel, host }
+  env.api.setPanelLayer(state, true)
+  assert.equal(opened, 1)
+  assert.equal(panel.getAttribute('popover'), 'manual')
+  assert.equal(panel.style.width, '410px')
+  assert.equal(panel.style.top, '80px')
+  host.getBoundingClientRect = () => ({ left: 50, top: 100, width: 300, height: 400 })
+  env.api.positionFilterPanel(state)
+  assert.equal(panel.style.left, '50px')
+  assert.equal(panel.style.height, '400px')
+  env.api.setPanelLayer(state, true)
+  assert.equal(opened, 1)
+  env.api.setPanelLayer(state, false)
+  assert.equal(closed, 1)
+  assert.equal(panel.style.position, '')
+  assert.equal(panel.getAttribute('popover'), null)
+})
+
+test('YouTube user cards: exactly match chat bounds without an inset or width cap', () => {
+  const env = boot()
+  const app = env.document.body.appendChild(new env.Element('yt-live-chat-app'))
+  const chat = app.appendChild(new env.Element('yt-live-chat-renderer'))
+  chat.getBoundingClientRect = () => ({ left: 20.5, right: 720.75, top: 40, width: 700.25, height: 500 })
+  const opener = chat.appendChild(new env.Element('button'))
+  const state = env.api.showAuthorCard({ user: '@alice', name: '@alice', channelId: '' }, opener)
+  assert.equal(state.card.style.left, '20.5px')
+  assert.equal(state.card.style.width, '700.25px')
+})
+
+test('YouTube card actions: preserve the native menu language rather than hardcoding Japanese or Chinese', async () => {
+  for (const labels of [['檢舉', '封鎖'], ['報告', 'ブロック'], ['Report', 'Block']]) {
+    const env = boot({ nativeMenu: () => Promise.resolve({ data: { liveChatItemContextMenuSupportedRenderers: { menuRenderer: {
+      items: labels.map(text => ({ menuServiceItemRenderer: { text: { simpleText: text } } })),
+    } } } }) })
+    const app = env.document.body.appendChild(new env.Element('yt-live-chat-app'))
+    const opener = app.appendChild(new env.Element('button'))
+    const state = env.api.showAuthorCard({ user: '@alice', name: '@alice', channelId: '',
+      contextMenuEndpoint: { liveChatItemContextMenuEndpoint: { params: 'message' } } }, opener)
+    await settle()
+    const menu = state.menuHost.querySelector('ytd-menu-popup-renderer')
+    assert.equal(menu.data.items.map(item => item.menuServiceItemRenderer.text.simpleText).join('|'), labels.join('|'))
+  }
 })
 
 test('YouTube user cards: outside click dismisses without click-through; native commands retain a connected event path', async () => {

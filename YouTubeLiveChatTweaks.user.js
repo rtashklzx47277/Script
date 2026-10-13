@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.4.0
+// @version     0.4.1
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @description Adds author profile cards, live chat account filters and session history, hides the chat mode menu, improves emoji copying and auto-follow, and adds reload.
@@ -151,6 +151,7 @@
   let openAuthorCard = () => {}
   let getAuthorCard = () => null
   let closeAuthorCard = () => {}
+  let isFilteredChat = () => false
 
   const guardMessageMenu = event => {
     const target = event.target?.nodeType === 1 ? event.target : event.target?.parentElement
@@ -167,7 +168,7 @@
   }
   document.addEventListener('click', guardMessageMenu, true)
 
-  const getOpenChatMenu = () => [...document.querySelectorAll('tp-yt-iron-dropdown')]
+  const getOpenChatMenu = () => isFilteredChat() ? null : [...document.querySelectorAll('tp-yt-iron-dropdown')]
     .find(menu => !menu.id && menu.parentElement?.matches('yt-live-chat-app') &&
       !menu.hidden && menu.getAttribute('aria-hidden') !== 'true' && menu.getClientRects().length > 0) || getAuthorCard()
 
@@ -536,6 +537,7 @@
     const histories = new Map()
     let unresolvedScope = ''
     let mounted = null
+    isFilteredChat = () => !!mounted?.history.enabled
     let refreshTimer = 0
 
     const $ = (selector, root = document) => root.querySelector(selector)
@@ -731,6 +733,12 @@
     const authorSnapshot = message => ({
       user: message.user, channelId: message.channelId, name: message.author.textContent,
       avatar: message.avatar, broadcaster: message.broadcaster, moderator: message.moderator,
+      badges: message.badges.map(badge => {
+        const visual = $('img, svg', badge)
+        return { type: badge.getAttribute('type'),
+          label: badge.getAttribute('aria-label') || badge.getAttribute('shared-tooltip-text') || '徽章',
+          visual: visual ? clonePresentation(visual) : null }
+      }),
       // Retained messages must not keep the original renderer/DOM alive.
       contextMenuEndpoint: message.contextMenuEndpoint
         ? JSON.parse(JSON.stringify(message.contextMenuEndpoint)) : null,
@@ -789,14 +797,13 @@
       const width = document.documentElement?.clientWidth || window.innerWidth || 400
       const height = document.documentElement?.clientHeight || window.innerHeight || 600
       const chat = $('yt-live-chat-renderer')?.getBoundingClientRect()
-      const left = Math.max(0, chat?.left || 0)
-      const right = Math.min(width, chat?.right || width)
-      const cardWidth = Math.min(340, Math.max(0, right - left - 16))
+      const left = chat?.left || 0
+      const cardWidth = chat?.width || width
       state.card.style.width = `${cardWidth}px`
       const cardHeight = state.card.getBoundingClientRect().height
       let top = state.anchor.bottom + 6
       if (top + cardHeight > height - 8) top = state.anchor.top - cardHeight - 6
-      state.card.style.left = `${Math.max(left + 8, Math.min(state.anchor.left, right - cardWidth - 8))}px`
+      state.card.style.left = `${left}px`
       state.card.style.top = `${Math.max(8, Math.min(top, height - cardHeight - 8))}px`
       state.card.style.maxHeight = `${Math.max(0, height - 16)}px`
     }
@@ -875,6 +882,7 @@
     }
 
     const showAuthorCard = (author, opener) => {
+      if (mounted?.history.enabled) return
       dismissCard()
       const app = $('yt-live-chat-app')
       if (!app) return
@@ -893,8 +901,22 @@
       const profileStatus = element('p', { class: 'ytuc-status', role: 'status' }, [author.channelId ? '載入頻道名稱…' : '頻道名稱暫時無法載入。'])
       const profileRetry = element('button', { class: 'ytuc-retry', type: 'button', hidden: '' }, ['重試名稱'])
       const identity = element('div', { class: 'ytuc-identity' }, [handle, id])
-      const roles = [author.broadcaster ? 'Broadcaster' : '', author.moderator ? 'Moderator' : ''].filter(Boolean)
-      if (roles.length) identity.appendChild(element('div', { class: 'ytuc-badges' }, roles.map(role => element('span', {}, [role]))))
+      const badges = [...(author.badges || [])]
+      if (author.broadcaster && !badges.some(badge => badge.type === 'owner')) badges.push({ label: 'Broadcaster' })
+      if (author.moderator && !badges.some(badge => badge.type === 'moderator')) badges.push({ label: 'Moderator' })
+      if (badges.length) {
+        const badgeList = element('div', { class: 'ytuc-badges', role: 'list', 'aria-label': '徽章' })
+        for (const badge of badges) {
+          const item = element('span', { class: 'ytuc-badge', role: 'listitem', 'aria-label': badge.label, title: badge.label })
+          if (badge.visual) {
+            item.appendChild(clonePresentation(badge.visual))
+          } else item.textContent = badge.label
+          badgeList.appendChild(item)
+        }
+        identity.appendChild(element('div', { class: 'ytuc-badge-section' }, [
+          element('div', { class: 'ytuc-badge-heading' }, ['徽章']), badgeList,
+        ]))
+      }
       identity.appendChild(profileStatus)
       identity.appendChild(profileRetry)
       const menuStatus = element('p', { class: 'ytuc-status', role: 'status' }, ['載入操作…'])
@@ -992,7 +1014,7 @@
       const copy = source.cloneNode(true)
       for (const node of [copy, ...$$('*', copy)]) {
         for (const attr of [...node.attributes]) {
-          if (['id', 'tabindex', 'role'].includes(attr.name) || attr.name.startsWith('on') || attr.name.startsWith('data-')) node.removeAttribute(attr.name)
+          if (['id', 'tabindex', 'role', 'title'].includes(attr.name) || attr.name.startsWith('on') || attr.name.startsWith('data-')) node.removeAttribute(attr.name)
         }
       }
       for (const link of $$('a', copy)) {
@@ -1012,20 +1034,15 @@
       for (const badge of message.badges) {
         const copy = document.createElement('span')
         copy.className = 'ytcf-badge'
-        copy.title = badge.getAttribute('aria-label') || badge.getAttribute('shared-tooltip-text') || ''
+        copy.setAttribute('aria-label', badge.getAttribute('aria-label') || badge.getAttribute('shared-tooltip-text') || '')
         const visual = $('img, svg', badge)
         if (visual) copy.appendChild(clonePresentation(visual))
         else copy.textContent = badge.getAttribute('type') === 'moderator' ? '🔧' : badge.getAttribute('type') === 'owner' ? '👑' : '★'
         row.appendChild(copy)
       }
-      const author = document.createElement('button')
-      author.type = 'button'
-      author.className = 'ytuc-author'
+      const author = document.createElement('strong')
       author.textContent = message.author.textContent
       author.style.color = getComputedStyle(message.author).color
-      author.setAttribute('aria-label', `查看 ${message.author.textContent} 的用戶資訊`)
-      const snapshot = authorSnapshot(message)
-      author.addEventListener('click', () => showAuthorCard(snapshot, author))
       row.appendChild(author)
       row.appendChild(document.createTextNode(': '))
       const content = clonePresentation(message.body)
@@ -1104,7 +1121,47 @@
       else state.scroller.setAttribute('aria-hidden', state.sourceAriaHidden)
     }
 
+    let panelFramePending = false
+    const positionFilterPanel = state => {
+      if (!state.inTopLayer) return
+      const rect = state.host.getBoundingClientRect()
+      Object.assign(state.panel.style, { position: 'fixed', inset: 'auto', margin: '0',
+        left: `${rect.left}px`, top: `${rect.top}px`, width: `${rect.width}px`, height: `${rect.height}px` })
+    }
+    const schedulePanelPosition = () => {
+      if (!mounted?.inTopLayer || panelFramePending) return
+      panelFramePending = true
+      requestAnimationFrame(() => {
+        panelFramePending = false
+        if (mounted) positionFilterPanel(mounted)
+      })
+    }
+    const setPanelLayer = (state, enabled) => {
+      const { panel } = state
+      if (!enabled) {
+        if (state.inTopLayer) { try { panel.hidePopover() } catch (_) {} }
+        state.inTopLayer = false
+        state.layerObserver?.disconnect()
+        state.layerObserver = null
+        panel.removeAttribute('popover')
+        for (const name of ['position', 'inset', 'margin', 'left', 'top', 'width', 'height']) panel.style[name] = ''
+        return
+      }
+      if (typeof panel.showPopover !== 'function') return
+      if (!state.inTopLayer) {
+        panel.setAttribute('popover', 'manual')
+        try { panel.showPopover() } catch (_) { setPanelLayer(state, false); return }
+        state.inTopLayer = true
+        if (typeof ResizeObserver === 'function') {
+          state.layerObserver = new ResizeObserver(schedulePanelPosition)
+          state.layerObserver.observe(state.host)
+        }
+      }
+      positionFilterPanel(state)
+    }
+
     const setEnabled = (state, enabled) => {
+      if (enabled) closeAuthorCard()
       state.history.enabled = enabled
       state.host.classList.toggle('ytcf-active', enabled)
       setNativeChatAccessible(state, enabled)
@@ -1115,6 +1172,7 @@
         keepFollowingLatest()
       }
       state.panel.hidden = !enabled
+      setPanelLayer(state, enabled)
       state.button.setAttribute('aria-pressed', String(enabled))
       if (enabled) renderMessages(state)
     }
@@ -1272,6 +1330,7 @@
     const unmount = () => {
       if (!mounted) return
       closeAuthorCard()
+      setPanelLayer(mounted, false)
       clearTimeout(mounted.statusTimer)
       mounted.observer.disconnect()
       mounted.button.remove()
@@ -1364,7 +1423,7 @@
       #yt-chat-tweaks-filter-button:focus-visible, .ytcf-panel button:focus-visible { outline: 2px solid var(--yt-live-chat-button-default-text-color, #065fd4); outline-offset: -2px; }
       .ytcf-host { position: relative; }
       .ytcf-active > .ytcf-source { pointer-events: none; isolation: isolate; }
-      .ytcf-panel { position: absolute; inset: 0; z-index: 5; display: flex; flex-direction: column; min-height: 0; color: var(--yt-live-chat-primary-text-color, #0f0f0f); background: var(--yt-live-chat-background-color, #fff); font-size: 13px; }
+      .ytcf-panel { position: absolute; inset: 0; z-index: 2147483647; display: flex; flex-direction: column; box-sizing: border-box; min-height: 0; max-width: none; max-height: none; margin: 0; padding: 0; border: 0; color: var(--yt-live-chat-primary-text-color, #0f0f0f); background: var(--yt-live-chat-background-color, #fff); font-size: 13px; }
       .ytcf-panel [hidden], .ytcf-panel[hidden] { display: none !important; }
       .ytcf-toolbar { flex: 0 0 auto; padding: 10px; border-bottom: 1px solid var(--yt-live-chat-message-input-border-color, #8884); }
       .ytcf-options { display: flex; align-items: center; gap: 6px; flex-wrap: nowrap; font-size: 12px; }
@@ -1383,8 +1442,6 @@
       .ytcf-list { flex: 1; min-height: 0; overflow: auto; overflow-anchor: none; padding: 6px 0; }
       .ytcf-message { padding: 5px 10px; overflow-wrap: anywhere; line-height: 1.6; }
       .ytcf-message:hover { background: var(--yt-live-chat-action-panel-background-color, #8882); }
-      .ytcf-panel .ytuc-author { display: inline; margin: 0; padding: 0; border: 0; border-radius: 0; background: none; font: inherit; font-weight: 600; line-height: inherit; vertical-align: baseline; text-align: start; }
-      .ytuc-author:hover { text-decoration: underline; }
       .ytuc-card { position: fixed; z-index: 2200; box-sizing: border-box; overflow: auto; overscroll-behavior: contain; border: 1px solid var(--yt-live-chat-message-input-border-color, #8884); border-radius: 8px; box-shadow: 0 8px 28px #0006; color: var(--yt-live-chat-primary-text-color, #0f0f0f); background: var(--yt-live-chat-background-color, #fff); font: 13px/1.5 Roboto, Arial, sans-serif; }
       .ytuc-card[hidden], .ytuc-card [hidden] { display: none !important; }
       .ytuc-header { display: flex; align-items: flex-start; gap: 12px; padding: 16px 12px; }
@@ -1397,8 +1454,12 @@
       .ytuc-identity { padding: 12px; border-top: 1px solid var(--yt-live-chat-message-input-border-color, #8883); }
       .ytuc-handle { overflow-wrap: anywhere; }
       .ytuc-id { margin-top: 4px; color: var(--yt-live-chat-secondary-text-color, #606060); overflow-wrap: anywhere; user-select: text; font: 12px/1.5 ui-monospace, Consolas, monospace; }
-      .ytuc-badges { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
-      .ytuc-badges span { padding: 2px 6px; border: 1px solid var(--yt-live-chat-message-input-border-color, #8884); border-radius: 4px; font-size: 11px; }
+      .ytuc-badge-section { margin-top: 12px; }
+      .ytuc-badge-heading { margin-bottom: 8px; font-weight: 600; }
+      .ytuc-badges { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+      .ytuc-badge { display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box; min-width: 36px; min-height: 36px; padding: 4px; border: 1px solid var(--yt-live-chat-message-input-border-color, #8884); border-radius: 4px; font-size: 11px; }
+      .ytuc-badge img, .ytuc-badge svg { display: block; width: 26px; height: 26px; object-fit: contain; }
+      .ytuc-badge svg { fill: currentColor; }
       .ytuc-actions { padding: 12px; border-top: 1px solid var(--yt-live-chat-message-input-border-color, #8883); background: var(--yt-live-chat-action-panel-background-color, #8881); }
       .ytuc-status { margin: 0; color: var(--yt-live-chat-secondary-text-color, #606060); font-size: 12px; }
       .ytuc-identity .ytuc-status { margin-top: 8px; }
@@ -1410,6 +1471,8 @@
       .ytuc-menu tp-yt-paper-item { box-sizing: border-box; min-height: 32px !important; min-width: 0 !important; padding: 4px 12px !important; border-radius: 18px; background: var(--yt-live-chat-button-default-background-color, #8882); white-space: normal; cursor: pointer; }
       .ytuc-menu tp-yt-paper-item:hover { filter: brightness(1.15); }
       .ytuc-menu yt-icon { width: 20px; height: 20px; margin-right: 6px !important; }
+      .ytuc-menu .text-wrapper { min-width: 0; }
+      .ytuc-menu .text-wrapper > .title { margin: 0 !important; }
       .ytuc-menu .item { min-width: 0; max-width: 100%; }
       .ytcf-time { margin-right: 6px; color: var(--yt-live-chat-secondary-text-color, #606060); font-size: 10px; }
       .ytcf-message > img { width: 18px; height: 18px; margin-right: 3px; vertical-align: middle; }
@@ -1442,6 +1505,8 @@
     window.addEventListener('storage', event => {
       if (event.key === STORAGE_KEY || event.key === null) syncSettings()
     })
+    window.addEventListener('resize', schedulePanelPosition)
+    window.addEventListener('scroll', schedulePanelPosition, true)
     setInterval(refresh, 1000)
     refresh()
     // End YouTube chat filtering.

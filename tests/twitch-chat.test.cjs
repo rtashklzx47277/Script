@@ -102,6 +102,7 @@ function boot({ saved, blocked = false } = {}) {
   vm.runInContext(source.replace(/\}\)\(\)\s*$/, `globalThis.api = {
     normalizeUsers, getChannel, getHistory, loadSettings, saveSettings, readMessage,
     matchesFilter, captureLine, captureTree, renderMessages, changeTargetUsers, showTargetStatus,
+    setPanelLayer, positionFilterPanel,
     setMounted: state => { mounted = state }
   }; })()`), context)
   const message = (user, text, role = '') => {
@@ -142,6 +143,29 @@ test('Twitch target status: replacing a notice restarts its three-second lifetim
   timers.get(state.statusTimer).fn()
   assert.equal(state.status.textContent, '')
   assert.equal(state.statusTimer, 0)
+})
+
+test('Twitch filter layer: stay in the browser top layer through resize and release on disable', () => {
+  const { api, Element } = boot()
+  const panel = new Element()
+  let opened = 0, closed = 0
+  panel.showPopover = () => { opened++ }
+  panel.hidePopover = () => { closed++ }
+  const host = new Element()
+  host.getBoundingClientRect = () => ({ left: 600, top: 80, width: 400, height: 500 })
+  const state = { panel, host }
+  api.setPanelLayer(state, true)
+  assert.equal(opened, 1)
+  assert.equal(panel.getAttribute('popover'), 'manual')
+  assert.equal(panel.style.width, '400px')
+  host.getBoundingClientRect = () => ({ left: 650, top: 100, width: 350, height: 450 })
+  api.positionFilterPanel(state)
+  assert.equal(panel.style.left, '650px')
+  assert.equal(panel.style.height, '450px')
+  api.setPanelLayer(state, false)
+  assert.equal(closed, 1)
+  assert.equal(panel.style.position, '')
+  assert.equal(panel.getAttribute('popover'), null)
 })
 
 test('Twitch chat: normalize login names and tolerate corrupt/unavailable storage', () => {

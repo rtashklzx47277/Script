@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        Twitch Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.4.6
+// @version     0.4.7
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
 // @description Filter chat by broadcaster, moderator and include/exclude account lists, with session history and a header toggle.
@@ -129,18 +129,18 @@
     for (const badge of message.badges) {
       const copy = badge.cloneNode(false)
       copy.removeAttribute('tabindex')
+      copy.removeAttribute('title')
       row.appendChild(copy)
     }
     const author = document.createElement('strong')
     author.textContent = message.author.textContent
     author.style.color = message.author.style.color
-    author.title = message.user
     row.appendChild(author)
     row.appendChild(document.createTextNode(': '))
     const body = message.body.cloneNode(true)
     for (const node of [body, ...$$('*', body)]) {
       for (const attr of [...node.attributes]) {
-        if (attr.name === 'id' || attr.name === 'tabindex' || attr.name === 'role' ||
+        if (attr.name === 'id' || attr.name === 'tabindex' || attr.name === 'role' || attr.name === 'title' ||
           attr.name.startsWith('on') || attr.name.startsWith('data-')) node.removeAttribute(attr.name)
       }
     }
@@ -201,12 +201,52 @@
     latest.hidden = history.follow
   }
 
+  let panelFramePending = false
+  const positionFilterPanel = state => {
+    if (!state.inTopLayer) return
+    const rect = state.host.getBoundingClientRect()
+    Object.assign(state.panel.style, { position: 'fixed', inset: 'auto', margin: '0',
+      left: `${rect.left}px`, top: `${rect.top}px`, width: `${rect.width}px`, height: `${rect.height}px` })
+  }
+  const schedulePanelPosition = () => {
+    if (!mounted?.inTopLayer || panelFramePending) return
+    panelFramePending = true
+    requestAnimationFrame(() => {
+      panelFramePending = false
+      if (mounted) positionFilterPanel(mounted)
+    })
+  }
+  const setPanelLayer = (state, enabled) => {
+    const { panel } = state
+    if (!enabled) {
+      if (state.inTopLayer) { try { panel.hidePopover() } catch (_) {} }
+      state.inTopLayer = false
+      state.layerObserver?.disconnect()
+      state.layerObserver = null
+      panel.removeAttribute('popover')
+      for (const name of ['position', 'inset', 'margin', 'left', 'top', 'width', 'height']) panel.style[name] = ''
+      return
+    }
+    if (typeof panel.showPopover !== 'function') return
+    if (!state.inTopLayer) {
+      panel.setAttribute('popover', 'manual')
+      try { panel.showPopover() } catch (_) { setPanelLayer(state, false); return }
+      state.inTopLayer = true
+      if (typeof ResizeObserver === 'function') {
+        state.layerObserver = new ResizeObserver(schedulePanelPosition)
+        state.layerObserver.observe(state.host)
+      }
+    }
+    positionFilterPanel(state)
+  }
+
   const setEnabled = (state, enabled) => {
     state.history.enabled = enabled
     state.host.classList.toggle('ttc-active', enabled)
     state.panel.hidden = !enabled
+    setPanelLayer(state, enabled)
     state.button.setAttribute('aria-pressed', String(enabled))
-    state.button.title = enabled ? '顯示一般聊天室' : '只看 Broadcaster、Moderator 與指定用戶'
+    state.button.title = enabled ? '' : '只看 Broadcaster、Moderator 與指定用戶'
     if (enabled) renderMessages(state)
   }
 
@@ -358,6 +398,7 @@
 
   const unmount = () => {
     if (!mounted) return
+    setPanelLayer(mounted, false)
     clearTimeout(mounted.statusTimer)
     mounted.observer.disconnect()
     mounted.button.remove()
@@ -432,7 +473,7 @@
     .ttc-toggle:focus-visible, .ttc-panel button:focus-visible { outline: 2px solid #9147ff; outline-offset: -2px; }
     .ttc-host { position: relative; }
     .ttc-active > .ttc-source { visibility: hidden; pointer-events: none; }
-    .ttc-panel { position: absolute; inset: 0; z-index: 5; display: flex; flex-direction: column; min-height: 0; color: var(--color-text-base, #efeff1); background: var(--color-background-base, #18181b); font-size: 13px; }
+    .ttc-panel { position: absolute; inset: 0; z-index: 2147483647; display: flex; flex-direction: column; box-sizing: border-box; min-height: 0; max-width: none; max-height: none; margin: 0; padding: 0; border: 0; color: var(--color-text-base, #efeff1); background: var(--color-background-base, #18181b); font-size: 13px; }
     .ttc-panel [hidden], .ttc-panel[hidden] { display: none !important; }
     .ttc-toolbar { flex: 0 0 auto; padding: 10px; border-bottom: 1px solid var(--color-border-base, #ffffff22); }
     .ttc-options { display: flex; align-items: center; gap: 6px; flex-wrap: nowrap; font-size: 12px; }
@@ -478,6 +519,8 @@
   window.addEventListener('storage', event => {
     if (event.key === STORAGE_KEY || event.key === null) syncSettings()
   })
+  window.addEventListener('resize', schedulePanelPosition)
+  window.addEventListener('scroll', schedulePanelPosition, true)
   const observer = new MutationObserver(mutations => {
     if (mutations.some(mutation => {
       const element = mutation.target.nodeType === 1 ? mutation.target : mutation.target.parentElement
