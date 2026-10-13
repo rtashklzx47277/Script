@@ -4,7 +4,9 @@ const fs = require('node:fs')
 const vm = require('node:vm')
 const path = require('node:path')
 
-function boot({ saved, blocked = false, trustedTypes = false, parentWindow } = {}) {
+function boot({ saved, blocked = false, trustedTypes = false, parentWindow, fetchProfile, nativeMenu } = {}) {
+  const profileCalls = []
+  const menuCalls = []
   class Element {
     constructor(tag = 'div') {
       this.tagName = tag
@@ -18,6 +20,8 @@ function boot({ saved, blocked = false, trustedTypes = false, parentWindow } = {
       this.value = ''
     }
     get attributes() { return [...this.attrs].map(([name, value]) => ({ name, value })) }
+    get textContent() { return (this._textContent || '') + this.children.map(child => child.textContent).join('') }
+    set textContent(value) { this._textContent = String(value); this.replaceChildren() }
     get firstChild() { return this.children[0] }
     get innerHTML() { return this._innerHTML }
     set innerHTML(value) {
@@ -26,6 +30,17 @@ function boot({ saved, blocked = false, trustedTypes = false, parentWindow } = {
     }
     get isConnected() { return this === document || !!this.parentElement?.isConnected }
     getClientRects() { return this.isConnected && !this.hidden ? [{}] : [] }
+    getBoundingClientRect() { return { top: 120, bottom: 144, left: 20, right: 80, width: 60, height: 24 } }
+    focus() { document.activeElement = this }
+    dispatchEvent(event) {
+      event.target ||= this
+      if (event.detail?.actionName === 'yt-service-request') {
+        menuCalls.push(event.detail.args[1])
+        event.detail.returnValue.push({ ajaxPromise: nativeMenu
+          ? nativeMenu(event.detail.args[1]) : Promise.resolve({ data: { liveChatItemContextMenuSupportedRenderers: { menuRenderer: {} } } }) })
+      }
+      return true
+    }
     get classList() {
       const apply = (name, enabled) => {
         const classes = new Set((this.className || '').split(' ').filter(Boolean))
@@ -38,7 +53,8 @@ function boot({ saved, blocked = false, trustedTypes = false, parentWindow } = {
     }
     addEventListener(name, handler) {
       this.listeners ||= new Map()
-      this.listeners.set(name, handler)
+      const previous = this.listeners.get(name)
+      this.listeners.set(name, previous ? event => { previous(event); handler(event) } : handler)
     }
     setAttribute(name, value) {
       this.attrs.set(name, value)
@@ -125,7 +141,15 @@ function boot({ saved, blocked = false, trustedTypes = false, parentWindow } = {
   let nextTimer = 0
   const context = {
     document, location: { pathname: '/live_chat', href: 'https://www.youtube.com/live_chat?v=sample_video', origin: 'https://www.youtube.com' }, console, URL,
-    window: { parent: parentWindow, addEventListener(name, fn) { listeners.set(name, fn) } },
+    window: { parent: parentWindow, addEventListener(name, fn) {
+      const previous = listeners.get(name)
+      listeners.set(name, previous ? event => { previous(event); fn(event) } : fn)
+    } },
+    CustomEvent: class { constructor(type, options) { this.type = type; Object.assign(this, options) } },
+    fetch(url, options) {
+      profileCalls.push({ url, options })
+      return fetchProfile ? fetchProfile(url, options) : Promise.resolve({ ok: false })
+    },
     setTimeout(fn, delay) { const id = ++nextTimer; timers.set(id, { fn, delay }); return id },
     clearTimeout(id) { timers.delete(id) }, setInterval() {}, requestAnimationFrame() {},
     Node: { ELEMENT_NODE: 1 }, HTMLElement: Element, AbortController,
@@ -142,6 +166,7 @@ function boot({ saved, blocked = false, trustedTypes = false, parentWindow } = {
     globalThis.api = { normalizeAccount, getChannel, getHistory, loadSettings, saveSettings,
       readMessage, matchesFilter, captureLine, captureTree, renderMessages, changeTargetUsers,
       refresh, refreshHeader, setEnabled, showTargetStatus, guardMessageMenu, guardMenuDismissal,
+      getProfile, showAuthorCard, authorSnapshot, dismissCard, getAuthorCard,
       get mounted() { return mounted } };
     // End YouTube chat filtering.`), context)
   const message = (user, text, role = '', id = '') => {
@@ -158,7 +183,8 @@ function boot({ saved, blocked = false, trustedTypes = false, parentWindow } = {
     body.textContent = text
     return { line, body, author, chip }
   }
-  return { api: context.api, message, Element, storage, timers, listeners, location: context.location, document, window: context.window }
+  return { api: context.api, message, Element, storage, timers, listeners, profileCalls, menuCalls,
+    location: context.location, document, window: context.window }
 }
 
 test('YouTube filters: mount, toggle and remount when Trusted Types rejects HTML strings', () => {
@@ -215,7 +241,7 @@ test('YouTube filters: mount, toggle and remount when Trusted Types rejects HTML
   assert.equal(scroller.getAttribute('aria-hidden'), null)
 })
 
-test('YouTube message actions: only the message menu propagates, links keep their default navigation', () => {
+test('YouTube message actions: author clicks are handled while message links keep default navigation', () => {
   const { api, Element, message, document } = boot()
   const { line, body, author } = message('@alice', 'hello')
   const menu = line.appendChild(new Element('div'))
@@ -230,7 +256,7 @@ test('YouTube message actions: only the message menu propagates, links keep thei
     let prevented = false
     api.guardMessageMenu({ target, stopPropagation() { stopped = true }, preventDefault() { prevented = true } })
     assert.equal(stopped, expected)
-    assert.equal(prevented, false)
+    assert.equal(prevented, target === author)
   }
 })
 
@@ -436,4 +462,148 @@ test('YouTube filters: late channel identity keeps early records and user edits'
   assert.equal(resolved.enabled, true)
   assert.equal(resolved.messages.length, 1)
   assert.equal(env.api.loadSettings('channel:@host').users.join(','), '@alice')
+})
+
+const settle = () => new Promise(resolve => setImmediate(resolve))
+const channelA = 'UCAbCdEfGhIjKlMnOpQrStUv'
+const channelB = 'UCZYXWVUTSRQPONMLKJIHGFE'
+const menuResult = params => ({ data: { liveChatItemContextMenuSupportedRenderers: { menuRenderer: {
+  items: [{ menuServiceItemRenderer: { text: { simpleText: '報告' }, serviceEndpoint: { fixtureReport: { params } } } }],
+} } } })
+
+test('YouTube author identity: renderer controller preserves handles despite third-party display-name changes', () => {
+  const env = boot()
+  const { line } = env.message('頻道名稱', 'hello')
+  line.data = { authorExternalChannelId: channelB }
+  line.polymerController = { data: { authorExternalChannelId: channelA,
+    authorName: { simpleText: '@OriginalHandle' }, contextMenuEndpoint: { liveChatItemContextMenuEndpoint: { params: 'message-A' } } } }
+  const read = env.api.readMessage(line)
+  assert.equal(read.user, '@originalhandle')
+  assert.equal(read.channelId, channelA)
+  assert.equal(read.contextMenuEndpoint.liveChatItemContextMenuEndpoint.params, 'message-A')
+})
+
+test('YouTube profile requests: deduplicate in-flight lookups, cache names and failures, and reject mismatched IDs', async () => {
+  let resolveProfile
+  const env = boot({ fetchProfile: () => new Promise(resolve => { resolveProfile = resolve }) })
+  assert.equal(await env.api.getProfile('bad-id'), null)
+  assert.equal(env.profileCalls.length, 0)
+  const first = env.api.getProfile(channelA)
+  const second = env.api.getProfile(channelA)
+  assert.equal(first, second)
+  assert.equal(env.profileCalls.length, 1)
+  assert.equal(env.profileCalls[0].options.credentials, 'omit')
+  assert.equal(JSON.parse(env.profileCalls[0].options.body).browseId, channelA)
+  resolveProfile({ ok: true, json: async () => ({ metadata: { channelMetadataRenderer: {
+    externalId: channelA, title: '真正的頻道名稱', vanityChannelUrl: 'https://www.youtube.com/@OriginalHandle',
+  } } }) })
+  assert.equal((await first).title, '真正的頻道名稱')
+  assert.equal((await env.api.getProfile(channelA)).handle, '@OriginalHandle')
+  assert.equal(env.profileCalls.length, 1)
+  const failed = env.api.getProfile(channelB)
+  resolveProfile({ ok: true, json: async () => ({ metadata: { channelMetadataRenderer: { externalId: channelA, title: '錯誤用戶' } } }) })
+  assert.equal(await failed, null)
+  assert.equal(await env.api.getProfile(channelB), null)
+  assert.equal(env.profileCalls.length, 2)
+})
+
+test('YouTube user cards: open immediately under Trusted Types; late results cannot replace another user', async () => {
+  const profileResolvers = []
+  const menuResolvers = []
+  const env = boot({ trustedTypes: true,
+    fetchProfile: () => new Promise(resolve => profileResolvers.push(resolve)),
+    nativeMenu: () => new Promise(resolve => menuResolvers.push(resolve)),
+  })
+  const app = env.document.body.appendChild(new env.Element('yt-live-chat-app'))
+  const first = env.message('@first', 'first message')
+  app.appendChild(first.line)
+  first.line.data = { authorExternalChannelId: channelA,
+    contextMenuEndpoint: { liveChatItemContextMenuEndpoint: { params: 'first-message' } } }
+  env.api.guardMessageMenu({ target: first.author, preventDefault() {}, stopPropagation() {} })
+  const cardA = env.api.getAuthorCard()
+  assert.ok(cardA.isConnected)
+  assert.equal(cardA.querySelector('.ytuc-id').textContent, channelA)
+  assert.equal(cardA.querySelector('.ytuc-name').textContent, '@first')
+  const second = env.message('@second', 'second message')
+  app.appendChild(second.line)
+  second.line.data = { authorExternalChannelId: channelB,
+    contextMenuEndpoint: { liveChatItemContextMenuEndpoint: { params: 'second-message' } } }
+  const snapshot = env.api.authorSnapshot(env.api.readMessage(second.line))
+  const stateB = env.api.showAuthorCard(snapshot, second.author)
+  profileResolvers[0]({ ok: true, json: async () => ({ metadata: { channelMetadataRenderer: { externalId: channelA, title: '第一位' } } }) })
+  menuResolvers[0](menuResult('first-message'))
+  await settle()
+  assert.equal(cardA.isConnected, false)
+  assert.equal(stateB.title.textContent, '@second')
+  assert.equal(stateB.menuHost.querySelector('ytd-menu-popup-renderer'), null)
+  profileResolvers[1]({ ok: true, json: async () => ({ metadata: { channelMetadataRenderer: { externalId: channelB, title: '第二位' } } }) })
+  menuResolvers[1](menuResult('second-message'))
+  await settle()
+  assert.equal(stateB.title.textContent, '第二位')
+  assert.equal(stateB.menuHost.querySelector('ytd-menu-popup-renderer').data.items[0].menuServiceItemRenderer.serviceEndpoint.fixtureReport.params, 'second-message')
+})
+
+test('YouTube retained authors: card actions keep the clicked message after DOM pruning and renderer reuse', async () => {
+  const env = boot({ nativeMenu: endpoint => Promise.resolve(menuResult(endpoint.liveChatItemContextMenuEndpoint.params)) })
+  const app = env.document.body.appendChild(new env.Element('yt-live-chat-app'))
+  const history = env.api.getHistory('channel:@host')
+  const message = env.message('@moderator', 'retained', 'moderator', 'first-message')
+  message.line.data = { authorExternalChannelId: channelA,
+    contextMenuEndpoint: { liveChatItemContextMenuEndpoint: { params: 'first-message' } } }
+  app.appendChild(message.line)
+  env.api.captureLine(message.line, history)
+  assert.equal(env.profileCalls.length, 0)
+  assert.equal(message.author.getAttribute('tabindex'), '0')
+  const view = history.messages[0].view
+  app.appendChild(view)
+  message.line.remove()
+  message.line.data.contextMenuEndpoint.liveChatItemContextMenuEndpoint.params = 'different-message'
+  const author = view.querySelector('.ytuc-author')
+  author.listeners.get('click')({ target: author })
+  await settle()
+  assert.equal(env.menuCalls[0].liveChatItemContextMenuEndpoint.params, 'first-message')
+  assert.equal(env.api.getAuthorCard().querySelector('.ytuc-id').textContent, channelA)
+})
+
+test('YouTube user cards: outside click dismisses without click-through; native commands retain a connected event path', async () => {
+  const env = boot({ nativeMenu: () => Promise.resolve(menuResult('sample')) })
+  const app = env.document.body.appendChild(new env.Element('yt-live-chat-app'))
+  const opener = app.appendChild(new env.Element('button'))
+  const author = { user: '@alice', name: '@alice', channelId: '', contextMenuEndpoint: { liveChatItemContextMenuEndpoint: { params: 'sample' } } }
+  const state = env.api.showAuthorCard(author, opener)
+  let blocked = false
+  env.api.guardMenuDismissal({ type: 'click', target: opener, preventDefault() {}, stopImmediatePropagation() { blocked = true } })
+  assert.equal(blocked, true)
+  assert.equal(env.api.getAuthorCard(), null)
+  blocked = false
+  env.api.guardMenuDismissal({ type: 'click', target: opener, preventDefault() {}, stopImmediatePropagation() { blocked = true } })
+  assert.equal(blocked, false)
+  assert.equal(state.card.isConnected, false)
+  const next = env.api.showAuthorCard(author, opener)
+  await settle()
+  const native = next.menuHost.querySelector('ytd-menu-popup-renderer')
+  env.listeners.get('yt-action')({ target: native, detail: { actionName: 'yt-close-popup-action' }, stopPropagation() {} })
+  assert.equal(env.api.getAuthorCard(), null)
+  assert.equal(next.card.hidden, true)
+  assert.equal(native.isConnected, true)
+  const retire = [...env.timers].find(([, timer]) => timer.delay === 30000)
+  assert.ok(retire)
+  retire[1].fn()
+  assert.equal(native.isConnected, false)
+})
+
+test('YouTube user cards: Enter and Space open the author card; Escape returns focus to its opener', () => {
+  const env = boot()
+  const app = env.document.body.appendChild(new env.Element('yt-live-chat-app'))
+  const message = env.message('@keyboard_user', 'hello')
+  app.appendChild(message.line)
+  const fire = key => env.document.listeners.get('keydown')({ key, target: message.author,
+    preventDefault() {}, stopPropagation() {}, stopImmediatePropagation() {} })
+  fire('Enter')
+  assert.ok(env.api.getAuthorCard())
+  fire('Escape')
+  assert.equal(env.api.getAuthorCard(), null)
+  assert.equal(env.document.activeElement, message.author)
+  fire(' ')
+  assert.ok(env.api.getAuthorCard())
 })

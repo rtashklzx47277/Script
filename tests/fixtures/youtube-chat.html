@@ -19,6 +19,9 @@
   yt-live-chat-text-message-renderer > #menu { position: absolute; right: 12px; top: 4px; }
   #menu button { width: 32px; height: 32px; padding: 0; border: 0; border-radius: 50%; color: inherit; background: transparent; }
   #menu button:hover { background: #ffffff33; }
+  .fixture-dialog { position: fixed; top: 140px; left: 40px; z-index: 3000; max-width: 280px; padding: 20px; color: #fff; background: #282828; border: 1px solid #555; border-radius: 12px; }
+  .fixture-dialog button { margin-top: 12px; padding: 8px 16px; border: 0; border-radius: 18px; color: inherit; background: #555; }
+  #fixture-requests { margin-top: 14px; color: #aaa; font-size: 12px; }
   #message-action-menu { position: fixed; top: 160px; right: 8px; z-index: 20; padding: 8px; border-radius: 12px; background: #282828; }
   #message-action-menu button { display: block; padding: 10px 20px; color: inherit; background: none; border: 0; }
   #timestamp { color: #adadb8; font-size: 10px; margin-right: 5px; }
@@ -68,8 +71,84 @@
   <button id="prune">清空原聊天室 DOM</button>
   <button id="remount">重建聊天室</button>
 </div>
+<p id="fixture-requests" data-profiles="0" data-menus="0">名稱查詢 0 次 · 操作選單 0 次</p>
+<p id="fixture-native-result" role="status"></p>
 <script>
-  if (new URL(location.href).searchParams.has('embedded')) document.body.classList.add('embedded')
+  const fixtureParams = new URL(location.href).searchParams
+  if (fixtureParams.has('embedded')) document.body.classList.add('embedded')
+  const fixtureRequests = document.getElementById('fixture-requests')
+  const countRequest = type => {
+    fixtureRequests.dataset[type] = String(+fixtureRequests.dataset[type] + 1)
+    fixtureRequests.textContent = `名稱查詢 ${fixtureRequests.dataset.profiles} 次 · 操作選單 ${fixtureRequests.dataset.menus} 次`
+  }
+  window.ytcfg = { get(key) {
+    if (key === 'LOGGED_IN') return !fixtureParams.has('signedOut')
+    if (key === 'INNERTUBE_CONTEXT') return { client: { clientVersion: 'fixture', hl: 'zh-TW', gl: 'TW' } }
+  } }
+  const originalFetch = window.fetch
+  window.fetch = (url, options) => {
+    if (!String(url).startsWith('/youtubei/v1/browse')) return originalFetch(url, options)
+    countRequest('profiles')
+    const id = JSON.parse(options.body).browseId
+    const profile = id === 'UCAbCdEfGhIjKlMnOpQrStUv' ? ['Alice 的頻道', '@alice']
+      : id === 'UCZYXWVUTSRQPONMLKJIHGFE' ? ['聊天室管理員', '@mod_account'] : ['測試實況主', '@fixture_channel']
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => fixtureParams.has('failProfile') ? reject(new Error('fixture offline'))
+        : resolve(new Response(JSON.stringify({ metadata: { channelMetadataRenderer: {
+          externalId: id, title: profile[0], vanityChannelUrl: `https://www.youtube.com/${profile[1]}`,
+        } } }), { headers: { 'Content-Type': 'application/json' } })), +fixtureParams.get('profileDelay') || 200)
+      options.signal.addEventListener('abort', () => { clearTimeout(timer); reject(new Error('fixture aborted')) }, { once: true })
+    })
+  }
+  // Simulate YouTube's event bridge and native menu models; no account actions
+  // or chat messages are sent from this fixture.
+  document.querySelector('yt-live-chat-app').addEventListener('yt-action', event => {
+    if (event.detail?.actionName !== 'yt-service-request') return
+    countRequest('menus')
+    const params = event.detail.args[1].liveChatItemContextMenuEndpoint.params
+    event.detail.returnValue.push({ ajaxPromise: new Promise((resolve, reject) => setTimeout(() => {
+      if (fixtureParams.has('failMenu')) { reject(new Error('fixture menu failed')); return }
+      resolve({ data: { liveChatItemContextMenuSupportedRenderers: { menuRenderer: {
+        items: fixtureParams.has('signedOut') ? [] : ['報告', 'ブロック'].map((text, index) => ({ menuServiceItemRenderer: {
+          text: { simpleText: text }, serviceEndpoint: { fixtureAction: { params, action: index ? 'block' : 'report' } },
+        } })),
+      } } } })
+    }, +fixtureParams.get('menuDelay') || 350)) })
+  })
+  customElements.define('ytd-menu-popup-renderer', class extends HTMLElement {
+    set data(value) {
+      this.replaceChildren()
+      const list = this.appendChild(document.createElement('tp-yt-paper-listbox'))
+      list.id = 'items'
+      for (const item of value.items || []) {
+        const model = item.menuServiceItemRenderer
+        const renderer = list.appendChild(document.createElement('ytd-menu-service-item-renderer'))
+        renderer.className = 'item'
+        const button = renderer.appendChild(document.createElement('tp-yt-paper-item'))
+        button.setAttribute('role', 'menuitem')
+        button.tabIndex = 0
+        button.textContent = model.text.simpleText
+        const activate = () => {
+          const { params, action } = model.serviceEndpoint.fixtureAction
+          this.dispatchEvent(new CustomEvent('yt-action', { bubbles: true, composed: true,
+            detail: { actionName: 'yt-close-popup-action', args: ['ytd-menu-popup-renderer'] } }))
+          const dialog = document.createElement('div')
+          dialog.className = 'fixture-dialog'
+          dialog.setAttribute('role', 'dialog')
+          dialog.setAttribute('aria-label', `${model.text.simpleText}確認`)
+          dialog.appendChild(document.createTextNode(`${model.text.simpleText}：${params}（測試確認視窗，不會執行實際操作）`))
+          const close = dialog.appendChild(document.createElement('button'))
+          close.textContent = '關閉確認視窗'
+          close.onclick = () => dialog.remove()
+          document.querySelector('yt-live-chat-app').appendChild(dialog)
+          document.getElementById('fixture-native-result').textContent = `${action}: ${params}`
+          close.focus()
+        }
+        button.onclick = activate
+        button.onkeydown = event => { if (event.key === 'Enter') activate() }
+      }
+    }
+  })
   for (const popup of document.querySelectorAll('tp-yt-iron-dropdown')) popup.close = () => { popup.hidden = true }
   document.getElementById('live-chat-header-context-menu').onclick = () => {
     const popup = document.querySelector('tp-yt-iron-dropdown')
@@ -85,7 +164,8 @@
     line.addEventListener('click', () => { document.getElementById('message-action-menu').parentElement.hidden = false })
     line.data = { authorExternalChannelId: user === '@alice'
       ? 'UCAbCdEfGhIjKlMnOpQrStUv' : user === '@mod_account'
-      ? 'UCZYXWVUTSRQPONMLKJIHGFE' : 'UC1234567890123456789012' }
+      ? 'UCZYXWVUTSRQPONMLKJIHGFE' : 'UC1234567890123456789012',
+      authorName: { simpleText: user }, contextMenuEndpoint: { liveChatItemContextMenuEndpoint: { params: line.id } } }
     const content = line.appendChild(document.createElement('div'))
     content.id = 'content'
     const time = content.appendChild(document.createElement('span'))

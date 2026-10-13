@@ -193,6 +193,8 @@ test('chat: repeated list replacements and temporarily missing controls do not s
   const browser = createBrowser()
   const { scroller, showMore } = addChat(browser)
   browser.run('YouTubeLiveChatTweaks.user.js')
+  const keydownListeners = browser.document.activeListenerCount('keydown')
+  assert.ok(keydownListeners > 0)
   for (let index = 0; index < 3; index++) {
     const oldItems = browser.selectors.get('#items')
     oldItems.isConnected = false
@@ -215,7 +217,7 @@ test('chat: repeated list replacements and temporarily missing controls do not s
   assert.equal(replacement.activeListenerCount('click'), 1)
   assert.equal(scroller.activeListenerCount('scroll'), 1)
   assert.equal(browser.window.activeListenerCount('pointercancel'), 1)
-  assert.equal(browser.document.activeListenerCount('keydown'), 1)
+  assert.equal(browser.document.activeListenerCount('keydown'), keydownListeners)
 })
 
 test('chat: a late header receives exactly one reload button', () => {

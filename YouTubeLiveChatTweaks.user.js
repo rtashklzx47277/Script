@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name        YouTube Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.3.6
+// @version     0.4.0
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
-// @description Adds live chat include/exclude account filters and session history, hides the chat mode menu, improves emoji copying and auto-follow, and adds reload.
+// @description Adds author profile cards, live chat account filters and session history, hides the chat mode menu, improves emoji copying and auto-follow, and adds reload.
 // @author      Derek
 // @match       *://www.youtube.com/live_chat*
 // @match       *://www.youtube.com/live_chat_replay*
@@ -147,10 +147,20 @@
     'yt-live-chat-sponsorships-gift-purchase-announcement-renderer',
   ].join(', ')
 
+  const rendererData = line => line.polymerController?.data || line.data || {}
+  let openAuthorCard = () => {}
+  let getAuthorCard = () => null
+  let closeAuthorCard = () => {}
+
   const guardMessageMenu = event => {
     const target = event.target?.nodeType === 1 ? event.target : event.target?.parentElement
     const line = target?.closest(NATIVE_MESSAGE_SELECTOR)
     if (!line || line.querySelector('#menu')?.contains(target)) return
+    const author = target.closest('#author-name')
+    if (author) {
+      event.preventDefault()
+      openAuthorCard(line, author)
+    }
     // Stop YouTube's whole-message menu handler, keeping selection and the
     // browser's default link navigation available (no preventDefault).
     event.stopPropagation()
@@ -159,7 +169,7 @@
 
   const getOpenChatMenu = () => [...document.querySelectorAll('tp-yt-iron-dropdown')]
     .find(menu => !menu.id && menu.parentElement?.matches('yt-live-chat-app') &&
-      !menu.hidden && menu.getAttribute('aria-hidden') !== 'true' && menu.getClientRects().length > 0)
+      !menu.hidden && menu.getAttribute('aria-hidden') !== 'true' && menu.getClientRects().length > 0) || getAuthorCard()
 
   const guardMenuDismissal = event => {
     const menu = getOpenChatMenu()
@@ -194,45 +204,20 @@
   } catch (_) {} // Cross-origin embeds keep the guards inside the chat.
 
   addStyle(`
-    #item-scroller #items > :is(${NATIVE_MESSAGE_SELECTOR}):has(> #menu) {
-      position: relative !important;
+    #item-scroller #items > :is(${NATIVE_MESSAGE_SELECTOR}) {
       line-height: 1.5;
-      padding-inline-end: calc(var(--chat-inline-padding) + 32px) !important;
+      padding-inline-end: var(--chat-inline-padding) !important;
     }
     #item-scroller #items > :is(${NATIVE_MESSAGE_SELECTOR}) > #content {
       min-width: 0;
       overflow-wrap: anywhere;
     }
-    #item-scroller #items > :is(${NATIVE_MESSAGE_SELECTOR}) > #menu {
-      inset-inline-end: var(--chat-inline-padding) !important;
-      top: var(--chat-message-padding-block) !important;
-      width: 32px;
-      height: 1.5em;
-      display: flex !important;
-      align-items: center;
-      transform: none !important;
-      transition: none !important;
-      visibility: visible !important;
-      opacity: 0 !important;
-      pointer-events: none;
+    #item-scroller #items > :is(${NATIVE_MESSAGE_SELECTOR}) #menu {
+      display: none !important;
     }
-    #item-scroller #items > :is(${NATIVE_MESSAGE_SELECTOR}):is(:hover, :focus-within) > #menu {
-      opacity: 1 !important;
-      pointer-events: auto;
-    }
-    #item-scroller #items > :is(${NATIVE_MESSAGE_SELECTOR}) > #menu #menu-button {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      flex: 0 0 32px;
-      box-sizing: border-box;
-      width: 32px;
-      height: 32px;
-      padding: 4px;
-    }
-    @media (hover: none) {
-      #item-scroller #items > :is(${NATIVE_MESSAGE_SELECTOR}) > #menu { opacity: 1 !important; pointer-events: auto; }
-    }
+    :is(${NATIVE_MESSAGE_SELECTOR}) #author-name { cursor: pointer; }
+    :is(${NATIVE_MESSAGE_SELECTOR}) #author-name:hover { text-decoration: underline; }
+    :is(${NATIVE_MESSAGE_SELECTOR}) #author-name:focus-visible { outline: 2px solid var(--yt-live-chat-link-text-color, #3ea6ff); outline-offset: 2px; }
   `)
 
   const debounce = (func, delay) => {
@@ -708,9 +693,13 @@
 
     const readMessage = (line) => {
       const author = $('#author-name', line)
-      const user = normalizeAccount(author?.textContent)
+      const data = rendererData(line)
+      // Other name-restoring scripts may change the DOM. Keep identity based
+      // on YouTube's original author handle and stable channel ID.
+      const originalName = data.authorName?.simpleText || data.authorName?.runs?.map(run => run.text).join('')
+      const user = normalizeAccount(originalName || author?.textContent)
       // The renderer retains the sender's stable ID even when its DOM shows a handle.
-      const rawId = line.data?.authorExternalChannelId || line.getAttribute('author-external-channel-id')
+      const rawId = data.authorExternalChannelId || line.getAttribute('author-external-channel-id')
       const channelId = typeof rawId === 'string' && /^UC[\w-]{22}$/.test(rawId) ? rawId : ''
       let message = $('#message, #sticker, #header-subtext', line)
       if (!author || !user || !message) return null
@@ -726,8 +715,269 @@
         message.textContent = $('#deleted-state', line)?.textContent?.trim() || '訊息已刪除'
       }
       return { user, channelId, moderator, broadcaster, author, body: message, badges, deleted,
-        id: line.id || '', time: $('#timestamp', line)?.textContent?.trim() || '' }
+        id: line.id || '', time: $('#timestamp', line)?.textContent?.trim() || '',
+        avatar: $('#author-photo img', line)?.getAttribute('src') || data.authorPhoto?.thumbnails?.[0]?.url || '',
+        contextMenuEndpoint: data.contextMenuEndpoint }
     }
+
+    // Profile lookups are public, on demand, and shared by channel ID. No
+    // per-message requests or network interception are needed.
+    const profiles = new Map()
+    const profileRequests = new Map()
+    const cardStates = new WeakMap()
+    const retiredCards = new Set()
+    let activeCard = null
+
+    const authorSnapshot = message => ({
+      user: message.user, channelId: message.channelId, name: message.author.textContent,
+      avatar: message.avatar, broadcaster: message.broadcaster, moderator: message.moderator,
+      // Retained messages must not keep the original renderer/DOM alive.
+      contextMenuEndpoint: message.contextMenuEndpoint
+        ? JSON.parse(JSON.stringify(message.contextMenuEndpoint)) : null,
+    })
+
+    const getProfile = channelId => {
+      if (!/^UC[\w-]{22}$/.test(channelId)) return Promise.resolve(null)
+      const cached = profiles.get(channelId)
+      if (cached && cached.expires > Date.now()) return Promise.resolve(cached.profile)
+      if (profileRequests.has(channelId)) return profileRequests.get(channelId)
+      const request = (async () => {
+        const controller = new AbortController()
+        const timeout = setTimeout(() => controller.abort(), 8000)
+        let profile = null
+        try {
+          const client = window.ytcfg?.get?.('INNERTUBE_CONTEXT')?.client || {}
+          const response = await fetch('/youtubei/v1/browse?prettyPrint=false', {
+            method: 'POST', credentials: 'omit', signal: controller.signal,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ context: { client: {
+              clientName: 'WEB',
+              clientVersion: client.clientVersion || window.ytcfg?.get?.('INNERTUBE_CLIENT_VERSION') || '2.20261012.01.00',
+              hl: client.hl || document.documentElement?.lang || 'zh-TW', gl: client.gl || 'TW',
+            } }, browseId: channelId }),
+          })
+          if (!response.ok) throw new Error('Profile lookup failed')
+          const data = await response.json()
+          const metadata = data.metadata?.channelMetadataRenderer
+          if (metadata?.externalId && metadata.externalId !== channelId) throw new Error('Channel ID mismatch')
+          const title = metadata?.title || data.header?.pageHeaderRenderer?.pageTitle
+          if (typeof title !== 'string' || !title.trim()) throw new Error('Missing channel name')
+          let handle = ''
+          try {
+            const url = new URL(metadata?.vanityChannelUrl || metadata?.ownerUrls?.[0])
+            if (/^(www\.)?youtube\.com$/.test(url.hostname) && url.pathname.startsWith('/@')) {
+              handle = decodeURIComponent(url.pathname.slice(1).split('/')[0])
+            }
+          } catch (_) {}
+          profile = { title: title.trim(), handle }
+        } catch (_) {
+          // Briefly cache failures too, so reopening a card cannot flood requests.
+        } finally {
+          clearTimeout(timeout)
+        }
+        profiles.delete(channelId)
+        profiles.set(channelId, { profile, expires: profile ? Infinity : Date.now() + 30000 })
+        if (profiles.size > 200) profiles.delete(profiles.keys().next().value)
+        return profile
+      })()
+      profileRequests.set(channelId, request)
+      request.finally(() => profileRequests.delete(channelId))
+      return request
+    }
+
+    const positionCard = state => {
+      const width = document.documentElement?.clientWidth || window.innerWidth || 400
+      const height = document.documentElement?.clientHeight || window.innerHeight || 600
+      const chat = $('yt-live-chat-renderer')?.getBoundingClientRect()
+      const left = Math.max(0, chat?.left || 0)
+      const right = Math.min(width, chat?.right || width)
+      const cardWidth = Math.min(340, Math.max(0, right - left - 16))
+      state.card.style.width = `${cardWidth}px`
+      const cardHeight = state.card.getBoundingClientRect().height
+      let top = state.anchor.bottom + 6
+      if (top + cardHeight > height - 8) top = state.anchor.top - cardHeight - 6
+      state.card.style.left = `${Math.max(left + 8, Math.min(state.anchor.left, right - cardWidth - 8))}px`
+      state.card.style.top = `${Math.max(8, Math.min(top, height - cardHeight - 8))}px`
+      state.card.style.maxHeight = `${Math.max(0, height - 16)}px`
+    }
+
+    const dismissCard = (state = activeCard, restoreFocus = false) => {
+      if (!state || state.closed) return
+      state.closed = true
+      state.card.hidden = true
+      clearTimeout(state.menuTimer)
+      if (activeCard === state) activeCard = null
+      if (restoreFocus && state.opener.isConnected) state.opener.focus()
+      // Native service-item commands can complete asynchronously. Keep their
+      // event path to yt-live-chat-app connected while dialogs/requests finish.
+      if (state.nativeClicked) {
+        retiredCards.add(state)
+        state.retireTimer = setTimeout(() => {
+          state.card.remove()
+          retiredCards.delete(state)
+        }, 30000)
+      } else state.card.remove()
+    }
+    closeAuthorCard = () => dismissCard()
+    getAuthorCard = () => activeCard?.card || null
+
+    const requestNativeMenu = (state, endpoint) => {
+      // This is the same service-request event used by YouTube's own menu
+      // items. Its transport supplies authentication, context and permissions.
+      const detail = { actionName: 'yt-service-request', args: [state.menuHost, endpoint],
+        optionalAction: false, returnValue: [] }
+      state.menuHost.dispatchEvent(new CustomEvent('yt-action', { bubbles: true, composed: true, detail }))
+      const promise = detail.returnValue[0]?.ajaxPromise
+      if (!promise?.then) return Promise.reject(new Error('Native menu transport unavailable'))
+      return Promise.resolve(promise).then(result => result?.data || result?.response || result)
+    }
+
+    const loadCardMenu = state => {
+      const run = ++state.menuRun
+      state.menuStatus.textContent = '載入操作…'
+      state.menuRetry.hidden = true
+      if (!state.author.contextMenuEndpoint) {
+        state.menuStatus.textContent = '此訊息沒有可用的操作。'
+        return
+      }
+      clearTimeout(state.menuTimer)
+      state.menuTimer = setTimeout(() => {
+        if (state.closed || run !== state.menuRun) return
+        state.menuStatus.textContent = '操作載入較久，可以重試。'
+        state.menuRetry.hidden = false
+        positionCard(state)
+      }, 15000)
+      requestNativeMenu(state, state.author.contextMenuEndpoint).then(data => {
+        if (state.closed || run !== state.menuRun) return
+        clearTimeout(state.menuTimer)
+        const menuData = data?.liveChatItemContextMenuSupportedRenderers?.menuRenderer
+        if (!menuData || !Array.isArray(menuData.items) || !menuData.items.length) {
+          state.menuStatus.textContent = window.ytcfg?.get?.('LOGGED_IN') === false
+            ? '登入 YouTube 後可使用報告／封鎖。' : '目前沒有可用的操作。'
+          positionCard(state)
+          return
+        }
+        const menu = element('ytd-menu-popup-renderer', { class: 'ytuc-menu' })
+        state.menuHost.appendChild(menu)
+        // Keep the original native item models, labels and command handlers.
+        // Report remains tied to the clicked message; block to its author.
+        ;(menu.polymerController || menu).data = menuData
+        state.menuStatus.hidden = true
+        state.menuRetry.hidden = true
+        positionCard(state)
+      }).catch(() => {
+        if (state.closed || run !== state.menuRun) return
+        clearTimeout(state.menuTimer)
+        state.menuStatus.textContent = '無法載入操作。'
+        state.menuRetry.hidden = false
+        positionCard(state)
+      })
+    }
+
+    const showAuthorCard = (author, opener) => {
+      dismissCard()
+      const app = $('yt-live-chat-app')
+      if (!app) return
+      const card = element('section', { class: 'ytuc-card', role: 'dialog', tabindex: '-1',
+        'aria-label': '用戶資訊', 'aria-modal': 'false' })
+      const photo = element('div', { class: 'ytuc-photo', 'aria-hidden': 'true' })
+      if (/^https:\/\//.test(author.avatar)) photo.appendChild(element('img', { src: author.avatar, alt: '' }))
+      else photo.textContent = (author.name || author.user || '?').replace(/^@/, '').slice(0,1).toUpperCase()
+      const title = element('a', { class: 'ytuc-name', target: '_blank', rel: 'noopener noreferrer' }, [author.name || author.user])
+      title.href = author.channelId ? `https://www.youtube.com/channel/${author.channelId}`
+        : `https://www.youtube.com/${author.user}`
+      const close = element('button', { class: 'ytuc-close', type: 'button', 'aria-label': '關閉用戶資訊' }, ['×'])
+      const header = element('div', { class: 'ytuc-header' }, [photo, title, close])
+      const handle = element('div', { class: 'ytuc-handle' }, [author.user])
+      const id = element('div', { class: 'ytuc-id' }, [author.channelId || '無法取得頻道 ID'])
+      const profileStatus = element('p', { class: 'ytuc-status', role: 'status' }, [author.channelId ? '載入頻道名稱…' : '頻道名稱暫時無法載入。'])
+      const profileRetry = element('button', { class: 'ytuc-retry', type: 'button', hidden: '' }, ['重試名稱'])
+      const identity = element('div', { class: 'ytuc-identity' }, [handle, id])
+      const roles = [author.broadcaster ? 'Broadcaster' : '', author.moderator ? 'Moderator' : ''].filter(Boolean)
+      if (roles.length) identity.appendChild(element('div', { class: 'ytuc-badges' }, roles.map(role => element('span', {}, [role]))))
+      identity.appendChild(profileStatus)
+      identity.appendChild(profileRetry)
+      const menuStatus = element('p', { class: 'ytuc-status', role: 'status' }, ['載入操作…'])
+      const menuRetry = element('button', { class: 'ytuc-retry', type: 'button', hidden: '' }, ['重試操作'])
+      const menuHost = element('div', { class: 'ytuc-actions' }, [menuStatus, menuRetry])
+      card.appendChild(header)
+      card.appendChild(identity)
+      card.appendChild(menuHost)
+      const state = { author, opener, anchor: opener.getBoundingClientRect(), card, title, handle,
+        profileStatus, profileRetry, menuHost, menuStatus, menuRetry, menuRun: 0, closed: false }
+      cardStates.set(card, state)
+      activeCard = state
+      card.close = () => dismissCard(state)
+      close.addEventListener('click', () => dismissCard(state, true))
+      card.addEventListener('click', event => {
+        if (event.target?.closest('ytd-menu-popup-renderer')) state.nativeClicked = true
+      }, true)
+      const loadProfile = () => getProfile(author.channelId).then(profile => {
+        if (state.closed) return
+        if (profile) {
+          title.textContent = profile.title
+          if (profile.handle) handle.textContent = profile.handle
+          profileStatus.hidden = true
+          profileRetry.hidden = true
+        } else {
+          profileStatus.textContent = '頻道名稱暫時無法載入。'
+          profileRetry.hidden = !author.channelId
+        }
+        positionCard(state)
+      })
+      profileRetry.addEventListener('click', () => {
+        profiles.delete(author.channelId)
+        profileStatus.textContent = '載入頻道名稱…'
+        profileRetry.hidden = true
+        loadProfile()
+      })
+      menuRetry.addEventListener('click', () => {
+        for (const menu of $$('ytd-menu-popup-renderer', menuHost)) menu.remove()
+        loadCardMenu(state)
+      })
+      app.appendChild(card)
+      positionCard(state)
+      card.focus({ preventScroll: true })
+      if (author.channelId) loadProfile()
+      loadCardMenu(state)
+      return state
+    }
+    openAuthorCard = (line, opener) => {
+      const message = readMessage(line)
+      if (message) showAuthorCard(authorSnapshot(message), opener)
+    }
+
+    document.addEventListener('keydown', event => {
+      if (event.key === 'Escape' && activeCard) {
+        event.preventDefault()
+        event.stopImmediatePropagation()
+        dismissCard(activeCard, true)
+        return
+      }
+      const target = event.target?.closest?.('#author-name')
+      const line = target?.closest(MESSAGE_SELECTOR)
+      if (!line || !['Enter', ' '].includes(event.key)) return
+      event.preventDefault()
+      event.stopPropagation()
+      openAuthorCard(line, target)
+    }, true)
+    window.addEventListener('yt-action', event => {
+      if (event.detail?.actionName !== 'yt-close-popup-action') return
+      const state = cardStates.get(event.target?.closest?.('.ytuc-card'))
+      if (!state) return
+      event.stopPropagation()
+      state.nativeClicked = true
+      dismissCard(state)
+    }, true)
+    window.addEventListener('resize', () => { if (activeCard) positionCard(activeCard) })
+    window.addEventListener('pagehide', () => {
+      dismissCard()
+      for (const state of retiredCards) {
+        clearTimeout(state.retireTimer)
+        state.card.remove()
+      }
+      retiredCards.clear()
+    })
 
     const includesAuthor = (users, message) => users.includes(message.user) ||
       (!!message.channelId && users.includes(message.channelId))
@@ -768,10 +1018,14 @@
         else copy.textContent = badge.getAttribute('type') === 'moderator' ? '🔧' : badge.getAttribute('type') === 'owner' ? '👑' : '★'
         row.appendChild(copy)
       }
-      const author = document.createElement('strong')
+      const author = document.createElement('button')
+      author.type = 'button'
+      author.className = 'ytuc-author'
       author.textContent = message.author.textContent
       author.style.color = getComputedStyle(message.author).color
-      author.title = message.channelId || message.user
+      author.setAttribute('aria-label', `查看 ${message.author.textContent} 的用戶資訊`)
+      const snapshot = authorSnapshot(message)
+      author.addEventListener('click', () => showAuthorCard(snapshot, author))
       row.appendChild(author)
       row.appendChild(document.createTextNode(': '))
       const content = clonePresentation(message.body)
@@ -781,6 +1035,12 @@
     }
 
     const captureLine = (line, history) => {
+      const author = $('#author-name', line)
+      if (author) {
+        if (author.getAttribute('role') !== 'button') author.setAttribute('role', 'button')
+        if (author.getAttribute('tabindex') !== '0') author.setAttribute('tabindex', '0')
+        if (author.getAttribute('aria-label') !== '查看用戶資訊') author.setAttribute('aria-label', '查看用戶資訊')
+      }
       const message = readMessage(line)
       if (!message || (!message.moderator && !message.broadcaster && !includesAuthor(history.settings.users, message))) return false
       const fingerprint = `${message.user}\n${message.channelId}\n${message.deleted}\n${message.body.innerHTML}`
@@ -1011,6 +1271,7 @@
 
     const unmount = () => {
       if (!mounted) return
+      closeAuthorCard()
       clearTimeout(mounted.statusTimer)
       mounted.observer.disconnect()
       mounted.button.remove()
@@ -1122,6 +1383,34 @@
       .ytcf-list { flex: 1; min-height: 0; overflow: auto; overflow-anchor: none; padding: 6px 0; }
       .ytcf-message { padding: 5px 10px; overflow-wrap: anywhere; line-height: 1.6; }
       .ytcf-message:hover { background: var(--yt-live-chat-action-panel-background-color, #8882); }
+      .ytcf-panel .ytuc-author { display: inline; margin: 0; padding: 0; border: 0; border-radius: 0; background: none; font: inherit; font-weight: 600; line-height: inherit; vertical-align: baseline; text-align: start; }
+      .ytuc-author:hover { text-decoration: underline; }
+      .ytuc-card { position: fixed; z-index: 2200; box-sizing: border-box; overflow: auto; overscroll-behavior: contain; border: 1px solid var(--yt-live-chat-message-input-border-color, #8884); border-radius: 8px; box-shadow: 0 8px 28px #0006; color: var(--yt-live-chat-primary-text-color, #0f0f0f); background: var(--yt-live-chat-background-color, #fff); font: 13px/1.5 Roboto, Arial, sans-serif; }
+      .ytuc-card[hidden], .ytuc-card [hidden] { display: none !important; }
+      .ytuc-header { display: flex; align-items: flex-start; gap: 12px; padding: 16px 12px; }
+      .ytuc-photo { display: flex; align-items: center; justify-content: center; flex: 0 0 56px; width: 56px; height: 56px; overflow: hidden; border-radius: 50%; background: var(--yt-live-chat-button-default-background-color, #8883); font-size: 24px; }
+      .ytuc-photo img { display: block; width: 100%; height: 100%; object-fit: cover; }
+      .ytuc-name { flex: 1; min-width: 0; margin-top: 4px; color: inherit; text-decoration: none; font-size: 18px; font-weight: 600; overflow-wrap: anywhere; }
+      .ytuc-name:hover { text-decoration: underline; }
+      .ytuc-card .ytuc-close { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 28px; width: 28px; height: 28px; margin: 0; padding: 0; border: 0; border-radius: 50%; color: inherit; background: none; cursor: pointer; font: 24px/1 Arial, sans-serif; }
+      .ytuc-close:hover { background: var(--yt-live-chat-button-default-background-color, #8882); }
+      .ytuc-identity { padding: 12px; border-top: 1px solid var(--yt-live-chat-message-input-border-color, #8883); }
+      .ytuc-handle { overflow-wrap: anywhere; }
+      .ytuc-id { margin-top: 4px; color: var(--yt-live-chat-secondary-text-color, #606060); overflow-wrap: anywhere; user-select: text; font: 12px/1.5 ui-monospace, Consolas, monospace; }
+      .ytuc-badges { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+      .ytuc-badges span { padding: 2px 6px; border: 1px solid var(--yt-live-chat-message-input-border-color, #8884); border-radius: 4px; font-size: 11px; }
+      .ytuc-actions { padding: 12px; border-top: 1px solid var(--yt-live-chat-message-input-border-color, #8883); background: var(--yt-live-chat-action-panel-background-color, #8881); }
+      .ytuc-status { margin: 0; color: var(--yt-live-chat-secondary-text-color, #606060); font-size: 12px; }
+      .ytuc-identity .ytuc-status { margin-top: 8px; }
+      .ytuc-card .ytuc-retry { margin-top: 8px; padding: 4px 10px; border: 0; border-radius: 16px; color: inherit; background: var(--yt-live-chat-button-default-background-color, #8882); cursor: pointer; font: inherit; }
+      .ytuc-card button:focus-visible, .ytuc-card a:focus-visible { outline: 2px solid var(--yt-live-chat-link-text-color, #3ea6ff); outline-offset: 2px; }
+      .ytuc-menu { display: block; min-width: 0 !important; max-width: 100% !important; max-height: none !important; margin: 0 !important; padding: 0 !important; box-shadow: none !important; color: inherit; background: transparent !important; }
+      .ytuc-menu :is(ytd-menu-service-item-renderer, ytd-menu-navigation-item-renderer, tp-yt-paper-item, yt-formatted-string, yt-icon) { color: inherit !important; }
+      .ytuc-menu > #items { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 !important; color: inherit; background: transparent !important; }
+      .ytuc-menu tp-yt-paper-item { box-sizing: border-box; min-height: 32px !important; min-width: 0 !important; padding: 4px 12px !important; border-radius: 18px; background: var(--yt-live-chat-button-default-background-color, #8882); white-space: normal; cursor: pointer; }
+      .ytuc-menu tp-yt-paper-item:hover { filter: brightness(1.15); }
+      .ytuc-menu yt-icon { width: 20px; height: 20px; margin-right: 6px !important; }
+      .ytuc-menu .item { min-width: 0; max-width: 100%; }
       .ytcf-time { margin-right: 6px; color: var(--yt-live-chat-secondary-text-color, #606060); font-size: 10px; }
       .ytcf-message > img { width: 18px; height: 18px; margin-right: 3px; vertical-align: middle; }
       .ytcf-message .emoji { max-height: 24px; vertical-align: middle; }
