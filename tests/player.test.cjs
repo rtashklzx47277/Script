@@ -8,7 +8,7 @@ const scripts = ['YouTubePlayerTweaks.user.js', 'TwitchPlayerTweaks.user.js']
 
 // Run the real userscript and expose its closed-over functions at the end of
 // its IIFE. Only browser primitives are mocked; production functions are intact.
-function boot(file, mode = 'worker') {
+function boot(file, mode = 'worker', pathname = '/') {
   const isYouTube = file === scripts[0]
   let nextId = 0
   let activeWorker
@@ -20,6 +20,42 @@ function boot(file, mode = 'worker') {
   const styles = []
   const draws = []
   const frames = []
+  const eventListeners = []
+
+  class NodeMock {}
+  class ElementMock extends NodeMock {
+    constructor(tagName = 'div') {
+      super()
+      this.tagName = tagName
+      this.style = {}
+      this.dataset = {}
+      this.children = []
+      this.queries = new Map()
+      this.rect = { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 }
+    }
+    appendChild(element) {
+      element.parentElement = this
+      this.children.push(element)
+    }
+    matches(selector) { return selector.split(',').some(part => part.trim() === this.tagName) }
+    closest(selector) {
+      for (let node = this; node; node = node.parentElement) {
+        if (node.matches(selector)) return node
+      }
+      return null
+    }
+    contains(target) {
+      for (let node = target; node; node = node.parentElement) {
+        if (node === this) return true
+      }
+      return false
+    }
+    querySelector(selector) {
+      return this.queries.get(selector) || this.children.find(child => `#${child.id}` === selector) || null
+    }
+    querySelectorAll(selector) { return this.queries.get(selector) || [] }
+    getBoundingClientRect() { return this.rect }
+  }
 
   class Frame {
     constructor(source) {
@@ -38,7 +74,10 @@ function boot(file, mode = 'worker') {
     head: { appendChild: (element) => styles.push(element) },
     documentElement: {},
     body: {},
-    addEventListener(name, callback) { listeners.set(name, callback) },
+    addEventListener(name, callback, options) {
+      listeners.set(name, callback)
+      eventListeners.push({ name, callback, options })
+    },
     querySelector(selector) { return selectors.get(selector) || null },
     querySelectorAll() { return [] },
     createElement(tag) {
@@ -55,7 +94,7 @@ function boot(file, mode = 'worker') {
           toBlob(callback) { callback({ mainThreadPng: true }) },
         }
       }
-      return { style: {}, dataset: {}, appendChild() {} }
+      return new ElementMock(tag)
     },
   }
 
@@ -63,9 +102,9 @@ function boot(file, mode = 'worker') {
     console,
     document,
     window: { JSON: { parse: JSON.parse } },
-    location: { pathname: '/' },
-    HTMLElement: class {},
-    Node: class {},
+    location: { pathname },
+    HTMLElement: ElementMock,
+    Node: NodeMock,
     HTMLInputElement: class {},
     Blob: BlobMock,
     URL: {
@@ -145,10 +184,12 @@ function boot(file, mode = 'worker') {
     ? `globalThis.__test = {
         restorePlaybackRate, getLiveBufferHealth,
         runLiveCatchupStep, toggleLiveCatchup, stopLiveCatchup, waitElements,
+        changeVolume, syncVolumeGain, handleWheelCapture,
         setPlayers: (video, player) => {
           videoPlayer = video; moviePlayer = player; floatingBar = { style: {} };
         },
         setButton: (button) => { liveBtn = button; },
+        setContainer: (element) => { container = element; },
         cancelWait: () => pendingWaitCancel?.(),
         catching: () => Boolean(liveCatchupTimer),
         encode: (video) => { videoPlayer = video; return encodeScreenshot(); },
@@ -163,8 +204,18 @@ function boot(file, mode = 'worker') {
   vm.runInContext(source.replace(/\}\)\(\)\s*$/, exposure + '})()'), context, { filename: file })
 
   return {
-    api: context.__test,
+    api: context.__test, window: context.window,
+    Element: ElementMock, location: context.location,
     frames, draws, timers, selectors, observers, listeners, styles,
+    emit(name, event) {
+      for (const entry of eventListeners) {
+        if (entry.name === name && !entry.options?.signal?.aborted) entry.callback(event)
+        if (event.stopped) break
+      }
+    },
+    listenerCount(name) {
+      return eventListeners.filter(entry => entry.name === name && !entry.options?.signal?.aborted).length
+    },
     worker: () => activeWorker,
     flush(delay) {
       for (const [id, timer] of [...timers]) {
@@ -175,6 +226,238 @@ function boot(file, mode = 'worker') {
     },
   }
 }
+
+test('YouTube: volume wheel quiets low settings and boosts full volume', () => {
+  const env = boot(scripts[0])
+  let gain
+  let sourceCount = 0
+  env.window.AudioContext = class {
+    constructor() { this.destination = {}; this.state = 'running' }
+    createGain() {
+      gain = { gain: { value: 1 }, connect() {} }
+      return gain
+    }
+    createMediaElementSource() {
+      sourceCount++
+      return { connect() {}, disconnect() {} }
+    }
+  }
+
+  let volume = 20
+  const player = {
+    getVolume: () => volume,
+    setVolume(value) { volume = value },
+    unMute() {},
+  }
+  env.api.setPlayers({}, player)
+  env.api.changeVolume({ deltaY: 1, preventDefault() {} })
+  assert.equal(volume, 15)
+  assert.equal(gain.gain.value, 0.3)
+  assert.equal(volume / 100 * gain.gain.value, 0.045)
+
+  volume = 75
+  env.api.syncVolumeGain() // YouTube's native volume slider changed.
+  assert.equal(gain.gain.value, 1.5)
+  assert.equal(volume / 100 * gain.gain.value, 1.125)
+
+  volume = 95
+  env.api.changeVolume({ deltaY: -1, preventDefault() {} })
+  assert.equal(volume, 100)
+  assert.equal(gain.gain.value, 2)
+  assert.equal(sourceCount, 1)
+})
+
+function addShortsPlayer(env, shorts, top = 20) {
+  const reel = new env.Element('ytd-reel-video-renderer')
+  const area = new env.Element()
+  area.rect = { left: 100, top, right: 400, bottom: top + 500, width: 300, height: 500 }
+  const player = new env.Element()
+  const video = new env.Element('video')
+  player.volume = 50
+  player.muted = true
+  player.getVolume = () => player.volume
+  player.setVolume = value => { player.volume = value }
+  player.unMute = () => { player.muted = false }
+  player.queries.set('video', video)
+  reel.queries.set('#short-video-container', area)
+  shorts.appendChild(reel)
+  reel.appendChild(area)
+  area.appendChild(player)
+  player.appendChild(video)
+  const players = shorts.queries.get('.html5-video-player') || []
+  shorts.queries.set('.html5-video-player', [...players, player])
+  return { player, video, area }
+}
+
+function wheel(target, overrides = {}) {
+  return {
+    target, deltaY: 1, clientX: 200, clientY: 100,
+    preventDefault() { this.prevented = true },
+    stopImmediatePropagation() { this.stopped = true },
+    ...overrides,
+  }
+}
+
+test('YouTube Shorts: late player and extracted overlay adjust volume without switching reels', () => {
+  const env = boot(scripts[0], 'worker', '/shorts/first')
+  assert.equal(env.listenerCount('wheel'), 1)
+  assert.equal(env.observers.length, 0, 'Shorts must not wait for regular player controls')
+  const shorts = new env.Element('ytd-shorts')
+  const overlay = new env.Element()
+  shorts.appendChild(overlay) // This is outside both the player and the reel.
+  const missingPlayerEvent = wheel(overlay)
+  env.emit('wheel', missingPlayerEvent)
+  assert.equal(missingPlayerEvent.prevented, undefined)
+
+  const { player } = addShortsPlayer(env, shorts)
+  const down = wheel(overlay)
+  env.emit('wheel', down)
+  assert.equal(player.volume, 45)
+  assert.equal(player.muted, false)
+  assert.equal(down.prevented, true)
+  assert.equal(down.stopped, true)
+  assert.equal(player.querySelector('#yt-player-tweaks-float-bar').textContent, '45')
+  env.emit('wheel', wheel(overlay, { deltaY: -1 }))
+  assert.equal(player.volume, 50)
+})
+
+test('YouTube Shorts: outside video, zoom, horizontal wheel and editable fields retain native behavior', () => {
+  const env = boot(scripts[0], 'worker', '/shorts/first')
+  const shorts = new env.Element('ytd-shorts')
+  const overlay = new env.Element()
+  const input = new env.Element('input')
+  shorts.appendChild(overlay)
+  shorts.appendChild(input)
+  const { player } = addShortsPlayer(env, shorts)
+  for (const event of [
+    wheel(overlay, { clientX: 80 }),
+    wheel(overlay, { clientX: 400 }),
+    wheel(overlay, { clientY: 520 }),
+    wheel(overlay, { ctrlKey: true }),
+    wheel(overlay, { deltaY: 0 }),
+    wheel(input),
+    wheel(new env.Element()),
+  ]) {
+    env.emit('wheel', event)
+    assert.equal(event.prevented, undefined)
+    assert.equal(event.stopped, undefined)
+  }
+  assert.equal(player.volume, 50)
+  delete player.setVolume
+  const unready = wheel(overlay)
+  env.emit('wheel', unready)
+  assert.equal(unready.prevented, undefined, 'Do not swallow scrolling before the API is ready')
+})
+
+test('YouTube Shorts: switching reels without navigation targets the new player and clears old feedback', () => {
+  const env = boot(scripts[0], 'worker', '/shorts/first')
+  const shorts = new env.Element('ytd-shorts')
+  const overlay = new env.Element()
+  shorts.appendChild(overlay)
+  const first = addShortsPlayer(env, shorts)
+  env.emit('wheel', wheel(overlay))
+  const oldFeedback = first.player.querySelector('#yt-player-tweaks-float-bar')
+  first.area.rect.top = -600
+  first.area.rect.bottom = -100
+  const next = addShortsPlayer(env, shorts)
+  env.emit('wheel', wheel(overlay, { deltaY: -1 }))
+  assert.equal(first.player.volume, 45)
+  assert.equal(next.player.volume, 55)
+  assert.equal(oldFeedback.style.display, 'none')
+  assert.equal(next.player.querySelector('#yt-player-tweaks-float-bar').textContent, '55')
+  assert.equal(env.timers.size, 1, 'Only the current feedback timer should remain')
+})
+
+test('YouTube Shorts: volume clamps at bounds and SPA navigation releases listeners and feedback', () => {
+  const env = boot(scripts[0], 'worker', '/shorts/first')
+  const shorts = new env.Element('ytd-shorts')
+  const overlay = new env.Element()
+  shorts.appendChild(overlay)
+  const { player } = addShortsPlayer(env, shorts)
+  player.volume = 2
+  env.emit('wheel', wheel(overlay))
+  assert.equal(player.volume, 0)
+  player.volume = 98
+  env.emit('wheel', wheel(overlay, { deltaY: -1 }))
+  assert.equal(player.volume, 100)
+
+  env.location.pathname = '/shorts/next'
+  env.emit('yt-navigate-finish', {})
+  assert.equal(env.listenerCount('wheel'), 1)
+  assert.equal(env.listenerCount('volumechange'), 1)
+  env.emit('wheel', wheel(overlay))
+  assert.equal(player.volume, 95, 'Navigation must not stack wheel handlers')
+
+  env.location.pathname = '/'
+  env.emit('yt-navigate-finish', {})
+  assert.equal(env.listenerCount('wheel'), 0)
+  assert.equal(env.listenerCount('volumechange'), 0)
+  assert.equal(env.timers.size, 0)
+  assert.equal(player.querySelector('#yt-player-tweaks-float-bar').style.display, 'none')
+  env.emit('wheel', wheel(overlay))
+  assert.equal(player.volume, 95)
+})
+
+test('YouTube Shorts: gain follows the current video and reuses audio sources when reels change', () => {
+  const env = boot(scripts[0], 'worker', '/shorts/first')
+  const sources = []
+  const gain = { gain: { value: 1 }, connect() {} }
+  env.window.AudioContext = class {
+    constructor() { this.destination = {}; this.state = 'running' }
+    createGain() { return gain }
+    createMediaElementSource(video) {
+      const source = { video, disconnected: 0, connect() {}, disconnect() { this.disconnected++ } }
+      sources.push(source)
+      return source
+    }
+  }
+  const shorts = new env.Element('ytd-shorts')
+  const overlay = new env.Element()
+  shorts.appendChild(overlay)
+  const first = addShortsPlayer(env, shorts)
+  env.emit('wheel', wheel(overlay))
+  assert.equal(gain.gain.value, 0.9)
+  first.player.volume = 75
+  env.emit('volumechange', { target: first.video })
+  assert.equal(gain.gain.value, 1.5)
+
+  first.area.rect.top = -600
+  first.area.rect.bottom = -100
+  const next = addShortsPlayer(env, shorts)
+  env.emit('wheel', wheel(overlay))
+  assert.equal(gain.gain.value, 0.9)
+  assert.equal(sources.length, 2)
+  assert.ok(sources[0].disconnected > 0)
+  env.emit('volumechange', { target: first.video })
+  assert.equal(gain.gain.value, 0.9, 'An inactive reel must not change the current gain')
+
+  next.area.rect.top = 600
+  next.area.rect.bottom = 1100
+  first.area.rect.top = 20
+  first.area.rect.bottom = 520
+  env.emit('wheel', wheel(overlay))
+  assert.equal(first.player.volume, 70)
+  assert.equal(sources.length, 2, 'Revisiting a video must reuse its MediaElementSource')
+  assert.equal(gain.gain.value, 1.4)
+})
+
+test('YouTube: regular video wheel still changes volume only inside its video container', () => {
+  const env = boot(scripts[0])
+  const container = new env.Element()
+  const video = new env.Element('video')
+  container.appendChild(video)
+  let volume = 50
+  env.api.setPlayers(video, { getVolume: () => volume, setVolume: value => { volume = value }, unMute() {} })
+  env.api.setContainer(container)
+  const inside = wheel(video)
+  env.api.handleWheelCapture(inside)
+  assert.equal(volume, 45)
+  assert.equal(inside.prevented, true)
+  const outside = wheel(new env.Element())
+  env.api.handleWheelCapture(outside)
+  assert.equal(volume, 45)
+  assert.equal(outside.prevented, undefined)
+})
 
 function range(start, end) {
   return { length: 1, start: () => start, end: () => end }

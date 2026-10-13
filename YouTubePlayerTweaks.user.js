@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Player Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.2.9
+// @version     0.2.11
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubePlayerTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubePlayerTweaks.user.js
 // @description Adds player controls (screenshot, wheel speed/volume, live catch-up) and unlocks live DVR with extended rewind on YouTube.
@@ -201,6 +201,7 @@
   const LIVE_CATCHUP_TARGET_BUFFER = 0.5
   const LIVE_CATCHUP_RATE = 1.5
   const LIVE_CATCHUP_INTERVAL = 250
+  const MAX_VOLUME_GAIN = 2
 
   let container
   let sizeBtn
@@ -208,6 +209,10 @@
   let moviePlayer
   let progressBar
   let videoPlayer
+  let volumeAudioContext = null
+  let volumeGain = null
+  let volumeSource = null
+  const volumeSources = new WeakMap()
   let floatingBar
   let tooltip
   let tooltipText
@@ -280,6 +285,8 @@
     location.pathname === '/watch' ||
     location.pathname.startsWith('/live/')
 
+  const isShortsPage = () => location.pathname.startsWith('/shorts/')
+
   const isEditableTarget = (target) =>
     target instanceof HTMLElement &&
     (
@@ -301,7 +308,7 @@
   }
 
   const getFloatingBar = () => {
-    let element = $('#yt-player-tweaks-float-bar')
+    let element = moviePlayer.querySelector('#yt-player-tweaks-float-bar')
 
     if (!element) {
       element = document.createElement('div')
@@ -786,6 +793,50 @@
     if (liveCatchupTimer) showPersistentFloatingBar('追直播中')
   }
 
+  const syncVolumeGain = () => {
+    if (!volumeGain || !moviePlayer) return
+
+    // The native media volume is already 0–1. Scaling its output by 2x
+    // that value makes quiet settings quieter and full volume up to 200%.
+    const volume = Math.max(0, Math.min(100, moviePlayer.getVolume()))
+    volumeGain.gain.value = MAX_VOLUME_GAIN * volume / 100
+  }
+
+  const ensureVolumeGain = () => {
+    const AudioContextClass = pageWindow.AudioContext || pageWindow.webkitAudioContext
+    if (!AudioContextClass || !videoPlayer) return
+
+    // A cross-origin media URL without CORS would become silent when routed
+    // through MediaElementAudioSourceNode. YouTube's same-origin blob is safe.
+    const sourceUrl = videoPlayer.currentSrc
+    if (sourceUrl && new URL(sourceUrl, pageWindow.location.href).origin !== pageWindow.location.origin) return
+
+    try {
+      if (!volumeAudioContext) {
+        volumeAudioContext = new AudioContextClass()
+        volumeGain = volumeAudioContext.createGain()
+        volumeGain.connect(volumeAudioContext.destination)
+      }
+
+      if (volumeSource !== videoPlayer) {
+        volumeSource?.disconnect()
+        volumeSource = volumeSources.get(videoPlayer)
+        if (!volumeSource) {
+          volumeSource = volumeAudioContext.createMediaElementSource(videoPlayer)
+          volumeSources.set(videoPlayer, volumeSource)
+        }
+        volumeSource.connect(volumeGain)
+      }
+
+      syncVolumeGain()
+      if (volumeAudioContext.state === 'suspended') {
+        volumeAudioContext.resume().catch(() => {})
+      }
+    } catch (_) {
+      // Keep YouTube's native volume working if Web Audio is unavailable.
+    }
+  }
+
   const changeVolume = (event) => {
     event.preventDefault()
 
@@ -796,6 +847,7 @@
     volume = Math.max(0, Math.min(100, volume))
 
     moviePlayer.setVolume(volume, true)
+    ensureVolumeGain()
     floatingBarTimer = showFloatingBar(floatingBarTimer, String(volume))
   }
 
@@ -938,6 +990,10 @@
 
     videoPlayer.addEventListener('loadedmetadata', updateLiveButtonVisibility, { signal })
     videoPlayer.addEventListener('playing', updateLiveButtonVisibility, { signal })
+    videoPlayer.addEventListener('volumechange', syncVolumeGain, { signal })
+    moviePlayer.addEventListener('pointerdown', (event) => {
+      if (event.target?.closest?.('.ytp-volume-area')) ensureVolumeGain()
+    }, { capture: true, signal })
   }
 
   const handleWheelCapture = (event) => {
@@ -949,6 +1005,75 @@
     if (container.contains(target)) {
       event.stopImmediatePropagation()
       changeVolume(event)
+    }
+  }
+
+  const handleShortsWheel = (event) => {
+    if (!isShortsPage() || event.ctrlKey || event.deltaY === 0) return
+    if (!(event.target instanceof Node) || isEditableTarget(event.target)) return
+
+    const shorts = event.target.closest?.('ytd-shorts')
+    if (!shorts) return
+
+    // Shorts can keep multiple reels in the DOM. Locate the player under the
+    // pointer each time, including after an in-feed switch without navigation.
+    // Its extracted overlay is outside the video container, so use geometry.
+    for (const player of shorts.querySelectorAll('.html5-video-player')) {
+      const reel = player.closest('ytd-reel-video-renderer')
+      const area = reel?.querySelector('#short-video-container') || player
+      const rect = area.getBoundingClientRect()
+      if (
+        rect.width <= 0 || rect.height <= 0 ||
+        event.clientX < rect.left || event.clientX >= rect.right ||
+        event.clientY < rect.top || event.clientY >= rect.bottom
+      ) continue
+
+      const activeVideo = player.querySelector('video')
+      if (
+        !activeVideo ||
+        typeof player.getVolume !== 'function' ||
+        typeof player.setVolume !== 'function' ||
+        typeof player.unMute !== 'function'
+      ) continue
+
+      if (moviePlayer !== player) {
+        if (floatingBarTimer) clearTimeout(floatingBarTimer)
+        floatingBarTimer = 0
+        if (floatingBar) floatingBar.style.display = 'none'
+      }
+
+      moviePlayer = player
+      videoPlayer = activeVideo
+      floatingBar = getFloatingBar()
+      event.stopImmediatePropagation()
+      changeVolume(event)
+      return
+    }
+  }
+
+  const startShortsVolumeControl = () => {
+    const controller = new AbortController()
+    const { signal } = controller
+
+    // Register before the Shorts player exists; it has no theater button or
+    // regular progress bar, and may be replaced as the feed advances.
+    document.addEventListener('wheel', handleShortsWheel, {
+      capture: true,
+      passive: false,
+      signal,
+    })
+    document.addEventListener('volumechange', (event) => {
+      if (event.target === videoPlayer) syncVolumeGain()
+    }, { capture: true, signal })
+
+    return () => {
+      controller.abort()
+      if (floatingBarTimer) clearTimeout(floatingBarTimer)
+      floatingBarTimer = 0
+      if (floatingBar) floatingBar.style.display = 'none'
+      moviePlayer = null
+      videoPlayer = null
+      floatingBar = null
     }
   }
 
@@ -1026,6 +1151,8 @@
     floatingBar = getFloatingBar()
     tooltip = getTooltip()
 
+    if (volumeAudioContext) ensureVolumeGain()
+
     const buttons = ensureButtons()
     bindButtonEvents(buttons, signal)
 
@@ -1078,6 +1205,11 @@
     cleanup?.()
     cleanup = null
 
+    if (isShortsPage()) {
+      cleanup = startShortsVolumeControl()
+      return
+    }
+
     if (!isWatchPage()) return
 
     const dispose = await main(token)
@@ -1092,7 +1224,7 @@
 
   document.addEventListener('yt-navigate-finish', handleNavigation)
 
-  if (isWatchPage()) {
+  if (isWatchPage() || isShortsPage()) {
     handleNavigation()
   }
 })()
