@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        Twitch Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.4.1
+// @version     0.4.2
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
 // @description Filter chat by broadcaster, moderator and include/exclude account lists, with session history and a header toggle.
@@ -254,12 +254,14 @@
     panel.innerHTML = `
       <div class="ttc-toolbar">
         <div class="ttc-options">
-          <label><input type="checkbox" name="broadcaster"> Broadcaster</label>
-          <label><input type="checkbox" name="moderators"> Moderator</label>
           <button type="button" class="ttc-target-summary" aria-label="目標用戶" aria-controls="ttc-target-settings" aria-expanded="false">目標用戶</button>
           <span class="ttc-count"></span>
         </div>
         <div class="ttc-targets" id="ttc-target-settings" hidden>
+          <div class="ttc-roles">
+            <label><input type="checkbox" name="broadcaster"> Broadcaster</label>
+            <label><input type="checkbox" name="moderators"> Moderator</label>
+          </div>
           <div class="ttc-target-modes" role="group" aria-label="帳號篩選方式">
             <button type="button" class="ttc-mode-include" aria-label="＋ 包含">＋ 包含</button>
             <button type="button" class="ttc-mode-exclude" aria-label="－ 排除">－ 排除</button>
@@ -329,6 +331,7 @@
     const setTargetsOpen = open => {
       targetSettings.hidden = !open
       targetButton.setAttribute('aria-expanded', String(open))
+      panel.classList.toggle('ttc-managing', open)
     }
     targetButton.addEventListener('click', () => setTargetsOpen(targetSettings.hidden))
     setTargetsOpen(state.history.settings.users.length === 0)
@@ -423,8 +426,9 @@
     .ttc-panel [hidden], .ttc-panel[hidden] { display: none !important; }
     .ttc-toolbar { flex: 0 0 auto; padding: 10px; border-bottom: 1px solid var(--color-border-base, #ffffff22); }
     .ttc-options { display: flex; align-items: center; gap: 6px; flex-wrap: nowrap; font-size: 12px; }
-    .ttc-options label { display: flex; align-items: center; gap: 3px; flex-shrink: 0; white-space: nowrap; }
-    .ttc-options input { width: 13px; height: 13px; margin: 0; accent-color: #9147ff; }
+    .ttc-roles { display: flex; align-items: center; gap: 12px; flex-shrink: 0; margin-bottom: 12px; }
+    .ttc-roles label { display: flex; align-items: center; gap: 3px; white-space: nowrap; }
+    .ttc-roles input { width: 13px; height: 13px; margin: 0; accent-color: #9147ff; }
     .ttc-count { margin-left: auto; flex-shrink: 0; white-space: nowrap; color: var(--color-text-alt-2, #adadb8); }
     .ttc-users { display: flex; align-items: center; gap: 6px; }
     .ttc-users label { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; white-space: nowrap; }
@@ -438,17 +442,20 @@
     .ttc-message > img { width: 18px; height: 18px; margin-right: 3px; vertical-align: middle; }
     .ttc-message .chat-image { max-height: 28px; vertical-align: middle; }
     .ttc-latest { position: absolute; bottom: 8px; align-self: center; }
-    .ttc-toolbar { max-height: 65%; overflow-y: auto; }
+    .ttc-managing > .ttc-toolbar { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow-y: auto; }
+    .ttc-managing > .ttc-empty, .ttc-managing > .ttc-list, .ttc-managing > .ttc-latest { display: none !important; }
+    .ttc-options { flex-shrink: 0; }
     .ttc-panel .ttc-target-summary { display: inline-flex; align-items: center; gap: 3px; flex-shrink: 0; padding: 0; color: var(--color-text-link, #bf94ff); background: transparent; white-space: nowrap; font: inherit; cursor: pointer; }
     .ttc-target-summary::before { content: '▸'; }
     .ttc-target-summary[aria-expanded="true"]::before { content: '▾'; }
-    .ttc-targets { margin-top: 8px; }
+    .ttc-targets { margin-top: 12px; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+    .ttc-targets > :not(.ttc-target-list) { flex-shrink: 0; }
     .ttc-target-modes { display: flex; gap: 6px; margin-bottom: 8px; }
     .ttc-target-modes button { flex: 1; padding: 4px 8px; color: inherit; background: var(--color-background-button-text-hover, #ffffff22); font-size: 12px; }
     .ttc-target-modes button[aria-pressed="true"] { color: #fff; background: #9147ff; }
     .ttc-target-search { display: flex; align-items: center; gap: 6px; margin-top: 8px; white-space: nowrap; }
     .ttc-target-search input { display: block; box-sizing: border-box; flex: 1; min-width: 0; width: 100%; padding: 5px 8px; border: 1px solid var(--color-border-base, #ffffff44); border-radius: 4px; color: inherit; background: var(--color-background-input, #ffffff11); font-size: 12px; }
-    .ttc-target-list { list-style: none; padding: 0; margin: 6px 0 0; max-height: 110px; overflow-y: auto; }
+    .ttc-target-list { list-style: none; padding: 0; margin: 6px 0 0; flex: 1; min-height: 40px; overflow-y: auto; }
     .ttc-target-list li { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 3px 0; }
     .ttc-target-list span { overflow-wrap: anywhere; }
     .ttc-target-list button { flex-shrink: 0; padding: 3px 8px; background: var(--color-background-button-text-hover, #ffffff22); color: inherit; font-size: 11px; }

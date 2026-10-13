@@ -35,7 +35,10 @@ function boot({ saved, blocked = false, trustedTypes = false } = {}) {
       return { add: (...names) => names.forEach(name => apply(name, true)),
         remove: (...names) => names.forEach(name => apply(name, false)), toggle: apply }
     }
-    addEventListener() {}
+    addEventListener(name, handler) {
+      this.listeners ||= new Map()
+      this.listeners.set(name, handler)
+    }
     setAttribute(name, value) {
       this.attrs.set(name, value)
       if (name === 'class') this.className = value
@@ -172,6 +175,13 @@ test('YouTube filters: mount, toggle and remount when Trusted Types rejects HTML
   assert.ok(state.button.isConnected)
   assert.ok(state.button.querySelector('svg').querySelector('path'))
   assert.ok(state.panel.isConnected)
+  assert.ok(state.panel.querySelector('.ytcf-targets').querySelector('[name="broadcaster"]'))
+  assert.equal(state.panel.querySelector('.ytcf-options').querySelector('[name="moderators"]'), null)
+  assert.equal(state.panel.querySelector('.ytcf-target-summary').getAttribute('aria-expanded'), 'true')
+  assert.ok(state.panel.className.includes('ytcf-managing'))
+  state.panel.querySelector('.ytcf-target-summary').listeners.get('click')()
+  assert.equal(state.panel.querySelector('.ytcf-target-summary').getAttribute('aria-expanded'), 'false')
+  assert.equal(state.panel.className.includes('ytcf-managing'), false)
   assert.equal(state.panel.hidden, true)
   api.setEnabled(state, true)
   assert.equal(state.panel.hidden, false)
@@ -198,6 +208,35 @@ test('YouTube filters: normalize Unicode handles and accept one account at a tim
   const excluded = env.api.changeTargetUsers(next, '@Alice', false, true)
   assert.equal(excluded.excludedUsers.join(','), '@alice')
   assert.equal(excluded.users.join(','), '@alice')
+})
+
+test('YouTube filters: stable channel IDs and channel URLs survive handle changes and enforce exclusions', () => {
+  const env = boot()
+  const id = 'UCAbCdEfGhIjKlMnOpQrStUv'
+  assert.equal(env.api.normalizeAccount(id), id)
+  assert.equal(env.api.normalizeAccount(`https://www.youtube.com/channel/${id}?view=1`), id)
+  assert.equal(env.api.normalizeAccount(`https://example.com/channel/${id}`), '')
+  const history = env.api.getHistory('channel:@host')
+  history.settings = env.api.changeTargetUsers(history.settings, id)
+  env.api.saveSettings(history)
+  assert.equal(env.api.loadSettings(history.channel).users[0], id)
+  const first = env.message('@old_handle', 'first', '', 'id-1').line
+  first.data = { authorExternalChannelId: id }
+  assert.equal(env.api.readMessage(first).channelId, id)
+  assert.equal(env.api.captureLine(first, history), true)
+  const renamed = env.message('@new_handle', 'second', 'moderator', 'id-2').line
+  renamed.data = { authorExternalChannelId: id }
+  assert.equal(env.api.captureLine(renamed, history), true)
+  const unrelated = env.message('@old_handle', 'different channel', '', 'id-3').line
+  unrelated.data = { authorExternalChannelId: 'UCZYXWVUTSRQPONMLKJIHGFE' }
+  assert.equal(env.api.captureLine(unrelated, history), false)
+  history.settings = env.api.changeTargetUsers(history.settings, `https://youtube.com/channel/${id}`, false, true)
+  assert.ok(history.messages.every(record => !env.api.matchesFilter(record, history.settings)))
+  history.settings = env.api.changeTargetUsers(history.settings, id, true, true)
+  assert.ok(history.messages.every(record => env.api.matchesFilter(record, history.settings)))
+  const fallback = env.message('@no_data', 'DOM fallback').line
+  fallback.setAttribute('author-external-channel-id', id)
+  assert.equal(env.api.captureLine(fallback, history), true)
 })
 
 test('YouTube filters: roles, paid messages and exclusions use the actual author', () => {

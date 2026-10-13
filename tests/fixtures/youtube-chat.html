@@ -4,7 +4,7 @@
 <meta http-equiv="Content-Security-Policy" content="require-trusted-types-for 'script'; trusted-types 'none'">
 <title>YouTube 聊天室篩選驗證</title>
 <style>
-  :root { --yt-live-chat-primary-text-color: #efeff1; --yt-live-chat-background-color: #18181b; }
+  :root { --yt-live-chat-primary-text-color: #fff; --yt-live-chat-background-color: #0f0f0f; --yt-live-chat-secondary-text-color: #aaa; --yt-live-chat-button-default-text-color: #3ea6ff; }
   body { margin: 32px; color: #efeff1; background: #0f0f0f; font: 14px Arial, sans-serif; }
   yt-live-chat-renderer { display: block; width: 340px; border: 1px solid #45454a; }
   yt-live-chat-header-renderer { display: flex; align-items: center; gap: 4px; height: 52px; padding: 0 10px; border-bottom: 1px solid #45454a; }
@@ -48,6 +48,9 @@
     const line = document.createElement('yt-live-chat-text-message-renderer')
     line.id = `message-${++serial}`
     line.setAttribute('author-type', role)
+    line.data = { authorExternalChannelId: user === '@alice'
+      ? 'UCAbCdEfGhIjKlMnOpQrStUv' : user === '@mod_account'
+      ? 'UCZYXWVUTSRQPONMLKJIHGFE' : 'UC1234567890123456789012' }
     const time = line.appendChild(document.createElement('span'))
     time.id = 'timestamp'
     time.textContent = `14:${String(serial).padStart(2, '0')}`

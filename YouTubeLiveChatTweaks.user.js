@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.3.1
+// @version     0.3.2
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @description Adds live chat include/exclude account filters and session history, hides the chat mode menu, improves emoji copying and auto-follow, and adds reload.
@@ -471,8 +471,17 @@
       return node
     }
     const normalizeAccount = (input) => {
-      const raw = String(input || '').trim().normalize('NFC').replace(/^@/, '').toLowerCase()
-      return /^[^\s@/\\,，;；?#&]{1,100}$/u.test(raw) ? `@${raw}` : ''
+      const raw = String(input || '').trim().normalize('NFC')
+      if (/^UC[\w-]{22}$/.test(raw)) return raw
+      if (/^https?:\/\//i.test(raw)) {
+        try {
+          const url = new URL(raw)
+          const id = url.pathname.match(/^\/channel\/(UC[\w-]{22})\/?$/)?.[1]
+          return /^(www\.)?youtube\.com$/i.test(url.hostname) && id ? id : ''
+        } catch (_) { return '' }
+      }
+      const handle = raw.replace(/^@/, '').toLowerCase()
+      return /^[^\s@/\\,，;；?#&]{1,100}$/u.test(handle) ? `@${handle}` : ''
     }
     const normalizeUsers = value => [...new Set(String(value || '').split(/[\s,，;；]+/)
       .map(normalizeAccount).filter(Boolean))]
@@ -607,6 +616,9 @@
     const readMessage = (line) => {
       const author = $('#author-name', line)
       const user = normalizeAccount(author?.textContent)
+      // The renderer retains the sender's stable ID even when its DOM shows a handle.
+      const rawId = line.data?.authorExternalChannelId || line.getAttribute('author-external-channel-id')
+      const channelId = typeof rawId === 'string' && /^UC[\w-]{22}$/.test(rawId) ? rawId : ''
       let message = $('#message, #sticker, #header-subtext', line)
       if (!author || !user || !message) return null
       const chip = author.closest('yt-live-chat-author-chip') || line
@@ -620,14 +632,17 @@
         message = document.createElement('span')
         message.textContent = $('#deleted-state', line)?.textContent?.trim() || '訊息已刪除'
       }
-      return { user, moderator, broadcaster, author, body: message, badges, deleted,
+      return { user, channelId, moderator, broadcaster, author, body: message, badges, deleted,
         id: line.id || '', time: $('#timestamp', line)?.textContent?.trim() || '' }
     }
 
+    const includesAuthor = (users, message) => users.includes(message.user) ||
+      (!!message.channelId && users.includes(message.channelId))
+
     const matchesFilter = (message, settings) =>
-      !(settings.excludedUsers || []).includes(message.user) && (
+      !includesAuthor(settings.excludedUsers || [], message) && (
         (settings.moderators && message.moderator) ||
-        (settings.broadcaster && message.broadcaster) || settings.users.includes(message.user)
+        (settings.broadcaster && message.broadcaster) || includesAuthor(settings.users, message)
       )
 
     const clonePresentation = source => {
@@ -663,7 +678,7 @@
       const author = document.createElement('strong')
       author.textContent = message.author.textContent
       author.style.color = getComputedStyle(message.author).color
-      author.title = message.user
+      author.title = message.channelId || message.user
       row.appendChild(author)
       row.appendChild(document.createTextNode(': '))
       const content = clonePresentation(message.body)
@@ -674,8 +689,8 @@
 
     const captureLine = (line, history) => {
       const message = readMessage(line)
-      if (!message || (!message.moderator && !message.broadcaster && !history.settings.users.includes(message.user))) return false
-      const fingerprint = `${message.user}\n${message.deleted}\n${message.body.innerHTML}`
+      if (!message || (!message.moderator && !message.broadcaster && !includesAuthor(history.settings.users, message))) return false
+      const fingerprint = `${message.user}\n${message.channelId}\n${message.deleted}\n${message.body.innerHTML}`
       const previous = message.id ? history.ids.get(message.id) : history.nodes.get(line)
       if (previous?.fingerprint === fingerprint) {
         history.nodes.set(line, previous)
@@ -686,10 +701,10 @@
       if (previous && history.messages.includes(previous)) {
         view.firstChild.textContent = previous.view.firstChild.textContent
         previous.view.replaceWith(view)
-        record = Object.assign(previous, { user: message.user, moderator: message.moderator,
+        record = Object.assign(previous, { user: message.user, channelId: message.channelId, moderator: message.moderator,
           broadcaster: message.broadcaster, view, fingerprint })
       } else {
-        record = { id: message.id, user: message.user, moderator: message.moderator,
+        record = { id: message.id, user: message.user, channelId: message.channelId, moderator: message.moderator,
           broadcaster: message.broadcaster, view, fingerprint }
         history.messages.push(record)
         if (history.messages.length > MAX_MESSAGES) {
@@ -763,7 +778,7 @@
       includeButton.setAttribute('aria-pressed', String(!exclude))
       excludeButton.setAttribute('aria-pressed', String(exclude))
       const query = $('[name="search-users"]', panel).value.trim().toLowerCase().replace(/^@/, '')
-      const users = targets.filter(user => user.includes(query)).sort()
+      const users = targets.filter(user => user.toLowerCase().includes(query)).sort()
       const list = $('.ytcf-target-list', panel)
       list.setAttribute('aria-label', exclude ? '排除帳號清單' : '包含帳號清單')
       list.replaceChildren()
@@ -795,20 +810,22 @@
       panel.setAttribute('aria-label', '指定用戶聊天室')
       panel.appendChild(element('div', { class: 'ytcf-toolbar' }, [
         element('div', { class: 'ytcf-options' }, [
-          element('label', {}, [element('input', { type: 'checkbox', name: 'broadcaster' }), ' Broadcaster']),
-          element('label', {}, [element('input', { type: 'checkbox', name: 'moderators' }), ' Moderator']),
           element('button', { type: 'button', class: 'ytcf-target-summary', 'aria-label': '目標用戶',
             'aria-controls': 'ytcf-target-settings', 'aria-expanded': 'false' }, ['目標用戶']),
           element('span', { class: 'ytcf-count' }),
         ]),
         element('div', { class: 'ytcf-targets', id: 'ytcf-target-settings', hidden: '' }, [
+          element('div', { class: 'ytcf-roles' }, [
+            element('label', {}, [element('input', { type: 'checkbox', name: 'broadcaster' }), ' Broadcaster']),
+            element('label', {}, [element('input', { type: 'checkbox', name: 'moderators' }), ' Moderator']),
+          ]),
           element('div', { class: 'ytcf-target-modes', role: 'group', 'aria-label': '帳號篩選方式' }, [
             element('button', { type: 'button', class: 'ytcf-mode-include', 'aria-label': '＋ 包含' }, ['＋ 包含']),
             element('button', { type: 'button', class: 'ytcf-mode-exclude', 'aria-label': '－ 排除' }, ['－ 排除']),
           ]),
           element('form', { class: 'ytcf-users' }, [
             element('label', {}, ['新增帳號', element('input', { type: 'text', name: 'users',
-              placeholder: '@帳號', autocomplete: 'off', spellcheck: 'false' })]),
+              placeholder: '頻道 ID 或 @帳號', autocomplete: 'off', spellcheck: 'false' })]),
             element('button', { type: 'submit' }, ['新增']),
           ]),
           element('label', { class: 'ytcf-target-search' }, ['搜尋帳號', element('input', {
@@ -853,7 +870,7 @@
         const key = exclude ? 'excludedUsers' : 'users'
         const nextSettings = changeTargetUsers(state.history.settings, users.value, false, exclude)
         if (!nextSettings) {
-          status.textContent = '請輸入一個 @帳號。'
+          status.textContent = '請輸入一個頻道 ID、頻道網址或 @帳號。'
           return
         }
         const added = nextSettings[key].length - (state.history.settings[key] || []).length
@@ -875,6 +892,7 @@
       const setTargetsOpen = open => {
         targetSettings.hidden = !open
         targetButton.setAttribute('aria-expanded', String(open))
+        panel.classList.toggle('ytcf-managing', open)
       }
       targetButton.addEventListener('click', () => setTargetsOpen(targetSettings.hidden))
       setTargetsOpen(state.history.settings.users.length === 0)
@@ -948,7 +966,7 @@
         if (changed && state.history.enabled) renderMessages(state)
       })
       state.observer.observe(sourceItems, { childList: true, subtree: true, characterData: true,
-        attributes: true, attributeFilter: ['author-type', 'type', 'is-deleted'] })
+        attributes: true, attributeFilter: ['author-type', 'type', 'is-deleted', 'author-external-channel-id'] })
       mounted = state
       setEnabled(state, state.history.enabled)
     }
@@ -972,48 +990,52 @@
     const style = document.createElement('style')
     style.textContent = `
       #yt-chat-tweaks-filter-button { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 40px; width: 40px; height: 40px; padding: 8px; border: 0; border-radius: 4px; color: inherit; background: transparent; cursor: pointer; }
-      #yt-chat-tweaks-filter-button:hover { background: var(--color-background-button-text-hover, #ffffff22); }
-      #yt-chat-tweaks-filter-button[aria-pressed="true"] { color: var(--color-text-link, #bf94ff) !important; background: var(--color-background-button-text-hover, #ffffff22); }
-      #yt-chat-tweaks-filter-button:focus-visible, .ytcf-panel button:focus-visible { outline: 2px solid #9147ff; outline-offset: -2px; }
+      #yt-chat-tweaks-filter-button:hover { background: var(--yt-live-chat-action-panel-background-color, #8882); }
+      #yt-chat-tweaks-filter-button[aria-pressed="true"] { color: var(--yt-live-chat-button-default-text-color, #065fd4) !important; background: var(--yt-live-chat-action-panel-background-color, #8882); }
+      #yt-chat-tweaks-filter-button:focus-visible, .ytcf-panel button:focus-visible { outline: 2px solid var(--yt-live-chat-button-default-text-color, #065fd4); outline-offset: -2px; }
       .ytcf-host { position: relative; }
       .ytcf-active > .ytcf-source { pointer-events: none; isolation: isolate; }
-      .ytcf-panel { position: absolute; inset: 0; z-index: 5; display: flex; flex-direction: column; min-height: 0; color: var(--yt-live-chat-primary-text-color, #efeff1); background: var(--yt-live-chat-background-color, #18181b); font-size: 13px; }
+      .ytcf-panel { position: absolute; inset: 0; z-index: 5; display: flex; flex-direction: column; min-height: 0; color: var(--yt-live-chat-primary-text-color, #0f0f0f); background: var(--yt-live-chat-background-color, #fff); font-size: 13px; }
       .ytcf-panel [hidden], .ytcf-panel[hidden] { display: none !important; }
-      .ytcf-toolbar { flex: 0 0 auto; padding: 10px; border-bottom: 1px solid var(--color-border-base, #ffffff22); }
+      .ytcf-toolbar { flex: 0 0 auto; padding: 10px; border-bottom: 1px solid var(--yt-live-chat-message-input-border-color, #8884); }
       .ytcf-options { display: flex; align-items: center; gap: 6px; flex-wrap: nowrap; font-size: 12px; }
-      .ytcf-options label { display: flex; align-items: center; gap: 3px; flex-shrink: 0; white-space: nowrap; }
-      .ytcf-options input { width: 13px; height: 13px; margin: 0; accent-color: #9147ff; }
-      .ytcf-count { margin-left: auto; flex-shrink: 0; white-space: nowrap; color: var(--color-text-alt-2, #adadb8); }
+      .ytcf-roles { display: flex; align-items: center; gap: 12px; flex-shrink: 0; margin-bottom: 12px; }
+      .ytcf-roles label { display: flex; align-items: center; gap: 3px; white-space: nowrap; }
+      .ytcf-roles input { width: 13px; height: 13px; margin: 0; accent-color: var(--yt-live-chat-button-default-text-color, #065fd4); }
+      .ytcf-count { margin-left: auto; flex-shrink: 0; white-space: nowrap; color: var(--yt-live-chat-secondary-text-color, #606060); }
       .ytcf-users { display: flex; align-items: center; gap: 6px; }
       .ytcf-users label { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; white-space: nowrap; }
-      .ytcf-users input { display: block; box-sizing: border-box; flex: 1; min-width: 0; width: 100%; padding: 5px 8px; border: 1px solid var(--color-border-base, #ffffff44); border-radius: 4px; color: inherit; background: var(--color-background-input, #ffffff11); font-size: 12px; }
-      .ytcf-panel button { padding: 6px 10px; border: 0; border-radius: 4px; color: #fff; background: #9147ff; cursor: pointer; }
-      .ytcf-empty { padding: 16px 12px; color: var(--color-text-alt-2, #adadb8); }
+      .ytcf-users input { display: block; box-sizing: border-box; flex: 1; min-width: 0; width: 100%; padding: 5px 8px; border: 1px solid var(--yt-live-chat-message-input-border-color, #8886); border-radius: 4px; color: inherit; background: var(--yt-live-chat-background-color, #fff); font-size: 12px; }
+      .ytcf-panel button { padding: 6px 10px; border: 0; border-radius: 4px; color: var(--yt-live-chat-button-default-text-color, #065fd4); background: var(--yt-live-chat-action-panel-background-color, #8882); cursor: pointer; }
+      .ytcf-empty { padding: 16px 12px; color: var(--yt-live-chat-secondary-text-color, #606060); }
       .ytcf-list { flex: 1; min-height: 0; overflow: auto; overflow-anchor: none; padding: 6px 0; }
       .ytcf-message { padding: 5px 10px; overflow-wrap: anywhere; line-height: 1.6; }
-      .ytcf-message:hover { background: var(--color-background-button-text-hover, #ffffff11); }
-      .ytcf-time { margin-right: 6px; color: var(--color-text-alt-2, #adadb8); font-size: 10px; }
+      .ytcf-message:hover { background: var(--yt-live-chat-action-panel-background-color, #8882); }
+      .ytcf-time { margin-right: 6px; color: var(--yt-live-chat-secondary-text-color, #606060); font-size: 10px; }
       .ytcf-message > img { width: 18px; height: 18px; margin-right: 3px; vertical-align: middle; }
       .ytcf-message .emoji { max-height: 24px; vertical-align: middle; }
       .ytcf-badge { display: inline-flex; align-items: center; margin-right: 3px; vertical-align: middle; pointer-events: none; }
       .ytcf-badge img, .ytcf-badge svg { width: 18px; height: 18px; }
       yt-live-chat-header-renderer #view-selector { display: none !important; }
       .ytcf-latest { position: absolute; bottom: 8px; align-self: center; }
-      .ytcf-toolbar { max-height: 65%; overflow-y: auto; }
-      .ytcf-panel .ytcf-target-summary { display: inline-flex; align-items: center; gap: 3px; flex-shrink: 0; padding: 0; color: var(--color-text-link, #bf94ff); background: transparent; white-space: nowrap; font: inherit; cursor: pointer; }
+      .ytcf-managing > .ytcf-toolbar { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow-y: auto; }
+      .ytcf-managing > .ytcf-empty, .ytcf-managing > .ytcf-list, .ytcf-managing > .ytcf-latest { display: none !important; }
+      .ytcf-options { flex-shrink: 0; }
+      .ytcf-panel .ytcf-target-summary { display: inline-flex; align-items: center; gap: 3px; flex-shrink: 0; padding: 0; color: var(--yt-live-chat-button-default-text-color, #065fd4); background: transparent; white-space: nowrap; font: inherit; cursor: pointer; }
       .ytcf-target-summary::before { content: '▸'; }
       .ytcf-target-summary[aria-expanded="true"]::before { content: '▾'; }
-      .ytcf-targets { margin-top: 8px; }
+      .ytcf-targets { margin-top: 12px; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+      .ytcf-targets > :not(.ytcf-target-list) { flex-shrink: 0; }
       .ytcf-target-modes { display: flex; gap: 6px; margin-bottom: 8px; }
-      .ytcf-target-modes button { flex: 1; padding: 4px 8px; color: inherit; background: var(--color-background-button-text-hover, #ffffff22); font-size: 12px; }
-      .ytcf-target-modes button[aria-pressed="true"] { color: #fff; background: #9147ff; }
+      .ytcf-target-modes button { flex: 1; padding: 4px 8px; color: inherit; background: var(--yt-live-chat-action-panel-background-color, #8882); font-size: 12px; }
+      .ytcf-target-modes button[aria-pressed="true"] { color: var(--yt-live-chat-background-color, #fff); background: var(--yt-live-chat-button-default-text-color, #065fd4); }
       .ytcf-target-search { display: flex; align-items: center; gap: 6px; margin-top: 8px; white-space: nowrap; }
-      .ytcf-target-search input { display: block; box-sizing: border-box; flex: 1; min-width: 0; width: 100%; padding: 5px 8px; border: 1px solid var(--color-border-base, #ffffff44); border-radius: 4px; color: inherit; background: var(--color-background-input, #ffffff11); font-size: 12px; }
-      .ytcf-target-list { list-style: none; padding: 0; margin: 6px 0 0; max-height: 110px; overflow-y: auto; }
+      .ytcf-target-search input { display: block; box-sizing: border-box; flex: 1; min-width: 0; width: 100%; padding: 5px 8px; border: 1px solid var(--yt-live-chat-message-input-border-color, #8886); border-radius: 4px; color: inherit; background: var(--yt-live-chat-background-color, #fff); font-size: 12px; }
+      .ytcf-target-list { list-style: none; padding: 0; margin: 6px 0 0; flex: 1; min-height: 40px; overflow-y: auto; }
       .ytcf-target-list li { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 3px 0; }
       .ytcf-target-list span { overflow-wrap: anywhere; }
-      .ytcf-target-list button { flex-shrink: 0; padding: 3px 8px; background: var(--color-background-button-text-hover, #ffffff22); color: inherit; font-size: 11px; }
-      .ytcf-target-empty, .ytcf-target-status { margin: 6px 0 0; font-size: 11px; color: var(--color-text-alt-2, #adadb8); }
+      .ytcf-target-list button { flex-shrink: 0; padding: 3px 8px; background: var(--yt-live-chat-action-panel-background-color, #8882); color: inherit; font-size: 11px; }
+      .ytcf-target-empty, .ytcf-target-status { margin: 6px 0 0; font-size: 11px; color: var(--yt-live-chat-secondary-text-color, #606060); }
       .ytcf-target-status:empty { display: none; }
     `
     ;(document.head || document.documentElement).appendChild(style)
