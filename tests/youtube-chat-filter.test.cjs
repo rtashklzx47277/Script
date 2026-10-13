@@ -154,7 +154,7 @@ function boot({ saved, blocked = false, trustedTypes = false, parentWindow, fetc
     setTimeout(fn, delay) { const id = ++nextTimer; timers.set(id, { fn, delay }); return id },
     clearTimeout(id) { timers.delete(id) }, setInterval() {}, requestAnimationFrame() {},
     Node: { ELEMENT_NODE: 1 }, HTMLElement: Element, AbortController,
-    getComputedStyle: () => ({ color: 'white', display: 'block', visibility: 'visible' }),
+    getComputedStyle: element => ({ color: element.style.color || 'white', display: 'block', visibility: 'visible' }),
     MutationObserver: class { observe() {} disconnect() {} },
     localStorage: {
       getItem(key) { if (blocked) throw Error('Blocked'); return storage.get(key) || null },
@@ -578,6 +578,36 @@ test('YouTube author snapshots: preserve the clicked message and badge visuals w
   assert.notEqual(copiedIcon, snapshot.badges[0].visual)
   assert.equal(copiedIcon.querySelector('path').getAttribute('d'), 'M0 0h1v1z')
   assert.equal(snapshot.badges[0].visual.parentElement, null)
+})
+
+test('YouTube author cards: keep native role colors and inline badges after the channel name loads', async () => {
+  for (const [role, color] of [['member', 'rgb(43, 166, 64)'], ['moderator', 'rgb(62, 166, 255)'], ['owner', 'rgb(255, 214, 0)']]) {
+    const env = boot({ fetchProfile: () => Promise.resolve({ ok: true, json: async () => ({ metadata: {
+      channelMetadataRenderer: { externalId: channelA, title: '頻道名稱', vanityChannelUrl: 'https://www.youtube.com/@example' },
+    } }) }) })
+    const app = env.document.body.appendChild(new env.Element('yt-live-chat-app'))
+    const message = env.message('@example', 'hello', role)
+    message.line.data = { authorExternalChannelId: channelA }
+    message.author.style.color = color
+    const badge = message.chip.appendChild(new env.Element('yt-live-chat-author-badge-renderer'))
+    badge.setAttribute('type', role)
+    badge.style.color = color
+    badge.appendChild(new env.Element('svg'))
+    app.appendChild(message.line)
+    const state = env.api.showAuthorCard(env.api.authorSnapshot(env.api.readMessage(message.line)), message.author)
+    await settle()
+    assert.equal(state.title.textContent, '頻道名稱')
+    assert.equal(state.title.style.color, color)
+    const identity = state.card.querySelector('.ytuc-identity')
+    const nameRow = identity.querySelector('.ytuc-name-row')
+    assert.equal(nameRow.children[0], state.title)
+    assert.equal(nameRow.children[1].className, 'ytuc-badges')
+    assert.equal(nameRow.querySelector('.ytuc-badge').style.color, color)
+    assert.equal(identity.children[1].className, 'ytuc-handle')
+    assert.equal(identity.children[2].className, 'ytuc-id')
+    assert.equal(identity.parentElement.className, 'ytuc-header')
+    assert.equal(state.card.querySelector('.ytuc-badge-section'), null)
+  }
 })
 
 test('YouTube filter mode: close existing cards and never open cards or native menu guards over the filter', () => {

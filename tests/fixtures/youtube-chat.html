@@ -30,6 +30,10 @@
   #message img { width: 24px; vertical-align: middle; }
   [author-type="owner"] #author-name { color: #ffd600; }
   [author-type="moderator"] #author-name { color: #5e84f1; }
+  [author-type="member"] #author-name { color: #2ba640; }
+  [type="moderator"] { color: #5e84f1; }
+  [type="owner"] { color: #ffd600; }
+  [type="member"] { color: #2ba640; }
   .input-area { padding: 14px; border-top: 1px solid #45454a; }
   .input-area input { box-sizing: border-box; width: 100%; padding: 8px; color: inherit; background: #303034; border: 0; }
   .fixture-tools { margin-top: 20px; display: flex; gap: 8px; flex-wrap: wrap; }
@@ -136,7 +140,16 @@
         const button = renderer.appendChild(document.createElement('tp-yt-paper-item'))
         button.setAttribute('role', 'menuitem')
         button.tabIndex = 0
-        button.textContent = model.text.simpleText
+        const icon = button.appendChild(document.createElement('yt-icon'))
+        icon.textContent = model.serviceEndpoint.fixtureAction.action === 'block' ? '⊘' : '⚑'
+        const wrapper = button.appendChild(document.createElement('div'))
+        wrapper.className = 'text-wrapper'
+        const title = wrapper.appendChild(document.createElement('yt-formatted-string'))
+        title.className = 'title'
+        // Native variants reserve space at both the renderer and title levels.
+        title.style.marginRight = '24px'
+        title.textContent = model.text.simpleText
+        renderer.style.minWidth = '160px'
         const activate = () => {
           const { params, action } = model.serviceEndpoint.fixtureAction
           this.dispatchEvent(new CustomEvent('yt-action', { bubbles: true, composed: true,
@@ -184,10 +197,10 @@
     const author = chip.appendChild(document.createElement('span'))
     author.id = 'author-name'
     author.textContent = user
-    if (role === 'moderator') {
+    if (role) {
       const badge = chip.appendChild(document.createElement('yt-live-chat-author-badge-renderer'))
-      badge.setAttribute('type', 'moderator')
-      badge.setAttribute('aria-label', 'Moderator')
+      badge.setAttribute('type', role)
+      badge.setAttribute('aria-label', role === 'member' ? '會員' : role === 'owner' ? 'Broadcaster' : 'Moderator')
       const svg = badge.appendChild(document.createElementNS('http://www.w3.org/2000/svg', 'svg'))
       svg.setAttribute('viewBox', '0 0 24 24')
       const path = svg.appendChild(document.createElementNS('http://www.w3.org/2000/svg', 'path'))
@@ -218,6 +231,7 @@
   addMessage('@fixture_channel', 'owner')
   addMessage('@mod_account', 'moderator')
   addMessage('@ordinary')
+  addMessage('@alice', 'member')
   document.getElementById('add-mod').onclick = () => addMessage('@mod_account', 'moderator')
   document.getElementById('add-user').onclick = () => addMessage('@alice')
   document.getElementById('prune').onclick = () => items().replaceChildren()

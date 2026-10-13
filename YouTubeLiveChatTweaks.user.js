@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.4.1
+// @version     0.4.2
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @description Adds author profile cards, live chat account filters and session history, hides the chat mode menu, improves emoji copying and auto-follow, and adds reload.
@@ -732,10 +732,11 @@
 
     const authorSnapshot = message => ({
       user: message.user, channelId: message.channelId, name: message.author.textContent,
+      color: getComputedStyle(message.author).color,
       avatar: message.avatar, broadcaster: message.broadcaster, moderator: message.moderator,
       badges: message.badges.map(badge => {
         const visual = $('img, svg', badge)
-        return { type: badge.getAttribute('type'),
+        return { type: badge.getAttribute('type'), color: getComputedStyle(badge).color,
           label: badge.getAttribute('aria-label') || badge.getAttribute('shared-tooltip-text') || '徽章',
           visual: visual ? clonePresentation(visual) : null }
       }),
@@ -892,38 +893,38 @@
       if (/^https:\/\//.test(author.avatar)) photo.appendChild(element('img', { src: author.avatar, alt: '' }))
       else photo.textContent = (author.name || author.user || '?').replace(/^@/, '').slice(0,1).toUpperCase()
       const title = element('a', { class: 'ytuc-name', target: '_blank', rel: 'noopener noreferrer' }, [author.name || author.user])
+      if (author.color) title.style.color = author.color
       title.href = author.channelId ? `https://www.youtube.com/channel/${author.channelId}`
         : `https://www.youtube.com/${author.user}`
       const close = element('button', { class: 'ytuc-close', type: 'button', 'aria-label': '關閉用戶資訊' }, ['×'])
-      const header = element('div', { class: 'ytuc-header' }, [photo, title, close])
       const handle = element('div', { class: 'ytuc-handle' }, [author.user])
       const id = element('div', { class: 'ytuc-id' }, [author.channelId || '無法取得頻道 ID'])
       const profileStatus = element('p', { class: 'ytuc-status', role: 'status' }, [author.channelId ? '載入頻道名稱…' : '頻道名稱暫時無法載入。'])
       const profileRetry = element('button', { class: 'ytuc-retry', type: 'button', hidden: '' }, ['重試名稱'])
-      const identity = element('div', { class: 'ytuc-identity' }, [handle, id])
+      const nameRow = element('div', { class: 'ytuc-name-row' }, [title])
+      const identity = element('div', { class: 'ytuc-identity' }, [nameRow, handle, id])
       const badges = [...(author.badges || [])]
-      if (author.broadcaster && !badges.some(badge => badge.type === 'owner')) badges.push({ label: 'Broadcaster' })
-      if (author.moderator && !badges.some(badge => badge.type === 'moderator')) badges.push({ label: 'Moderator' })
+      if (author.broadcaster && !badges.some(badge => badge.type === 'owner')) badges.push({ label: 'Broadcaster', color: author.color })
+      if (author.moderator && !badges.some(badge => badge.type === 'moderator')) badges.push({ label: 'Moderator', color: author.color })
       if (badges.length) {
         const badgeList = element('div', { class: 'ytuc-badges', role: 'list', 'aria-label': '徽章' })
         for (const badge of badges) {
           const item = element('span', { class: 'ytuc-badge', role: 'listitem', 'aria-label': badge.label, title: badge.label })
+          if (badge.color) item.style.color = badge.color
           if (badge.visual) {
             item.appendChild(clonePresentation(badge.visual))
           } else item.textContent = badge.label
           badgeList.appendChild(item)
         }
-        identity.appendChild(element('div', { class: 'ytuc-badge-section' }, [
-          element('div', { class: 'ytuc-badge-heading' }, ['徽章']), badgeList,
-        ]))
+        nameRow.appendChild(badgeList)
       }
       identity.appendChild(profileStatus)
       identity.appendChild(profileRetry)
+      const header = element('div', { class: 'ytuc-header' }, [photo, identity, close])
       const menuStatus = element('p', { class: 'ytuc-status', role: 'status' }, ['載入操作…'])
       const menuRetry = element('button', { class: 'ytuc-retry', type: 'button', hidden: '' }, ['重試操作'])
       const menuHost = element('div', { class: 'ytuc-actions' }, [menuStatus, menuRetry])
       card.appendChild(header)
-      card.appendChild(identity)
       card.appendChild(menuHost)
       const state = { author, opener, anchor: opener.getBoundingClientRect(), card, title, handle,
         profileStatus, profileRetry, menuHost, menuStatus, menuRetry, menuRun: 0, closed: false }
@@ -1447,18 +1448,17 @@
       .ytuc-header { display: flex; align-items: flex-start; gap: 12px; padding: 16px 12px; }
       .ytuc-photo { display: flex; align-items: center; justify-content: center; flex: 0 0 56px; width: 56px; height: 56px; overflow: hidden; border-radius: 50%; background: var(--yt-live-chat-button-default-background-color, #8883); font-size: 24px; }
       .ytuc-photo img { display: block; width: 100%; height: 100%; object-fit: cover; }
-      .ytuc-name { flex: 1; min-width: 0; margin-top: 4px; color: inherit; text-decoration: none; font-size: 18px; font-weight: 600; overflow-wrap: anywhere; }
+      .ytuc-name-row { line-height: 1.4; overflow-wrap: anywhere; }
+      .ytuc-name { color: inherit; text-decoration: none; font-size: 18px; font-weight: 600; overflow-wrap: anywhere; }
       .ytuc-name:hover { text-decoration: underline; }
       .ytuc-card .ytuc-close { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 28px; width: 28px; height: 28px; margin: 0; padding: 0; border: 0; border-radius: 50%; color: inherit; background: none; cursor: pointer; font: 24px/1 Arial, sans-serif; }
       .ytuc-close:hover { background: var(--yt-live-chat-button-default-background-color, #8882); }
-      .ytuc-identity { padding: 12px; border-top: 1px solid var(--yt-live-chat-message-input-border-color, #8883); }
-      .ytuc-handle { overflow-wrap: anywhere; }
+      .ytuc-identity { flex: 1; min-width: 0; padding-top: 4px; }
+      .ytuc-handle { margin-top: 6px; overflow-wrap: anywhere; }
       .ytuc-id { margin-top: 4px; color: var(--yt-live-chat-secondary-text-color, #606060); overflow-wrap: anywhere; user-select: text; font: 12px/1.5 ui-monospace, Consolas, monospace; }
-      .ytuc-badge-section { margin-top: 12px; }
-      .ytuc-badge-heading { margin-bottom: 8px; font-weight: 600; }
-      .ytuc-badges { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-      .ytuc-badge { display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box; min-width: 36px; min-height: 36px; padding: 4px; border: 1px solid var(--yt-live-chat-message-input-border-color, #8884); border-radius: 4px; font-size: 11px; }
-      .ytuc-badge img, .ytuc-badge svg { display: block; width: 26px; height: 26px; object-fit: contain; }
+      .ytuc-badges { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 3px; margin-left: 4px; vertical-align: middle; }
+      .ytuc-badge { display: inline-flex; align-items: center; justify-content: center; font-size: 11px; }
+      .ytuc-badge img, .ytuc-badge svg { display: block; width: 16px !important; height: 16px !important; object-fit: contain; }
       .ytuc-badge svg { fill: currentColor; }
       .ytuc-actions { padding: 12px; border-top: 1px solid var(--yt-live-chat-message-input-border-color, #8883); background: var(--yt-live-chat-action-panel-background-color, #8881); }
       .ytuc-status { margin: 0; color: var(--yt-live-chat-secondary-text-color, #606060); font-size: 12px; }
@@ -1468,12 +1468,12 @@
       .ytuc-menu { display: block; min-width: 0 !important; max-width: 100% !important; max-height: none !important; margin: 0 !important; padding: 0 !important; box-shadow: none !important; color: inherit; background: transparent !important; }
       .ytuc-menu :is(ytd-menu-service-item-renderer, ytd-menu-navigation-item-renderer, tp-yt-paper-item, yt-formatted-string, yt-icon) { color: inherit !important; }
       .ytuc-menu > #items { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 !important; color: inherit; background: transparent !important; }
-      .ytuc-menu tp-yt-paper-item { box-sizing: border-box; min-height: 32px !important; min-width: 0 !important; padding: 4px 12px !important; border-radius: 18px; background: var(--yt-live-chat-button-default-background-color, #8882); white-space: normal; cursor: pointer; }
+      .ytuc-menu tp-yt-paper-item { display: inline-flex !important; box-sizing: border-box; width: max-content !important; max-width: 100%; min-height: 32px !important; min-width: 0 !important; gap: 0 !important; padding: 4px 12px !important; border-radius: 18px; background: var(--yt-live-chat-button-default-background-color, #8882); white-space: normal; cursor: pointer; }
       .ytuc-menu tp-yt-paper-item:hover { filter: brightness(1.15); }
       .ytuc-menu yt-icon { width: 20px; height: 20px; margin-right: 6px !important; }
-      .ytuc-menu .text-wrapper { min-width: 0; }
-      .ytuc-menu .text-wrapper > .title { margin: 0 !important; }
-      .ytuc-menu .item { min-width: 0; max-width: 100%; }
+      .ytuc-menu .text-wrapper { flex: 0 1 auto !important; min-width: 0; width: max-content !important; }
+      .ytuc-menu .text-wrapper > .title { flex: none !important; width: auto !important; min-width: 0 !important; margin: 0 !important; }
+      .ytuc-menu .item { flex: 0 1 auto !important; width: max-content !important; min-width: 0 !important; max-width: 100%; }
       .ytcf-time { margin-right: 6px; color: var(--yt-live-chat-secondary-text-color, #606060); font-size: 10px; }
       .ytcf-message > img { width: 18px; height: 18px; margin-right: 3px; vertical-align: middle; }
       .ytcf-message .emoji { max-height: 24px; vertical-align: middle; }
