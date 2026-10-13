@@ -70,6 +70,7 @@ function boot({ saved, blocked = false, trustedTypes = false } = {}) {
     closest(selector) {
       return this.matches(selector) ? this : this.parentElement?.closest(selector) || null
     }
+    contains(other) { return other === this || this.children.some(child => child.contains(other)) }
     appendChild(child) {
       child.remove()
       this.children.push(child)
@@ -139,7 +140,7 @@ function boot({ saved, blocked = false, trustedTypes = false } = {}) {
   vm.runInContext(source.replace('    // End YouTube chat filtering.', `
     globalThis.api = { normalizeAccount, getChannel, getHistory, loadSettings, saveSettings,
       readMessage, matchesFilter, captureLine, captureTree, renderMessages, changeTargetUsers,
-      refresh, refreshHeader, setEnabled, showTargetStatus, get mounted() { return mounted } };
+      refresh, refreshHeader, setEnabled, showTargetStatus, guardMessageMenu, get mounted() { return mounted } };
     // End YouTube chat filtering.`), context)
   const message = (user, text, role = '', id = '') => {
     const line = new Element('yt-live-chat-text-message-renderer')
@@ -210,6 +211,25 @@ test('YouTube filters: mount, toggle and remount when Trusted Types rejects HTML
   api.setEnabled(state, false)
   assert.equal(state.button.getAttribute('aria-pressed'), 'false')
   assert.equal(scroller.getAttribute('aria-hidden'), null)
+})
+
+test('YouTube message actions: only the message menu propagates, links keep their default navigation', () => {
+  const { api, Element, message, document } = boot()
+  const { line, body, author } = message('@alice', 'hello')
+  const menu = line.appendChild(new Element('div'))
+  menu.id = 'menu'
+  const button = menu.appendChild(new Element('button'))
+  const icon = button.appendChild(new Element('svg'))
+  const link = body.appendChild(new Element('a'))
+  const unrelated = new Element('button')
+  assert.equal(document.listeners.get('click'), api.guardMessageMenu)
+  for (const [target, expected] of [[body, true], [author, true], [link, true], [icon, false], [button, false], [unrelated, false]]) {
+    let stopped = false
+    let prevented = false
+    api.guardMessageMenu({ target, stopPropagation() { stopped = true }, preventDefault() { prevented = true } })
+    assert.equal(stopped, expected)
+    assert.equal(prevented, false)
+  }
 })
 
 test('YouTube target status: clear after three seconds and cancel the previous notice timer', () => {

@@ -14,7 +14,13 @@
   #live-chat-header-context-menu { color: #efeff1; border: 0; background: transparent; font-size: 20px; }
   #chat-contents, #item-scroller { height: 430px; }
   #item-scroller { overflow: auto; }
-  yt-live-chat-text-message-renderer { display: block; padding: 8px 12px; }
+  yt-live-chat-text-message-renderer { display: flex; position: relative; padding: 8px 12px; }
+  yt-live-chat-text-message-renderer > #content { flex: 1; min-width: 0; }
+  yt-live-chat-text-message-renderer > #menu { position: absolute; right: 12px; top: 4px; }
+  #menu button { width: 32px; height: 32px; padding: 0; border: 0; border-radius: 50%; color: inherit; background: transparent; }
+  #menu button:hover { background: #ffffff33; }
+  #message-action-menu { position: fixed; top: 160px; right: 8px; z-index: 20; padding: 8px; border-radius: 12px; background: #282828; }
+  #message-action-menu button { display: block; padding: 10px 20px; color: inherit; background: none; border: 0; }
   #timestamp { color: #adadb8; font-size: 10px; margin-right: 5px; }
   #message img { width: 24px; vertical-align: middle; }
   [author-type="owner"] #author-name { color: #ffd600; }
@@ -54,6 +60,7 @@
     <tp-yt-paper-item role="menuitem">▣ <span>フィードバックを送信</span></tp-yt-paper-item>
   </ytd-menu-popup-renderer>
 </tp-yt-iron-dropdown>
+<div id="message-action-menu" role="menu" hidden><button role="menuitem">報告</button><button role="menuitem">ブロック</button></div>
 </yt-live-chat-app>
 <div class="fixture-tools">
   <button id="add-mod">新增 Moderator 訊息</button>
@@ -73,25 +80,39 @@
     const line = document.createElement('yt-live-chat-text-message-renderer')
     line.id = `message-${++serial}`
     line.setAttribute('author-type', role)
+    line.setAttribute('whole-message-clickable', 'fixture')
+    line.addEventListener('click', () => { document.getElementById('message-action-menu').hidden = false })
     line.data = { authorExternalChannelId: user === '@alice'
       ? 'UCAbCdEfGhIjKlMnOpQrStUv' : user === '@mod_account'
       ? 'UCZYXWVUTSRQPONMLKJIHGFE' : 'UC1234567890123456789012' }
-    const time = line.appendChild(document.createElement('span'))
+    const content = line.appendChild(document.createElement('div'))
+    content.id = 'content'
+    const time = content.appendChild(document.createElement('span'))
     time.id = 'timestamp'
     time.textContent = `14:${String(serial).padStart(2, '0')}`
-    const chip = line.appendChild(document.createElement('yt-live-chat-author-chip'))
+    const chip = content.appendChild(document.createElement('yt-live-chat-author-chip'))
     const author = chip.appendChild(document.createElement('span'))
     author.id = 'author-name'
     author.textContent = user
-    line.appendChild(document.createTextNode(': '))
-    const message = line.appendChild(document.createElement('span'))
+    content.appendChild(document.createTextNode(': '))
+    const message = content.appendChild(document.createElement('span'))
     message.id = 'message'
-    message.textContent = `測試訊息 ${serial} `
+    message.textContent = user === '@ordinary'
+      ? '這是一則用來驗證換行的長訊息，文字應該避開右側選單按鈕。 LongMessageWithoutSpacesForChatLayoutTest '.repeat(2)
+      : `測試訊息 ${serial} `
     const emoji = message.appendChild(document.createElement('img'))
     emoji.className = 'emoji'
     emoji.alt = '😀'
     emoji.setAttribute('shared-tooltip-text', ':grinning:')
     emoji.src = 'https://fonts.gstatic.com/s/e/notoemoji/15.1/1f600/72.png'
+    const link = message.appendChild(document.createElement('a'))
+    link.href = '#fixture-link'
+    link.textContent = '連結'
+    const menu = line.appendChild(document.createElement('div'))
+    menu.id = 'menu'
+    const button = menu.appendChild(document.createElement('button'))
+    button.setAttribute('aria-label', '訊息選項')
+    button.textContent = '⋮'
     items().appendChild(line)
   }
   addMessage('@fixture_channel', 'owner')

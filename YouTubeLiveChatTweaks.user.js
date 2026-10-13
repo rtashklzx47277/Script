@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.3.3
+// @version     0.3.4
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @description Adds live chat include/exclude account filters and session history, hides the chat mode menu, improves emoji copying and auto-follow, and adds reload.
@@ -126,16 +126,50 @@
       flex: none !important;
     }
 
+    #yt-chat-tweaks-filter-button:hover,
     #yt-chat-tweaks-reload-button:hover {
-      background-color: rgba(255, 255, 255, 0.1) !important;
+      background-color: var(--yt-live-chat-button-default-background-color, #8882) !important;
     }
 
+    #yt-chat-tweaks-filter-button:active,
     #yt-chat-tweaks-reload-button:active {
-      background-color: rgba(255, 255, 255, 0.2) !important;
+      background-color: var(--yt-live-chat-button-default-background-color, #8884) !important;
     }
 
     #yt-chat-tweaks-reload-button svg {
       fill: currentColor !important;
+    }
+  `)
+
+  const NATIVE_MESSAGE_SELECTOR = [
+    'yt-live-chat-text-message-renderer', 'yt-live-chat-paid-message-renderer',
+    'yt-live-chat-paid-sticker-renderer', 'yt-live-chat-membership-item-renderer',
+    'yt-live-chat-sponsorships-gift-purchase-announcement-renderer',
+  ].join(', ')
+
+  const guardMessageMenu = event => {
+    const target = event.target?.nodeType === 1 ? event.target : event.target?.parentElement
+    const line = target?.closest(NATIVE_MESSAGE_SELECTOR)
+    if (!line || line.querySelector('#menu')?.contains(target)) return
+    // Stop YouTube's whole-message menu handler, keeping selection and the
+    // browser's default link navigation available (no preventDefault).
+    event.stopPropagation()
+  }
+  document.addEventListener('click', guardMessageMenu, true)
+
+  addStyle(`
+    #item-scroller #items > :is(${NATIVE_MESSAGE_SELECTOR}):has(> #menu) {
+      position: relative !important;
+      padding-inline-end: calc(var(--chat-inline-padding) + 32px) !important;
+    }
+    #item-scroller #items > :is(${NATIVE_MESSAGE_SELECTOR}) > #content {
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+    #item-scroller #items > :is(${NATIVE_MESSAGE_SELECTOR}) > #menu {
+      inset-inline-end: var(--chat-inline-padding) !important;
+      top: var(--chat-message-padding-block) !important;
+      width: 32px;
     }
   `)
 
@@ -447,11 +481,7 @@
   (() => {
     'use strict'
 
-    const MESSAGE_SELECTOR = [
-      'yt-live-chat-text-message-renderer', 'yt-live-chat-paid-message-renderer',
-      'yt-live-chat-paid-sticker-renderer', 'yt-live-chat-membership-item-renderer',
-      'yt-live-chat-sponsorships-gift-purchase-announcement-renderer',
-    ].join(', ')
+    const MESSAGE_SELECTOR = NATIVE_MESSAGE_SELECTOR
     const STORAGE_KEY = 'youtube-live-chat-tweaks-settings-v1'
     const MAX_MESSAGES = 2000
     const MAX_CHANNELS = 5
@@ -1000,8 +1030,6 @@
     const style = document.createElement('style')
     style.textContent = `
       #yt-chat-tweaks-filter-button { display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box; flex: 0 0 40px; width: 40px; height: 40px; min-width: 40px; min-height: 40px; margin: 0; padding: 8px; border: 0; border-radius: 50%; color: inherit; background: transparent; cursor: pointer; }
-      #yt-chat-tweaks-filter-button:hover, #yt-chat-tweaks-reload-button:hover { background: var(--yt-live-chat-button-default-background-color, #8882); }
-      #yt-chat-tweaks-filter-button:active, #yt-chat-tweaks-reload-button:active { background: var(--yt-live-chat-button-default-background-color, #8884); }
       #yt-chat-tweaks-filter-button[aria-pressed="true"] { color: var(--yt-live-chat-link-text-color, #3ea6ff) !important; }
       /* The native popup caches small limits after header buttons are injected.
          Keep it inside the iframe and let its content use the available space. */
@@ -1025,6 +1053,9 @@
       .ytcf-users label { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; white-space: nowrap; }
       .ytcf-users input { display: block; box-sizing: border-box; flex: 1; min-width: 0; width: 100%; padding: 5px 8px; border: 1px solid var(--yt-live-chat-message-input-border-color, #8886); border-radius: 4px; color: inherit; background: var(--yt-live-chat-background-color, #fff); font-size: 12px; }
       .ytcf-panel button { padding: 6px 10px; border: 0; border-radius: 4px; color: var(--yt-live-chat-button-default-text-color, #065fd4); background: var(--yt-live-chat-action-panel-background-color, #8882); cursor: pointer; }
+      .ytcf-users input, .ytcf-users button[type="submit"] { box-sizing: border-box; height: 30px; font: inherit; }
+      .ytcf-users button[type="submit"] { flex-shrink: 0; padding: 0 12px; border: 1px solid var(--yt-live-chat-message-input-border-color, #8886); border-radius: 15px; color: var(--yt-live-chat-primary-text-color, #0f0f0f); background: var(--yt-live-chat-button-default-background-color, #8882); font-weight: 600; }
+      .ytcf-users button[type="submit"]:hover { filter: brightness(1.2); }
       .ytcf-empty { padding: 16px 12px; color: var(--yt-live-chat-secondary-text-color, #606060); }
       .ytcf-list { flex: 1; min-height: 0; overflow: auto; overflow-anchor: none; padding: 6px 0; }
       .ytcf-message { padding: 5px 10px; overflow-wrap: anywhere; line-height: 1.6; }
