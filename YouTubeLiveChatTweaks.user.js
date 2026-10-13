@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name        YouTube Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.2.3
+// @version     0.3.0
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
-// @description Tweaks YouTube live chat layout, emoji copying, adds a reload button, and keeps latest chat followed unless you scroll up manually.
+// @description Adds live chat include/exclude account filters and session history, hides the chat mode menu, improves emoji copying and auto-follow, and adds reload.
 // @author      Derek
 // @match       *://www.youtube.com/live_chat*
 // @match       *://www.youtube.com/live_chat_replay*
@@ -336,7 +336,7 @@
   }
 
   const handleScrollKeys = (event) => {
-    if (isEditableTarget(event.target)) return
+    if (isEditableTarget(event.target) || event.target?.closest?.('.ytcf-panel')) return
 
     if (SCROLL_UP_KEYS.has(event.key)) {
       followLatest = false
@@ -441,6 +441,568 @@
       bindAutoFollow()
     }, 1000)
   }
+
+  // YouTube chat filtering.
+  (() => {
+    'use strict'
+
+    const MESSAGE_SELECTOR = [
+      'yt-live-chat-text-message-renderer', 'yt-live-chat-paid-message-renderer',
+      'yt-live-chat-paid-sticker-renderer', 'yt-live-chat-membership-item-renderer',
+      'yt-live-chat-sponsorships-gift-purchase-announcement-renderer',
+    ].join(', ')
+    const STORAGE_KEY = 'youtube-live-chat-tweaks-settings-v1'
+    const MAX_MESSAGES = 2000
+    const MAX_CHANNELS = 5
+    const STREAMS_KEY = 'youtube-live-chat-tweaks-streams-v1'
+    const histories = new Map()
+    let unresolvedScope = ''
+    let mounted = null
+    let refreshTimer = 0
+
+    const $ = (selector, root = document) => root.querySelector(selector)
+    const $$ = (selector, root = document) => [...root.querySelectorAll(selector)]
+    const normalizeAccount = (input) => {
+      const raw = String(input || '').trim().normalize('NFC').replace(/^@/, '').toLowerCase()
+      return /^[^\s@/\\,，;；?#&]{1,100}$/u.test(raw) ? `@${raw}` : ''
+    }
+    const normalizeUsers = value => [...new Set(String(value || '').split(/[\s,，;；]+/)
+      .map(normalizeAccount).filter(Boolean))]
+
+    const readStorageObject = key => {
+      try {
+        const value = JSON.parse(localStorage.getItem(key) || '{}')
+        return value && typeof value === 'object' && !Array.isArray(value)
+          ? Object.assign(Object.create(null), value) : Object.create(null)
+      } catch (_) { return Object.create(null) }
+    }
+    const readSavedSettings = () => readStorageObject(STORAGE_KEY)
+
+    const scopeFromOwner = root => {
+      const link = root?.querySelector('#owner a[href^="/@"], #owner a[href^="/channel/"]')
+      if (!link) return ''
+      try {
+        const path = new URL(link.getAttribute('href'), location.origin).pathname
+        if (path.startsWith('/@')) {
+          const account = normalizeAccount(decodeURIComponent(path.slice(1).split('/')[0]))
+          return account ? `channel:${account}` : ''
+        }
+        const id = path.match(/^\/channel\/(UC[\w-]+)$/)?.[1]
+        return id ? `channel:${id}` : ''
+      } catch (_) { return '' }
+    }
+
+    const getChannel = () => {
+      let parentDocument
+      let parentUrl
+      try {
+        if (window.parent && window.parent !== window) {
+          parentDocument = window.parent.document
+          parentUrl = new URL(window.parent.location.href)
+        }
+      } catch (_) {}
+      const url = new URL(location.href)
+      let referrer
+      try { referrer = new URL(document.referrer) } catch (_) {}
+      const video = url.searchParams.get('v') || parentUrl?.searchParams.get('v') || referrer?.searchParams.get('v') || ''
+      const token = url.searchParams.get('continuation') || url.pathname
+      let hash = 2166136261
+      for (const char of token) hash = Math.imul(hash ^ char.charCodeAt(0), 16777619) >>> 0
+      unresolvedScope = video ? `video:${video}` : `chat:${hash.toString(16)}`
+      const aliases = readStorageObject(STREAMS_KEY)
+      const owner = scopeFromOwner(parentDocument) || scopeFromOwner(document)
+      if (owner) {
+        if (video && aliases[video] !== owner) {
+          aliases[video] = owner
+          const keys = Object.keys(aliases)
+          for (const key of keys.slice(0, Math.max(0, keys.length - 200))) delete aliases[key]
+          try { localStorage.setItem(STREAMS_KEY, JSON.stringify(aliases)) } catch (_) {}
+        }
+        return owner
+      }
+      if (video && typeof aliases[video] === 'string') return aliases[video]
+      const ownerName = $('[author-type="owner"] #author-name')?.textContent
+      const ownerAccount = normalizeAccount(ownerName)
+      if (ownerAccount) return `channel:${ownerAccount}`
+      // Standalone chats without a readable owner/referrer keep their own settings.
+      return unresolvedScope
+    }
+
+    const loadSettings = (channel) => {
+      try {
+        const saved = readSavedSettings()[channel]
+        return {
+          moderators: saved?.moderators !== false,
+          broadcaster: saved?.broadcaster !== false,
+          users: normalizeUsers(Array.isArray(saved?.users) ? saved.users.join(' ') : ''),
+          excludedUsers: normalizeUsers(Array.isArray(saved?.excludedUsers) ? saved.excludedUsers.join(' ') : ''),
+        }
+      } catch (_) {
+        return { moderators: true, broadcaster: true, users: [], excludedUsers: [] }
+      }
+    }
+
+    const saveSettings = (history) => {
+      try {
+        const saved = readSavedSettings()
+        saved[history.channel] = history.settings
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(saved))
+        return true
+      } catch (_) { return false }
+    }
+
+    const changeTargetUsers = (settings, input, remove = false, exclude = false) => {
+      const user = normalizeAccount(input)
+      if (!user) return null
+      const key = exclude ? 'excludedUsers' : 'users'
+      const users = settings[key] || []
+      return { ...settings, [key]: remove
+        ? users.filter(name => name !== user)
+        : [...new Set([...users, user])] }
+    }
+
+    const getHistory = (channel) => {
+      let history = histories.get(channel)
+      const pending = channel.startsWith('channel:') ? histories.get(unresolvedScope) : null
+      if (pending && !history) {
+        history = pending
+        histories.delete(unresolvedScope)
+        const saved = readSavedSettings()
+        history.channel = channel
+        if (saved[channel]) history.settings = loadSettings(channel)
+        else if (saved[unresolvedScope]) saveSettings(history)
+      } else if (pending && pending !== history) {
+        for (const record of pending.messages) {
+          if (record.id && history.ids.has(record.id)) continue
+          history.messages.push(record)
+          if (record.id) history.ids.set(record.id, record)
+        }
+        while (history.messages.length > MAX_MESSAGES) {
+          const oldest = history.messages.shift()
+          if (oldest.id) history.ids.delete(oldest.id)
+          oldest.view.remove()
+        }
+        histories.delete(unresolvedScope)
+      }
+      if (!history) {
+        history = {
+          channel, settings: loadSettings(channel), messages: [], nodes: new WeakMap(), ids: new Map(),
+          enabled: false, follow: true,
+        }
+      }
+      histories.delete(channel)
+      histories.set(channel, history)
+      if (histories.size > MAX_CHANNELS) histories.delete(histories.keys().next().value)
+      return history
+    }
+
+    const readMessage = (line) => {
+      const author = $('#author-name', line)
+      const user = normalizeAccount(author?.textContent)
+      let message = $('#message, #sticker, #header-subtext', line)
+      if (!author || !user || !message) return null
+      const chip = author.closest('yt-live-chat-author-chip') || line
+      const badges = $$('yt-live-chat-author-badge-renderer', chip)
+      const type = line.getAttribute('author-type') || author.getAttribute('type') || ''
+      const classes = (author.getAttribute('class') || '').split(/\s+/)
+      const moderator = type === 'moderator' || classes.includes('moderator') || badges.some(b => b.getAttribute('type') === 'moderator')
+      const broadcaster = type === 'owner' || classes.includes('owner') || badges.some(b => b.getAttribute('type') === 'owner')
+      const deleted = line.hasAttribute('is-deleted')
+      if (deleted) {
+        message = document.createElement('span')
+        message.textContent = $('#deleted-state', line)?.textContent?.trim() || '訊息已刪除'
+      }
+      return { user, moderator, broadcaster, author, body: message, badges, deleted,
+        id: line.id || '', time: $('#timestamp', line)?.textContent?.trim() || '' }
+    }
+
+    const matchesFilter = (message, settings) =>
+      !(settings.excludedUsers || []).includes(message.user) && (
+        (settings.moderators && message.moderator) ||
+        (settings.broadcaster && message.broadcaster) || settings.users.includes(message.user)
+      )
+
+    const clonePresentation = source => {
+      const copy = source.cloneNode(true)
+      for (const node of [copy, ...$$('*', copy)]) {
+        for (const attr of [...node.attributes]) {
+          if (['id', 'tabindex', 'role'].includes(attr.name) || attr.name.startsWith('on') || attr.name.startsWith('data-')) node.removeAttribute(attr.name)
+        }
+      }
+      for (const link of $$('a', copy)) {
+        link.target = '_blank'
+        link.rel = 'noopener noreferrer'
+      }
+      return copy
+    }
+
+    const makeMessageView = message => {
+      const row = document.createElement('div')
+      row.className = 'ytcf-message'
+      const time = document.createElement('time')
+      time.className = 'ytcf-time'
+      time.textContent = message.time || new Date().toLocaleTimeString('zh-TW', { hour12: false })
+      row.appendChild(time)
+      for (const badge of message.badges) {
+        const copy = document.createElement('span')
+        copy.className = 'ytcf-badge'
+        copy.title = badge.getAttribute('aria-label') || badge.getAttribute('shared-tooltip-text') || ''
+        const visual = $('img, svg', badge)
+        if (visual) copy.appendChild(clonePresentation(visual))
+        else copy.textContent = badge.getAttribute('type') === 'moderator' ? '🔧' : badge.getAttribute('type') === 'owner' ? '👑' : '★'
+        row.appendChild(copy)
+      }
+      const author = document.createElement('strong')
+      author.textContent = message.author.textContent
+      author.style.color = getComputedStyle(message.author).color
+      author.title = message.user
+      row.appendChild(author)
+      row.appendChild(document.createTextNode(': '))
+      const content = clonePresentation(message.body)
+      content.className = `${content.className || ''} ytcf-body`
+      row.appendChild(content)
+      return row
+    }
+
+    const captureLine = (line, history) => {
+      const message = readMessage(line)
+      if (!message || (!message.moderator && !message.broadcaster && !history.settings.users.includes(message.user))) return false
+      const fingerprint = `${message.user}\n${message.deleted}\n${message.body.innerHTML}`
+      const previous = message.id ? history.ids.get(message.id) : history.nodes.get(line)
+      if (previous?.fingerprint === fingerprint) {
+        history.nodes.set(line, previous)
+        return false
+      }
+      const view = makeMessageView(message)
+      let record
+      if (previous && history.messages.includes(previous)) {
+        view.firstChild.textContent = previous.view.firstChild.textContent
+        previous.view.replaceWith(view)
+        record = Object.assign(previous, { user: message.user, moderator: message.moderator,
+          broadcaster: message.broadcaster, view, fingerprint })
+      } else {
+        record = { id: message.id, user: message.user, moderator: message.moderator,
+          broadcaster: message.broadcaster, view, fingerprint }
+        history.messages.push(record)
+        if (history.messages.length > MAX_MESSAGES) {
+          const oldest = history.messages.shift()
+          if (oldest.id && history.ids.get(oldest.id) === oldest) history.ids.delete(oldest.id)
+          oldest.view.remove()
+        }
+      }
+      history.nodes.set(line, record)
+      if (message.id) history.ids.set(message.id, record)
+      return true
+    }
+
+    const captureTree = (node, history) => {
+      if (node.nodeType !== 1) return false
+      let changed = false
+      if (node.matches(MESSAGE_SELECTOR)) changed = captureLine(node, history)
+      for (const line of $$(MESSAGE_SELECTOR, node)) changed = captureLine(line, history) || changed
+      return changed
+    }
+
+    const renderMessages = (state, rebuild = false) => {
+      const { history, list, empty, count, latest } = state
+      if (rebuild) list.replaceChildren()
+      let visible = 0
+      for (const record of history.messages) {
+        const show = matchesFilter(record, history.settings)
+        record.view.hidden = !show
+        if (show) visible++
+        if (record.view.parentElement !== list) list.appendChild(record.view)
+      }
+      empty.hidden = visible > 0
+      count.textContent = `${visible} 則`
+      if (history.follow) list.scrollTop = list.scrollHeight
+      latest.hidden = history.follow
+    }
+
+    const setNativeChatAccessible = (state, enabled) => {
+      // Keep the native viewport laid out and visible under the overlay so
+      // YouTube can keep fetching/virtualizing messages while filtering.
+      state.scroller.inert = enabled || state.sourceInert
+      if (enabled) state.scroller.setAttribute('aria-hidden', 'true')
+      else if (state.sourceAriaHidden === null) state.scroller.removeAttribute('aria-hidden')
+      else state.scroller.setAttribute('aria-hidden', state.sourceAriaHidden)
+    }
+
+    const setEnabled = (state, enabled) => {
+      state.history.enabled = enabled
+      state.host.classList.toggle('ytcf-active', enabled)
+      setNativeChatAccessible(state, enabled)
+      if (enabled) {
+        // The overlay manages its own reader position; keep the underlying
+        // chat at the live edge so incoming target messages keep arriving.
+        followLatest = true
+        keepFollowingLatest()
+      }
+      state.panel.hidden = !enabled
+      state.button.setAttribute('aria-pressed', String(enabled))
+      state.button.title = enabled ? '顯示一般聊天室' : '只看 Broadcaster、Moderator 與指定用戶'
+      if (enabled) renderMessages(state)
+    }
+
+    const renderTargets = (state) => {
+      const { panel, history } = state
+      const exclude = state.targetMode === 'exclude'
+      const targets = exclude ? history.settings.excludedUsers || [] : history.settings.users
+      const includeButton = $('.ytcf-mode-include', panel)
+      const excludeButton = $('.ytcf-mode-exclude', panel)
+      includeButton.textContent = `＋ 包含（${history.settings.users.length}）`
+      excludeButton.textContent = `－ 排除（${(history.settings.excludedUsers || []).length}）`
+      includeButton.setAttribute('aria-pressed', String(!exclude))
+      excludeButton.setAttribute('aria-pressed', String(exclude))
+      const query = $('[name="search-users"]', panel).value.trim().toLowerCase().replace(/^@/, '')
+      const users = targets.filter(user => user.includes(query)).sort()
+      const list = $('.ytcf-target-list', panel)
+      list.setAttribute('aria-label', exclude ? '排除帳號清單' : '包含帳號清單')
+      list.replaceChildren()
+      for (const user of users) {
+        const row = document.createElement('li')
+        const name = document.createElement('span')
+        name.textContent = user
+        const remove = document.createElement('button')
+        remove.type = 'button'
+        remove.textContent = '移除'
+        remove.setAttribute('aria-label', `移除 ${user}`)
+        remove.addEventListener('click', () => {
+          state.updateSettings(changeTargetUsers(history.settings, user, true, exclude),
+            exclude ? `已取消排除 ${user}。` : `已移除 ${user}。`)
+        })
+        row.appendChild(name)
+        row.appendChild(remove)
+        list.appendChild(row)
+      }
+      const empty = $('.ytcf-target-empty', panel)
+      empty.hidden = users.length > 0
+      empty.textContent = targets.length ? '找不到符合搜尋的帳號。'
+        : exclude ? '尚未排除任何帳號。' : '尚未新增目標帳號。'
+    }
+
+    const createPanel = (state) => {
+      const panel = document.createElement('section')
+      panel.className = 'ytcf-panel'
+      panel.setAttribute('aria-label', '指定用戶聊天室')
+      panel.innerHTML = `
+        <div class="ytcf-toolbar">
+          <div class="ytcf-options">
+            <label><input type="checkbox" name="broadcaster"> Broadcaster</label>
+            <label><input type="checkbox" name="moderators"> Moderator</label>
+            <button type="button" class="ytcf-target-summary" aria-label="目標用戶" aria-controls="ytcf-target-settings" aria-expanded="false">目標用戶</button>
+            <span class="ytcf-count"></span>
+          </div>
+          <div class="ytcf-targets" id="ytcf-target-settings" hidden>
+            <div class="ytcf-target-modes" role="group" aria-label="帳號篩選方式">
+              <button type="button" class="ytcf-mode-include" aria-label="＋ 包含">＋ 包含</button>
+              <button type="button" class="ytcf-mode-exclude" aria-label="－ 排除">－ 排除</button>
+            </div>
+            <form class="ytcf-users">
+              <label>新增帳號<input type="text" name="users" placeholder="@帳號" autocomplete="off" spellcheck="false"></label>
+              <button type="submit">新增</button>
+            </form>
+            <label class="ytcf-target-search">搜尋帳號<input type="search" name="search-users" placeholder="搜尋目標帳號" autocomplete="off"></label>
+            <ul class="ytcf-target-list" aria-label="目標用戶清單"></ul>
+            <p class="ytcf-target-empty"></p>
+            <p class="ytcf-target-status" role="status" aria-live="polite"></p>
+          </div>
+        </div>
+        <p class="ytcf-empty">尚無符合條件的發言。新增目標帳號後開始收集。</p>
+        <div class="ytcf-list" role="log" aria-label="篩選後的聊天訊息" aria-live="off"></div>
+        <button class="ytcf-latest" type="button" hidden>回到最新訊息</button>`
+      state.panel = panel
+      state.list = $('.ytcf-list', panel)
+      state.empty = $('.ytcf-empty', panel)
+      state.count = $('.ytcf-count', panel)
+      state.latest = $('.ytcf-latest', panel)
+      const moderators = $('[name="moderators"]', panel)
+      const broadcaster = $('[name="broadcaster"]', panel)
+      const users = $('[name="users"]', panel)
+      moderators.checked = state.history.settings.moderators
+      broadcaster.checked = state.history.settings.broadcaster
+      const status = $('.ytcf-target-status', panel)
+      state.targetMode = 'include'
+      state.updateSettings = (settings, message = '') => {
+        state.history.settings = settings
+        const saved = saveSettings(state.history)
+        status.textContent = saved ? message : '此瀏覽器無法儲存設定；設定僅保留至本次頁面結束。'
+        renderTargets(state)
+        captureTree(state.scroller, state.history)
+        renderMessages(state, true)
+      }
+      const applyRoles = () => state.updateSettings({ ...state.history.settings,
+        moderators: moderators.checked, broadcaster: broadcaster.checked })
+      moderators.addEventListener('change', applyRoles)
+      broadcaster.addEventListener('change', applyRoles)
+      $('.ytcf-users', panel).addEventListener('submit', event => {
+        event.preventDefault()
+        const exclude = state.targetMode === 'exclude'
+        const key = exclude ? 'excludedUsers' : 'users'
+        const nextSettings = changeTargetUsers(state.history.settings, users.value, false, exclude)
+        if (!nextSettings) {
+          status.textContent = '請輸入一個 @帳號。'
+          return
+        }
+        const added = nextSettings[key].length - (state.history.settings[key] || []).length
+        state.updateSettings(nextSettings, added
+          ? exclude ? '已排除帳號。' : '已新增帳號。'
+          : '此帳號已在名單中。')
+        users.value = ''
+      })
+      const setTargetMode = mode => {
+        state.targetMode = mode
+        status.textContent = ''
+        renderTargets(state)
+      }
+      $('.ytcf-mode-include', panel).addEventListener('click', () => setTargetMode('include'))
+      $('.ytcf-mode-exclude', panel).addEventListener('click', () => setTargetMode('exclude'))
+      $('[name="search-users"]', panel).addEventListener('input', () => renderTargets(state))
+      const targetSettings = $('.ytcf-targets', panel)
+      const targetButton = $('.ytcf-target-summary', panel)
+      const setTargetsOpen = open => {
+        targetSettings.hidden = !open
+        targetButton.setAttribute('aria-expanded', String(open))
+      }
+      targetButton.addEventListener('click', () => setTargetsOpen(targetSettings.hidden))
+      setTargetsOpen(state.history.settings.users.length === 0)
+      renderTargets(state)
+      state.list.addEventListener('scroll', () => {
+        state.history.follow = state.list.scrollHeight - state.list.scrollTop - state.list.clientHeight < 40
+        state.latest.hidden = state.history.follow
+      }, { passive: true })
+      state.latest.addEventListener('click', () => {
+        state.history.follow = true
+        renderMessages(state)
+      })
+      state.host.appendChild(panel)
+    }
+
+    const unmount = () => {
+      if (!mounted) return
+      mounted.observer.disconnect()
+      mounted.button.remove()
+      mounted.panel.remove()
+      setNativeChatAccessible(mounted, false)
+      mounted.host.classList.remove('ytcf-host', 'ytcf-active')
+      mounted.scroller.classList.remove('ytcf-source')
+      mounted = null
+    }
+
+    const refresh = () => {
+      const channel = getChannel()
+      const header = $('yt-live-chat-header-renderer')
+      const scroller = $('#item-scroller')
+      const sourceItems = scroller && $('#items', scroller)
+      const menu = $('#live-chat-header-context-menu')
+      if (mounted && (mounted.history.channel !== channel || mounted.header !== header ||
+        mounted.scroller !== scroller || mounted.items !== sourceItems || !mounted.button.isConnected || !mounted.panel.isConnected)) unmount()
+      if (mounted || !header || !menu || !sourceItems || !scroller?.parentElement) return
+      const state = { history: getHistory(channel), header, scroller, items: sourceItems,
+        host: scroller.parentElement, sourceInert: scroller.inert,
+        sourceAriaHidden: scroller.getAttribute('aria-hidden') }
+      state.host.classList.add('ytcf-host')
+      scroller.classList.add('ytcf-source')
+      const button = document.createElement('button')
+      button.id = 'yt-chat-tweaks-filter-button'
+      button.type = 'button'
+      button.setAttribute('aria-label', '切換指定用戶聊天室')
+      button.innerHTML = `<svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M3 4h18v2l-7 8v6l-4 2v-8L3 6V4zm3 2 6 7 6-7H6z"/></svg>`
+      state.button = button
+      menu.insertAdjacentElement('beforebegin', button)
+      const nativeButton = $('#close-button button')
+      button.style.color = nativeButton ? getComputedStyle(nativeButton).color : 'var(--yt-live-chat-primary-text-color, #fff)'
+      button.addEventListener('click', () => setEnabled(state, !state.history.enabled))
+      createPanel(state)
+      captureTree(sourceItems, state.history)
+      state.observer = new MutationObserver(mutations => {
+        if (getChannel() !== state.history.channel) { scheduleRefresh(); return }
+        let changed = false
+        for (const mutation of mutations) {
+          for (const node of mutation.addedNodes) changed = captureTree(node, state.history) || changed
+          const element = mutation.target.nodeType === 1 ? mutation.target : mutation.target.parentElement
+          const line = element?.closest(MESSAGE_SELECTOR)
+          if (line) changed = captureLine(line, state.history) || changed
+        }
+        if (changed && state.history.enabled) renderMessages(state)
+      })
+      state.observer.observe(sourceItems, { childList: true, subtree: true, characterData: true,
+        attributes: true, attributeFilter: ['author-type', 'type', 'is-deleted'] })
+      mounted = state
+      setEnabled(state, state.history.enabled)
+    }
+
+    const scheduleRefresh = () => {
+      if (refreshTimer) return
+      refreshTimer = setTimeout(() => { refreshTimer = 0; refresh() }, 250)
+    }
+
+    const syncSettings = () => {
+      for (const history of histories.values()) history.settings = loadSettings(history.channel)
+      if (!mounted) return
+      const { panel, history } = mounted
+      $('[name="moderators"]', panel).checked = history.settings.moderators
+      $('[name="broadcaster"]', panel).checked = history.settings.broadcaster
+      renderTargets(mounted)
+      captureTree(mounted.scroller, history)
+      if (history.enabled) renderMessages(mounted, true)
+    }
+
+    const style = document.createElement('style')
+    style.textContent = `
+      #yt-chat-tweaks-filter-button { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 40px; width: 40px; height: 40px; padding: 8px; border: 0; border-radius: 4px; color: inherit; background: transparent; cursor: pointer; }
+      #yt-chat-tweaks-filter-button:hover { background: var(--color-background-button-text-hover, #ffffff22); }
+      #yt-chat-tweaks-filter-button[aria-pressed="true"] { color: var(--color-text-link, #bf94ff) !important; background: var(--color-background-button-text-hover, #ffffff22); }
+      #yt-chat-tweaks-filter-button:focus-visible, .ytcf-panel button:focus-visible { outline: 2px solid #9147ff; outline-offset: -2px; }
+      .ytcf-host { position: relative; }
+      .ytcf-active > .ytcf-source { pointer-events: none; isolation: isolate; }
+      .ytcf-panel { position: absolute; inset: 0; z-index: 5; display: flex; flex-direction: column; min-height: 0; color: var(--yt-live-chat-primary-text-color, #efeff1); background: var(--yt-live-chat-background-color, #18181b); font-size: 13px; }
+      .ytcf-panel [hidden], .ytcf-panel[hidden] { display: none !important; }
+      .ytcf-toolbar { flex: 0 0 auto; padding: 10px; border-bottom: 1px solid var(--color-border-base, #ffffff22); }
+      .ytcf-options { display: flex; align-items: center; gap: 6px; flex-wrap: nowrap; font-size: 12px; }
+      .ytcf-options label { display: flex; align-items: center; gap: 3px; flex-shrink: 0; white-space: nowrap; }
+      .ytcf-options input { width: 13px; height: 13px; margin: 0; accent-color: #9147ff; }
+      .ytcf-count { margin-left: auto; flex-shrink: 0; white-space: nowrap; color: var(--color-text-alt-2, #adadb8); }
+      .ytcf-users { display: flex; align-items: center; gap: 6px; }
+      .ytcf-users label { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; white-space: nowrap; }
+      .ytcf-users input { display: block; box-sizing: border-box; flex: 1; min-width: 0; width: 100%; padding: 5px 8px; border: 1px solid var(--color-border-base, #ffffff44); border-radius: 4px; color: inherit; background: var(--color-background-input, #ffffff11); font-size: 12px; }
+      .ytcf-panel button { padding: 6px 10px; border: 0; border-radius: 4px; color: #fff; background: #9147ff; cursor: pointer; }
+      .ytcf-empty { padding: 16px 12px; color: var(--color-text-alt-2, #adadb8); }
+      .ytcf-list { flex: 1; min-height: 0; overflow: auto; overflow-anchor: none; padding: 6px 0; }
+      .ytcf-message { padding: 5px 10px; overflow-wrap: anywhere; line-height: 1.6; }
+      .ytcf-message:hover { background: var(--color-background-button-text-hover, #ffffff11); }
+      .ytcf-time { margin-right: 6px; color: var(--color-text-alt-2, #adadb8); font-size: 10px; }
+      .ytcf-message > img { width: 18px; height: 18px; margin-right: 3px; vertical-align: middle; }
+      .ytcf-message .emoji { max-height: 24px; vertical-align: middle; }
+      .ytcf-badge { display: inline-flex; align-items: center; margin-right: 3px; vertical-align: middle; pointer-events: none; }
+      .ytcf-badge img, .ytcf-badge svg { width: 18px; height: 18px; }
+      yt-live-chat-header-renderer #view-selector { display: none !important; }
+      .ytcf-latest { position: absolute; bottom: 8px; align-self: center; }
+      .ytcf-toolbar { max-height: 65%; overflow-y: auto; }
+      .ytcf-panel .ytcf-target-summary { display: inline-flex; align-items: center; gap: 3px; flex-shrink: 0; padding: 0; color: var(--color-text-link, #bf94ff); background: transparent; white-space: nowrap; font: inherit; cursor: pointer; }
+      .ytcf-target-summary::before { content: '▸'; }
+      .ytcf-target-summary[aria-expanded="true"]::before { content: '▾'; }
+      .ytcf-targets { margin-top: 8px; }
+      .ytcf-target-modes { display: flex; gap: 6px; margin-bottom: 8px; }
+      .ytcf-target-modes button { flex: 1; padding: 4px 8px; color: inherit; background: var(--color-background-button-text-hover, #ffffff22); font-size: 12px; }
+      .ytcf-target-modes button[aria-pressed="true"] { color: #fff; background: #9147ff; }
+      .ytcf-target-search { display: flex; align-items: center; gap: 6px; margin-top: 8px; white-space: nowrap; }
+      .ytcf-target-search input { display: block; box-sizing: border-box; flex: 1; min-width: 0; width: 100%; padding: 5px 8px; border: 1px solid var(--color-border-base, #ffffff44); border-radius: 4px; color: inherit; background: var(--color-background-input, #ffffff11); font-size: 12px; }
+      .ytcf-target-list { list-style: none; padding: 0; margin: 6px 0 0; max-height: 110px; overflow-y: auto; }
+      .ytcf-target-list li { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 3px 0; }
+      .ytcf-target-list span { overflow-wrap: anywhere; }
+      .ytcf-target-list button { flex-shrink: 0; padding: 3px 8px; background: var(--color-background-button-text-hover, #ffffff22); color: inherit; font-size: 11px; }
+      .ytcf-target-empty, .ytcf-target-status { margin: 6px 0 0; font-size: 11px; color: var(--color-text-alt-2, #adadb8); }
+      .ytcf-target-status:empty { display: none; }
+    `
+    ;(document.head || document.documentElement).appendChild(style)
+    window.addEventListener('storage', event => {
+      if (event.key === STORAGE_KEY || event.key === null) syncSettings()
+    })
+    setInterval(refresh, 1000)
+    refresh()
+    // End YouTube chat filtering.
+  })()
 
   copyEmoji()
   setupAutoFollow()
