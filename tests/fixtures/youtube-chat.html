@@ -137,9 +137,9 @@
     event.detail.returnValue.push({ ajaxPromise: new Promise((resolve, reject) => setTimeout(() => {
       if (fixtureParams.has('failMenu')) { reject(new Error('fixture menu failed')); return }
       resolve({ data: { liveChatItemContextMenuSupportedRenderers: { menuRenderer: {
-        items: fixtureParams.has('signedOut') ? [] : ['報告', 'ブロック'].map((text, index) => ({ menuServiceItemRenderer: {
-          text: { simpleText: text }, serviceEndpoint: { fixtureAction: { params, action: index ? 'block' : 'report' } },
-        } })),
+        items: fixtureParams.has('signedOut') ? [] : ['報告', 'ブロック'].map((text, index) => index
+          ? { menuNavigationItemRenderer: { text: { simpleText: text }, navigationEndpoint: { fixtureAction: { params, action: 'block' } } } }
+          : { menuServiceItemRenderer: { text: { simpleText: text }, serviceEndpoint: { fixtureAction: { params, action: 'report' } } } }),
       } } } })
     }, +fixtureParams.get('menuDelay') || 350)) })
   })
@@ -149,24 +149,27 @@
       const list = this.appendChild(document.createElement('tp-yt-paper-listbox'))
       list.id = 'items'
       for (const item of value.items || []) {
-        const model = item.menuServiceItemRenderer
-        const renderer = list.appendChild(document.createElement('ytd-menu-service-item-renderer'))
+        const navigation = !!item.menuNavigationItemRenderer
+        const model = item.menuNavigationItemRenderer || item.menuServiceItemRenderer
+        const endpoint = model.navigationEndpoint || model.serviceEndpoint
+        const renderer = list.appendChild(document.createElement(navigation ? 'ytd-menu-navigation-item-renderer' : 'ytd-menu-service-item-renderer'))
         renderer.className = 'item'
-        const button = renderer.appendChild(document.createElement('tp-yt-paper-item'))
+        const host = navigation ? renderer.appendChild(document.createElement('a')) : renderer
+        const button = host.appendChild(document.createElement('tp-yt-paper-item'))
         button.setAttribute('role', 'menuitem')
         button.tabIndex = 0
         const icon = button.appendChild(document.createElement('yt-icon'))
-        icon.textContent = model.serviceEndpoint.fixtureAction.action === 'block' ? '⊘' : '⚑'
-        const wrapper = button.appendChild(document.createElement('div'))
-        wrapper.className = 'text-wrapper'
+        icon.textContent = endpoint.fixtureAction.action === 'block' ? '⊘' : '⚑'
+        const wrapper = navigation ? button : button.appendChild(document.createElement('div'))
+        if (!navigation) wrapper.className = 'text-wrapper'
         const title = wrapper.appendChild(document.createElement('yt-formatted-string'))
-        title.className = 'title'
+        if (!navigation) title.className = 'title'
         // Native variants reserve space at both the renderer and title levels.
         title.style.marginRight = '24px'
         title.textContent = model.text.simpleText
         renderer.style.minWidth = '160px'
         const activate = () => {
-          const { params, action } = model.serviceEndpoint.fixtureAction
+          const { params, action } = endpoint.fixtureAction
           this.dispatchEvent(new CustomEvent('yt-action', { bubbles: true, composed: true,
             detail: { actionName: 'yt-close-popup-action', args: ['ytd-menu-popup-renderer'] } }))
           const dialog = document.createElement('div')

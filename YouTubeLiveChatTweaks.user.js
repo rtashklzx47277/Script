@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.4.3
+// @version     0.4.4
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @description Adds author profile cards, live chat account filters and session history, hides the chat mode menu, improves emoji copying and auto-follow, and adds reload.
@@ -1503,13 +1503,16 @@
       .ytuc-card .ytuc-retry { margin-top: 8px; padding: 4px 10px; border: 0; border-radius: 16px; color: inherit; background: var(--yt-live-chat-button-default-background-color, #8882); cursor: pointer; font: inherit; }
       .ytuc-card button:focus-visible, .ytuc-card a:focus-visible { outline: 2px solid var(--yt-live-chat-link-text-color, #3ea6ff); outline-offset: 2px; }
       .ytuc-menu { display: block; min-width: 0 !important; max-width: 100% !important; max-height: none !important; margin: 0 !important; padding: 0 !important; box-shadow: none !important; color: inherit; background: transparent !important; }
-      .ytuc-menu :is(ytd-menu-service-item-renderer, ytd-menu-navigation-item-renderer, tp-yt-paper-item, yt-formatted-string, yt-icon) { color: inherit !important; }
+      .ytuc-menu :is(ytd-menu-service-item-renderer, ytd-menu-navigation-item-renderer, a.yt-simple-endpoint, tp-yt-paper-item, yt-formatted-string, yt-icon) { color: inherit !important; }
       .ytuc-menu > #items { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 !important; color: inherit; background: transparent !important; }
       .ytuc-menu tp-yt-paper-item { display: inline-flex !important; box-sizing: border-box; width: max-content !important; max-width: 100%; min-height: 32px !important; min-width: 0 !important; gap: 0 !important; padding: 4px 12px !important; border-radius: 18px; background: var(--yt-live-chat-button-default-background-color, #8882); white-space: normal; cursor: pointer; }
       .ytuc-menu tp-yt-paper-item:hover { filter: brightness(1.15); }
       .ytuc-menu yt-icon { width: 20px; height: 20px; margin-right: 6px !important; }
       .ytuc-menu .text-wrapper { flex: 0 1 auto !important; min-width: 0; width: max-content !important; }
       .ytuc-menu .text-wrapper > .title { flex: none !important; width: auto !important; min-width: 0 !important; margin: 0 !important; }
+      /* Block uses a navigation item with a direct label, unlike Report's
+         service item and text-wrapper. Both native labels reserve 24px. */
+      .ytuc-menu ytd-menu-navigation-item-renderer tp-yt-paper-item > yt-formatted-string { flex: 0 1 auto !important; width: auto !important; min-width: 0 !important; margin: 0 !important; }
       .ytuc-menu .item { flex: 0 1 auto !important; width: max-content !important; min-width: 0 !important; max-width: 100%; }
       .ytcf-time { margin-right: 6px; color: var(--yt-live-chat-secondary-text-color, #606060); font-size: 10px; }
       .ytcf-message > img { width: 18px; height: 18px; margin-right: 3px; vertical-align: middle; }

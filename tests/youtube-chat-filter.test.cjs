@@ -714,10 +714,15 @@ test('YouTube user cards: exactly match chat bounds without an inset or width ca
   assert.equal(state.card.style.width, '700.25px')
 })
 
-test('YouTube card actions: preserve the native menu language rather than hardcoding Japanese or Chinese', async () => {
+test('YouTube card actions: preserve native report service and block navigation items in every language', async () => {
   for (const labels of [['檢舉', '封鎖'], ['報告', 'ブロック'], ['Report', 'Block']]) {
+    const blockEndpoint = { showLiveChatDialogEndpoint: { fixture: 'native-block' } }
+    const items = [
+      { menuServiceItemRenderer: { text: { simpleText: labels[0] }, serviceEndpoint: { fixtureReport: true } } },
+      { menuNavigationItemRenderer: { text: { simpleText: labels[1] }, navigationEndpoint: blockEndpoint } },
+    ]
     const env = boot({ nativeMenu: () => Promise.resolve({ data: { liveChatItemContextMenuSupportedRenderers: { menuRenderer: {
-      items: labels.map(text => ({ menuServiceItemRenderer: { text: { simpleText: text } } })),
+      items,
     } } } }) })
     const app = env.document.body.appendChild(new env.Element('yt-live-chat-app'))
     const opener = app.appendChild(new env.Element('button'))
@@ -725,7 +730,8 @@ test('YouTube card actions: preserve the native menu language rather than hardco
       contextMenuEndpoint: { liveChatItemContextMenuEndpoint: { params: 'message' } } }, opener)
     await settle()
     const menu = state.menuHost.querySelector('ytd-menu-popup-renderer')
-    assert.equal(menu.data.items.map(item => item.menuServiceItemRenderer.text.simpleText).join('|'), labels.join('|'))
+    assert.equal(menu.data.items.map(item => (item.menuServiceItemRenderer || item.menuNavigationItemRenderer).text.simpleText).join('|'), labels.join('|'))
+    assert.equal(menu.data.items[1].menuNavigationItemRenderer.navigationEndpoint, blockEndpoint)
   }
 })
 
