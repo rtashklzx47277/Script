@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.4.4
+// @version     0.4.5
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @description Adds author profile cards, live chat account filters and session history, hides the chat mode menu, improves emoji copying and auto-follow, and adds reload.
@@ -730,6 +730,17 @@
     const retiredCards = new Set()
     let activeCard = null
 
+    const originalImageUrl = value => {
+      try {
+        const url = new URL(value)
+        if (url.protocol === 'https:' && (url.hostname === 'ggpht.com' || url.hostname.endsWith('.ggpht.com'))) {
+          url.pathname = url.pathname.replace(/=s\d+(?:-[^/]*)?$/, '')
+          return url.href
+        }
+      } catch (_) {}
+      return value
+    }
+
     const authorSnapshot = message => ({
       user: message.user, channelId: message.channelId, name: message.author.textContent,
       color: getComputedStyle(message.author).color,
@@ -908,7 +919,7 @@
       const card = element('section', { class: 'ytuc-card', role: 'dialog', tabindex: '-1',
         'aria-label': '用戶資訊', 'aria-modal': 'false' })
       const photo = element('div', { class: 'ytuc-photo', 'aria-hidden': 'true' })
-      if (/^https:\/\//.test(author.avatar)) photo.appendChild(element('img', { src: author.avatar, alt: '' }))
+      if (/^https:\/\//.test(author.avatar)) photo.appendChild(element('img', { src: originalImageUrl(author.avatar), alt: '' }))
       else photo.textContent = (author.name || author.user || '?').replace(/^@/, '').slice(0,1).toUpperCase()
       const title = element('a', { class: 'ytuc-name', target: '_blank', rel: 'noopener noreferrer' }, [author.name || author.user])
       if (author.color) title.style.color = author.color
@@ -931,7 +942,16 @@
           const item = element('span', { class: 'ytuc-badge', role: 'listitem', 'aria-label': badge.label, title: badge.label })
           if (badge.color) item.style.color = badge.color
           if (badge.visual) {
-            item.appendChild(clonePresentation(badge.visual))
+            const visual = clonePresentation(badge.visual)
+            if (visual.tagName?.toLowerCase() === 'img') {
+              const src = visual.getAttribute('src') || ''
+              const original = originalImageUrl(src)
+              if (original !== src) {
+                visual.setAttribute('src', original)
+                visual.removeAttribute('srcset')
+              }
+            }
+            item.appendChild(visual)
           } else item.textContent = badge.label
           badgeList.appendChild(item)
         }
