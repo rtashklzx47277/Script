@@ -51,10 +51,21 @@ function boot(file, mode = 'worker', pathname = '/') {
       return false
     }
     querySelector(selector) {
-      return this.queries.get(selector) || this.children.find(child => `#${child.id}` === selector) || null
+      return this.queries.get(selector) || this.children.find(child => `#${child.id}` === selector ||
+        selector.startsWith('.') && (child.className || '').split(' ').includes(selector.slice(1))) || null
     }
     querySelectorAll(selector) { return this.queries.get(selector) || [] }
     getBoundingClientRect() { return this.rect }
+    addEventListener(name, callback) {
+      this.events ||= new Map()
+      const callbacks = this.events.get(name) || []
+      callbacks.push(callback)
+      this.events.set(name, callbacks)
+    }
+    dispatchEvent(event) {
+      for (const callback of this.events?.get(event.type) || []) callback(event)
+      return true
+    }
   }
 
   class Frame {
@@ -79,7 +90,7 @@ function boot(file, mode = 'worker', pathname = '/') {
       eventListeners.push({ name, callback, options })
     },
     querySelector(selector) { return selectors.get(selector) || null },
-    querySelectorAll() { return [] },
+    querySelectorAll(selector) { return selectors.get(selector) || [] },
     createElement(tag) {
       if (tag === 'canvas') {
         return {
@@ -102,19 +113,21 @@ function boot(file, mode = 'worker', pathname = '/') {
     console,
     document,
     window: { JSON: { parse: JSON.parse } },
-    location: { pathname },
+    location: { pathname, href: `https://${isYouTube ? 'www.youtube.com' : 'www.twitch.tv'}${pathname}`,
+      origin: `https://${isYouTube ? 'www.youtube.com' : 'www.twitch.tv'}` },
     HTMLElement: ElementMock,
     Node: NodeMock,
     HTMLInputElement: class {},
     Blob: BlobMock,
-    URL: {
-      createObjectURL(blob) {
+    URL: class extends URL {
+      static createObjectURL(blob) {
         const url = `blob:${++nextId}`
         workerSources.set(url, blob.parts.join(''))
         return url
-      },
-      revokeObjectURL(url) { workerSources.delete(url) },
+      }
+      static revokeObjectURL(url) { workerSources.delete(url) }
     },
+    Event: class { constructor(type, options) { this.type = type; Object.assign(this, options) } },
     VideoFrame: Frame,
     OffscreenCanvas: class {},
     setTimeout(fn, delay) {
@@ -197,6 +210,7 @@ function boot(file, mode = 'worker', pathname = '/') {
       };`
     : `globalThis.__test = {
         encode: encodeScreenshot, jobs: () => screenshotWorkerJobs.size,
+        changeVolume, ensurePlayerState, refresh,
       };`
   const source = fs.readFileSync(path.join(__dirname, '..', file), 'utf8')
   assert.match(source, /\}\)\(\)\s*$/)
@@ -294,6 +308,7 @@ function wheel(target, overrides = {}) {
     target, deltaY: 1, clientX: 200, clientY: 100,
     preventDefault() { this.prevented = true },
     stopImmediatePropagation() { this.stopped = true },
+    stopPropagation() { this.stopped = true },
     ...overrides,
   }
 }
@@ -605,4 +620,160 @@ test('YouTube: navigation cancels the late element poll', async () => {
   env.api.cancelWait()
   assert.equal(await ready, false)
   assert.equal(env.timers.size, 0)
+})
+
+
+function addTwitchPlayer(env, volume = 0.5, currentSrc = 'blob:https://www.twitch.tv/stream') {
+  const player = new env.Element()
+  const video = new env.Element('video')
+  Object.assign(video, { volume, currentSrc, muted: false, isConnected: true })
+  video.closest = () => player
+  player.appendChild(video)
+  player.queries.set('video', video)
+  const players = env.selectors.get('[data-a-target="video-player"]') || []
+  env.selectors.set('[data-a-target="video-player"]', [...players, player])
+  env.api.ensurePlayerState(player)
+  return { player, video }
+}
+
+function mockTwitchAudio(env, failConnect = false) {
+  const contexts = [], sources = [], gains = []
+  env.window.AudioContext = class {
+    constructor() { this.destination = {}; this.state = 'suspended'; this.resumes = 0; contexts.push(this) }
+    resume() { this.state = 'running'; this.resumes++; return Promise.resolve() }
+    createGain() {
+      const gain = { gain: { value: 1 }, disconnected: 0, connect() {}, disconnect() { this.disconnected++ } }
+      gains.push(gain)
+      return gain
+    }
+    createMediaElementSource(video) {
+      assert.ok(!sources.some(source => source.video === video), 'Never create a second source for the same video')
+      const source = { video, disconnected: 0, targets: [],
+        connect(target) {
+          if (failConnect && target.gain) throw Error('fixture gain connection failure')
+          this.targets.push(target)
+        }, disconnect() { this.disconnected++ } }
+      sources.push(source)
+      return source
+    }
+  }
+  return { contexts, sources, gains }
+}
+
+test('Twitch volume: activate on adjustment and match YouTube gain at 25, 50 and 100', () => {
+  const env = boot(scripts[1])
+  const audio = mockTwitchAudio(env)
+  const { player, video } = addTwitchPlayer(env, 0.3)
+  assert.equal(audio.contexts.length, 0)
+  video.muted = true
+  env.api.changeVolume(wheel(video), player)
+  assert.equal(video.volume, 0.25)
+  assert.equal(video.muted, false)
+  assert.equal(audio.gains[0].gain.value, 0.5)
+  assert.equal(video.volume * audio.gains[0].gain.value, 0.125)
+  video.volume = 0.5
+  video.dispatchEvent({ type: 'volumechange' })
+  assert.equal(audio.gains[0].gain.value, 1)
+  video.volume = 1
+  video.dispatchEvent({ type: 'volumechange' })
+  assert.equal(audio.gains[0].gain.value, 2)
+  env.api.ensurePlayerState(player)
+  assert.equal(audio.sources.length, 1)
+  assert.equal(audio.contexts[0].resumes, 1)
+  assert.equal(video.events.get('volumechange').length, 1)
+})
+
+test('Twitch volume: channel/video replacement stays enabled and revisiting reuses the existing source', () => {
+  const env = boot(scripts[1])
+  const audio = mockTwitchAudio(env)
+  const { player, video } = addTwitchPlayer(env)
+  env.api.changeVolume(wheel(video), player)
+  video.currentSrc = 'blob:https://www.twitch.tv/next-channel'
+  video.volume = 0.75
+  video.dispatchEvent({ type: 'loadedmetadata' })
+  assert.equal(audio.sources.length, 1)
+  assert.equal(audio.gains[0].gain.value, 1.5)
+  const next = new env.Element('video')
+  Object.assign(next, { volume: 0.5, currentSrc: 'blob:https://www.twitch.tv/next-video', isConnected: true })
+  next.closest = () => player
+  video.isConnected = false
+  player.queries.set('video', next)
+  env.api.refresh()
+  assert.equal(audio.sources.length, 2)
+  assert.equal(audio.gains[1].gain.value, 1)
+  assert.ok(audio.sources[0].disconnected > 0)
+  video.volume = 0.2
+  video.dispatchEvent({ type: 'volumechange' })
+  assert.equal(audio.gains[0].gain.value, 1.5, 'Detached videos must not reactivate old audio graphs')
+  video.isConnected = true
+  next.isConnected = false
+  player.queries.set('video', video)
+  env.api.refresh()
+  assert.equal(audio.sources.length, 2)
+  assert.equal(audio.gains[0].gain.value, 0.4)
+  assert.ok(audio.sources[1].disconnected > 0)
+})
+
+test('Twitch volume: multiple players share one context while keeping independent gains', () => {
+  const env = boot(scripts[1])
+  const audio = mockTwitchAudio(env)
+  const first = addTwitchPlayer(env)
+  env.api.changeVolume(wheel(first.video), first.player)
+  const second = addTwitchPlayer(env, 0.25)
+  assert.equal(audio.contexts.length, 1)
+  assert.equal(audio.sources.length, 2)
+  assert.equal(audio.gains[1].gain.value, 0.5)
+  first.video.volume = 1
+  first.video.dispatchEvent({ type: 'volumechange' })
+  assert.equal(audio.gains[0].gain.value, 2)
+  assert.equal(audio.gains[1].gain.value, 0.5)
+  env.selectors.set('[data-a-target="video-player"]', [])
+  env.api.refresh()
+  assert.ok(audio.sources.every(source => source.disconnected > 0))
+})
+
+test('Twitch volume: native controls enable gain and media readiness finishes deferred setup', () => {
+  const env = boot(scripts[1])
+  const audio = mockTwitchAudio(env)
+  const { player, video } = addTwitchPlayer(env, 0.5, '')
+  const slider = { closest: () => ({}) }
+  player.dispatchEvent({ type: 'pointerdown', target: slider })
+  assert.equal(audio.sources.length, 0)
+  video.currentSrc = 'blob:https://www.twitch.tv/ready'
+  video.dispatchEvent({ type: 'loadedmetadata' })
+  assert.equal(audio.sources.length, 1)
+  assert.equal(audio.gains[0].gain.value, 1)
+  video.volume = 0.7
+  video.dispatchEvent({ type: 'volumechange' })
+  assert.equal(audio.gains[0].gain.value, 1.4)
+})
+
+test('Twitch volume: unsupported, remote and protected media retain native volume controls', () => {
+  for (const kind of ['unsupported', 'remote', 'protected']) {
+    const env = boot(scripts[1])
+    const audio = kind === 'unsupported' ? null : mockTwitchAudio(env)
+    const { player, video } = addTwitchPlayer(env, 0.3,
+      kind === 'remote' ? 'https://cdn.example/video.mp4' : 'blob:https://www.twitch.tv/safe')
+    if (kind === 'protected') video.mediaKeys = {}
+    env.api.changeVolume(wheel(video, { ctrlKey: true }), player)
+    assert.equal(video.volume, 0.3)
+    env.api.changeVolume(wheel(video), player)
+    assert.equal(video.volume, 0.25)
+    if (audio) assert.equal(audio.sources.length, 0)
+  }
+})
+
+test('Twitch volume: failed gain connections fall back to native output without wrapping the video twice', () => {
+  const env = boot(scripts[1])
+  const audio = mockTwitchAudio(env, true)
+  const { player, video } = addTwitchPlayer(env, 0.3)
+  env.api.changeVolume(wheel(video), player)
+  assert.equal(video.volume, 0.25)
+  assert.equal(audio.sources[0].targets[0], audio.contexts[0].destination)
+  env.api.changeVolume(wheel(video), player)
+  assert.equal(video.volume, 0.2)
+  assert.equal(audio.sources.length, 1)
+  env.selectors.set('[data-a-target="video-player"]', [])
+  env.api.refresh()
+  assert.ok(audio.sources[0].disconnected > 0)
 })

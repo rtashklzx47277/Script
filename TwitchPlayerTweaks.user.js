@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        Twitch Player Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.2.3
+// @version     0.3.0
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchPlayerTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchPlayerTweaks.user.js
 // @description Hide clips and interactive extensions, add screenshot button, support wheel volume, and use native-like tooltips.
@@ -28,11 +28,17 @@
     'input[data-a-target="player-volume-slider"]'
 
   const VOLUME_STEP = 0.05
+  const MAX_VOLUME_GAIN = 2
   const VOLUME_BAR_DURATION = 3000
   const TOOLTIP_VERTICAL_GAP = 10
   const SCREENSHOT_WORKER_TIMEOUT = 15000
 
   const playerStates = new WeakMap()
+  const volumeSources = new WeakMap()
+  const boundVolumeVideos = new WeakSet()
+  const activeVolumeVideos = new Set()
+  let volumeAudioContext = null
+  let volumeGainEnabled = false
   const screenshotWorkerJobs = new Map()
   let screenshotWorker = null
   let screenshotWorkerAvailable = true
@@ -186,6 +192,12 @@
           passive: false,
         }
       )
+      player.addEventListener('pointerdown', event => {
+        if (event.target?.closest?.(`${VOLUME_SLIDER_SELECTOR}, [data-a-target="player-mute-unmute-button"]`)) {
+          volumeGainEnabled = true
+          ensureVolumeGain($('video', player))
+        }
+      }, { capture: true })
 
       playerStates.set(player, state)
     } else {
@@ -193,7 +205,61 @@
       state.tooltip = getTooltip(player)
     }
 
+    const video = $('video', player)
+    if (video && !boundVolumeVideos.has(video)) {
+      boundVolumeVideos.add(video)
+      const sync = () => {
+        const owner = video.closest(PLAYER_SELECTOR)
+        if (volumeGainEnabled && video.isConnected && owner && $('video', owner) === video) ensureVolumeGain(video)
+      }
+      for (const name of ['volumechange', 'loadedmetadata', 'playing']) video.addEventListener(name, sync)
+    }
+    if (volumeGainEnabled) ensureVolumeGain(video)
     return state
+  }
+
+  const ensureVolumeGain = video => {
+    if (!video || !volumeGainEnabled) return
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext
+    if (!AudioContextClass) return
+    let graph = volumeSources.get(video)
+    let source
+    let gain
+    try {
+      if (!graph) {
+        // Routing a non-CORS remote stream through Web Audio would silence it.
+        // Wait for a known same-origin source (including Twitch's MSE blob).
+        if (!video.currentSrc || video.mediaKeys || new URL(video.currentSrc, location.href).origin !== location.origin) return
+        if (!volumeAudioContext) volumeAudioContext = new AudioContextClass()
+        gain = volumeAudioContext.createGain()
+        gain.connect(volumeAudioContext.destination)
+        source = volumeAudioContext.createMediaElementSource(video)
+        source.connect(gain)
+        graph = { source, gain, connected: true }
+        volumeSources.set(video, graph)
+      } else if (!graph.connected) {
+        graph.gain?.connect(volumeAudioContext.destination)
+        graph.source.connect(graph.gain || volumeAudioContext.destination)
+        graph.connected = true
+      }
+      // Match YouTube: native volume v multiplied by a gain of 2v.
+      if (graph.gain) graph.gain.gain.value = MAX_VOLUME_GAIN * clamp(video.volume, 0, 1)
+      activeVolumeVideos.add(video)
+      if (volumeAudioContext.state === 'suspended') volumeAudioContext.resume().catch(() => {})
+    } catch (_) {
+      // If graph creation fails after taking ownership, reconnect directly so
+      // native playback can continue without trying to wrap this video twice.
+      gain?.disconnect()
+      if (source) {
+        try {
+          source.disconnect()
+          source.connect(volumeAudioContext.destination)
+          volumeSources.set(video, { source, gain: null, connected: true })
+          activeVolumeVideos.add(video)
+          if (volumeAudioContext.state === 'suspended') volumeAudioContext.resume().catch(() => {})
+        } catch (_) {}
+      }
+    }
   }
 
   const showVolumeBar = (player, volume) => {
@@ -233,6 +299,7 @@
 
     event.preventDefault()
     event.stopPropagation()
+    volumeGainEnabled = true
 
     const nextVolume = clamp(
       Number(
@@ -249,6 +316,7 @@
 
     video.volume = nextVolume
     if (nextVolume > 0 && video.muted) video.muted = false
+    ensureVolumeGain(video)
 
     video.dispatchEvent(new Event('volumechange', { bubbles: true }))
     showVolumeBar(player, nextVolume)
@@ -570,9 +638,20 @@
   }
 
   const refresh = () => {
+    const currentVideos = new Set()
     for (const player of $$(PLAYER_SELECTOR)) {
       ensurePlayerState(player)
       ensureScreenshotButtons(player)
+      const video = $('video', player)
+      if (video) currentVideos.add(video)
+    }
+    for (const video of activeVolumeVideos) {
+      if (currentVideos.has(video)) continue
+      const graph = volumeSources.get(video)
+      graph.source.disconnect()
+      graph.gain?.disconnect()
+      graph.connected = false
+      activeVolumeVideos.delete(video)
     }
   }
 
@@ -596,7 +675,7 @@
 
   const observer = new MutationObserver((mutations) => {
     for (const mutation of mutations) {
-      if (mutation.addedNodes.length) {
+      if (mutation.addedNodes.length || mutation.removedNodes?.length) {
         scheduleRefresh()
         return
       }
