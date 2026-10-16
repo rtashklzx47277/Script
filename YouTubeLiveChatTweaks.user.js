@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.5.2
+// @version     0.5.3
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @description Adds author profile cards, live chat account filters and session history, hides the chat mode menu, improves emoji copying and auto-follow, and adds reload.
@@ -110,6 +110,16 @@
       height: 1.4em !important;
       margin: 0 4px 0 0 !important;
       vertical-align: middle !important;
+    }
+
+    /* YouTube gives the inner image fixed width/height attributes (24px).
+       Resize it with the host to avoid an off-center crop inside the circle. */
+    #item-scroller #items > yt-live-chat-text-message-renderer > #author-photo > img {
+      display: block !important;
+      width: 100% !important;
+      height: 100% !important;
+      object-fit: cover !important;
+      object-position: center !important;
     }
 
     #items > ytd-sponsorships-live-chat-gift-redemption-announcement-renderer > #author-photo {

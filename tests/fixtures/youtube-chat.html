@@ -18,8 +18,8 @@
   #item-scroller { overflow: auto; }
   yt-live-chat-text-message-renderer { display: flex; position: relative; padding: 8px 12px; }
   yt-live-chat-text-message-renderer > #content { flex: 1; min-width: 0; }
-  yt-live-chat-text-message-renderer > #author-photo { display: block; flex: none; width: 24px; height: 24px; }
-  #author-photo img { display: block; width: 100%; height: 100%; border-radius: 50%; }
+  yt-live-chat-text-message-renderer > #author-photo { display: block; flex: none; width: 24px; height: 24px; overflow: hidden; border-radius: 50%; }
+  #author-photo img { display: block; border-radius: 50%; }
   yt-live-chat-text-message-renderer > #menu { position: absolute; right: 12px; top: 4px; }
   #menu button { width: 32px; height: 32px; padding: 0; border: 0; border-radius: 50%; color: inherit; background: transparent; }
   #menu button:hover { background: #ffffff33; }
@@ -223,6 +223,9 @@
     photo.id = 'author-photo'
     const avatar = photo.appendChild(document.createElement('img'))
     avatar.alt = ''
+    // YouTube keeps these fixed pixel attributes even when the host is resized.
+    avatar.width = 24
+    avatar.height = 24
     avatar.src = 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><rect width="24" height="24" fill="#5e84f1"/><circle cx="12" cy="9" r="4" fill="white"/><path d="M4 24a8 8 0 0116 0" fill="white"/></svg>')
     line.data.authorPhoto = { thumbnails: [{ url: avatar.src }] }
     const content = line.appendChild(document.createElement('div'))
