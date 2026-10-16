@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.5.3
+// @version     0.5.4
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @description Adds author profile cards, live chat account filters and session history, hides the chat mode menu, improves emoji copying and auto-follow, and adds reload.
@@ -788,15 +788,22 @@
       moderator: 'var(--yt-live-chat-moderator-color, #5e84f1)',
       member: 'var(--yt-live-chat-sponsor-color, #2ba640)',
     }
-    const authorSnapshot = message => {
-      const highlighted = message.author.closest('yt-live-chat-author-chip')?.hasAttribute('is-highlighted')
+    const authorNameColor = message => {
+      if (!message.author.closest('yt-live-chat-author-chip')?.hasAttribute('is-highlighted')) {
+        return getComputedStyle(message.author).color
+      }
+      // Custom cards and filtered rows do not retain the chip's light background.
       const role = message.broadcaster ? 'owner' : message.moderator ? 'moderator'
         : message.badges.some(badge => badge.getAttribute('type') === 'member') ? 'member' : ''
+      return CARD_ROLE_COLORS[role] || ''
+    }
+    const authorSnapshot = message => {
+      const highlighted = message.author.closest('yt-live-chat-author-chip')?.hasAttribute('is-highlighted')
       return {
         user: message.user, channelId: message.channelId, name: message.author.textContent,
         // Highlighted native chips use dark ink on a light background. The card
         // has its own background, so use role colors and its own neutral ink.
-        color: highlighted ? CARD_ROLE_COLORS[role] || '' : getComputedStyle(message.author).color,
+        color: authorNameColor(message),
         avatar: message.avatar, broadcaster: message.broadcaster, moderator: message.moderator,
         badges: message.badges.map(badge => {
           const visual = $('img, svg', badge)
@@ -1141,7 +1148,7 @@
       }
       const author = document.createElement('strong')
       author.textContent = message.author.textContent
-      author.style.color = getComputedStyle(message.author).color
+      author.style.color = authorNameColor(message)
       row.appendChild(author)
       row.appendChild(document.createTextNode(' '))
       for (const badge of message.badges) {

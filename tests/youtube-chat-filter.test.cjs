@@ -634,6 +634,32 @@ test('YouTube author cards: highlighted owner names and verified badges never co
   assert.equal(message.author.style.color, 'rgb(15, 15, 15)')
 })
 
+test('YouTube filtered messages: highlighted names use role colors without copying dark chip ink', () => {
+  for (const [role, expected] of [
+    ['owner', 'var(--yt-live-chat-owner-color, #ffd600)'],
+    ['moderator', 'var(--yt-live-chat-moderator-color, #5e84f1)'],
+    ['', ''],
+  ]) {
+    const env = boot()
+    const history = env.api.getHistory('channel:@host')
+    history.settings.users = ['@example']
+    const message = env.message('@example', 'hello', role, 'highlighted-message')
+    message.chip.setAttribute('is-highlighted', '')
+    message.author.style.color = 'rgb(15, 15, 15)'
+    assert.equal(env.api.captureLine(message.line, history), true)
+    const author = history.messages[0].view.querySelector('strong')
+    assert.equal(author.textContent, '@example')
+    assert.equal(author.style.color, expected)
+    assert.equal(message.author.style.color, 'rgb(15, 15, 15)')
+  }
+  const env = boot()
+  const history = env.api.getHistory('channel:@host')
+  const message = env.message('@mod', 'hello', 'moderator', 'normal-message')
+  message.author.style.color = 'rgb(62, 166, 255)'
+  env.api.captureLine(message.line, history)
+  assert.equal(history.messages[0].view.querySelector('strong').style.color, 'rgb(62, 166, 255)')
+})
+
 test('YouTube filter mode: close existing cards and never open cards or native menu guards over the filter', () => {
   const env = boot()
   const app = env.document.body.appendChild(new env.Element('yt-live-chat-app'))
