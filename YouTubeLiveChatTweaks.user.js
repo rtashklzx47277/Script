@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.5.1
+// @version     0.5.2
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @description Adds author profile cards, live chat account filters and session history, hides the chat mode menu, improves emoji copying and auto-follow, and adds reload.
@@ -1612,6 +1612,7 @@
       .ytcf-badge { display: inline-flex; align-items: center; margin-right: 3px; vertical-align: middle; pointer-events: none; }
       .ytcf-badge img, .ytcf-badge svg { width: 18px; height: 18px; }
       yt-live-chat-header-renderer #view-selector { display: none !important; }
+      yt-live-chat-header-renderer > #viewer-leaderboard-entry-point { order: -1 !important; margin-inline-start: 0 !important; margin-inline-end: auto !important; }
       .ytcf-latest { position: absolute; bottom: 8px; align-self: center; }
       .ytcf-managing > .ytcf-toolbar { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow-y: auto; }
       .ytcf-managing > .ytcf-empty, .ytcf-managing > .ytcf-list, .ytcf-managing > .ytcf-latest { display: none !important; }
