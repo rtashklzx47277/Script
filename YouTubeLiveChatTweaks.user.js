@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.5.4
+// @version     0.6.0
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @description Adds author profile cards, live chat account filters and session history, hides the chat mode menu, improves emoji copying and auto-follow, and adds reload.
@@ -714,19 +714,19 @@
         for (const record of pending.messages) {
           if (record.id && history.ids.has(record.id)) continue
           history.messages.push(record)
+          history.dirty.add(record)
           if (record.id) history.ids.set(record.id, record)
         }
         while (history.messages.length > MAX_MESSAGES) {
           const oldest = history.messages.shift()
-          if (oldest.id) history.ids.delete(oldest.id)
-          oldest.view.remove()
+          forgetRecord(history, oldest)
         }
         histories.delete(unresolvedScope)
       }
       if (!history) {
         history = {
           channel, settings: loadSettings(channel), messages: [], nodes: new WeakMap(), ids: new Map(),
-          enabled: false, follow: true,
+          enabled: false, follow: true, dirty: new Set(), removed: new Set(),
         }
       }
       histories.delete(channel)
@@ -1176,7 +1176,7 @@
       const message = readMessage(line)
       if (!message || (!message.moderator && !message.broadcaster && !includesAuthor(history.settings.users, message) &&
         !includesAuthor(history.settings.globalUsers || [], message))) return false
-      const fingerprint = `${message.user}\n${message.channelId}\n${message.deleted}\n${message.body.innerHTML}`
+      const fingerprint = `${message.user}\n${message.channelId}\n${message.deleted}\n${message.moderator}\n${message.broadcaster}\n${message.author.textContent}\n${message.body.innerHTML}`
       const previous = message.id ? history.ids.get(message.id) : history.nodes.get(line)
       if (previous?.fingerprint === fingerprint) {
         history.nodes.set(line, previous)
@@ -1184,48 +1184,128 @@
       }
       const view = makeMessageView(message)
       let record
-      if (previous && history.messages.includes(previous)) {
+      if (previous?.retained) {
         view.firstChild.textContent = previous.view.firstChild.textContent
-        previous.view.replaceWith(view)
         record = Object.assign(previous, { user: message.user, channelId: message.channelId, moderator: message.moderator,
           broadcaster: message.broadcaster, view, fingerprint })
       } else {
         record = { id: message.id, user: message.user, channelId: message.channelId, moderator: message.moderator,
-          broadcaster: message.broadcaster, view, fingerprint }
+          broadcaster: message.broadcaster, view, fingerprint, retained: true }
         history.messages.push(record)
         if (history.messages.length > MAX_MESSAGES) {
           const oldest = history.messages.shift()
-          if (oldest.id && history.ids.get(oldest.id) === oldest) history.ids.delete(oldest.id)
-          oldest.view.remove()
+          forgetRecord(history, oldest)
         }
       }
       history.nodes.set(line, record)
       if (message.id) history.ids.set(message.id, record)
+      history.dirty.add(record)
       return true
     }
 
+    // Keep these collection/render helpers in sync across both chat scripts.
+    const forgetRecord = (history, record) => {
+      record.retained = false
+      history.dirty.delete(record)
+      if (record.id && history.ids?.get(record.id) === record) history.ids.delete(record.id)
+      if (record.renderedView) history.removed.add(record)
+    }
+
+    const collectMessageLines = (node, lines) => {
+      if (node.nodeType !== 1) return
+      const line = node.closest(MESSAGE_SELECTOR)
+      if (line) lines.add(line)
+      else for (const child of $$(MESSAGE_SELECTOR, node)) lines.add(child)
+    }
+
     const captureTree = (node, history) => {
-      if (node.nodeType !== 1) return false
+      const lines = new Set()
+      collectMessageLines(node, lines)
       let changed = false
-      if (node.matches(MESSAGE_SELECTOR)) changed = captureLine(node, history)
-      for (const line of $$(MESSAGE_SELECTOR, node)) changed = captureLine(line, history) || changed
+      for (const line of lines) changed = captureLine(line, history) || changed
       return changed
     }
 
-    const renderMessages = (state, rebuild = false) => {
-      const { history, list, empty, count, latest } = state
-      if (rebuild) list.replaceChildren()
-      let visible = 0
-      for (const record of history.messages) {
-        const show = matchesFilter(record, history.settings)
-        record.view.hidden = !show
-        if (show) visible++
-        if (record.view.parentElement !== list) list.appendChild(record.view)
+    const captureMutations = (mutations, history) => {
+      const lines = new Set()
+      for (const mutation of mutations) {
+        for (const node of mutation.addedNodes || []) collectMessageLines(node, lines)
+        const target = mutation.target.nodeType === 1 ? mutation.target : mutation.target.parentElement
+        const line = target?.closest(MESSAGE_SELECTOR)
+        if (line) lines.add(line)
       }
-      empty.hidden = visible > 0
-      count.textContent = `${visible} 則`
+      // Snapshot data now, even in background tabs: native renderers may be
+      // pruned/reused before the browser delivers another animation frame.
+      let changed = false
+      for (const line of lines) changed = captureLine(line, history) || changed
+      return changed
+    }
+
+    const cancelMessageRender = state => {
+      if (state.renderFrame) cancelAnimationFrame(state.renderFrame)
+      state.renderFrame = 0
+    }
+
+    const renderMessages = (state, rebuild = false) => {
+      cancelMessageRender(state)
+      const { history, list, empty, count, latest } = state
+      const filterKey = JSON.stringify(history.settings)
+      const full = rebuild || state.renderedHistory !== history || state.filterKey !== filterKey
+      if (full) state.visibleCount = 0
+      for (const record of history.removed) {
+        if (!full && record.renderedView?.parentElement === list && record.visible) state.visibleCount--
+        record.renderedView?.remove()
+        record.renderedView = null
+        record.visible = false
+      }
+      history.removed.clear()
+      for (const record of full ? history.messages : history.dirty) {
+        const oldView = record.renderedView
+        const wasVisible = oldView?.parentElement === list && record.visible
+        const show = matchesFilter(record, history.settings)
+        state.visibleCount += Number(show) - (full ? 0 : Number(!!wasVisible))
+        if (record.view.hidden !== !show) record.view.hidden = !show
+        if (oldView && oldView !== record.view) {
+          if (oldView.parentElement === list) oldView.replaceWith(record.view)
+          else oldView.remove()
+        }
+        if (record.view.parentElement !== list) list.appendChild(record.view)
+        record.renderedView = record.view
+        record.visible = show
+      }
+      history.dirty.clear()
+      state.renderedHistory = history
+      state.filterKey = filterKey
+      empty.hidden = state.visibleCount > 0
+      const countText = `${state.visibleCount} 則`
+      if (count.textContent !== countText) count.textContent = countText
+      // All row writes finish before the one layout read needed for following.
       if (history.follow) list.scrollTop = list.scrollHeight
       latest.hidden = history.follow
+    }
+
+    const scheduleMessageRender = state => {
+      if (!state.history.enabled || document.hidden || state.renderFrame) return
+      state.renderFrame = requestAnimationFrame(() => {
+        state.renderFrame = 0
+        if (mounted === state && state.history.enabled && !document.hidden) renderMessages(state)
+      })
+    }
+
+    const releaseMessageViews = state => {
+      cancelMessageRender(state)
+      for (const record of [...state.history.messages, ...state.history.removed]) {
+        record.renderedView?.remove()
+        record.renderedView = null
+        record.visible = false
+      }
+      state.history.removed.clear()
+    }
+
+    const handleMessageVisibility = () => {
+      if (!mounted) return
+      if (document.hidden) cancelMessageRender(mounted)
+      else if (mounted.history.dirty.size || mounted.history.removed.size) scheduleMessageRender(mounted)
     }
 
     const setNativeChatAccessible = (state, enabled) => {
@@ -1287,6 +1367,7 @@
     }
 
     const setEnabled = (state, enabled) => {
+      cancelMessageRender(state)
       if (enabled) closeAuthorCard()
       state.history.enabled = enabled
       state.host.classList.toggle('ytcf-active', enabled)
@@ -1300,7 +1381,7 @@
       state.panel.hidden = !enabled
       setPanelLayer(state, enabled)
       state.button.setAttribute('aria-pressed', String(enabled))
-      if (enabled) renderMessages(state)
+      if (enabled) renderMessages(state, true)
     }
 
     const showTargetStatus = (state, message = '') => {
@@ -1414,7 +1495,7 @@
         showTargetStatus(state, saved ? message : '此瀏覽器無法儲存設定；設定僅保留至本次頁面結束。')
         renderTargets(state)
         captureTree(state.scroller, state.history)
-        renderMessages(state, true)
+        if (state.history.enabled) renderMessages(state, true)
       }
       const applyRoles = () => state.updateSettings({ ...state.history.settings,
         moderators: moderators.checked, broadcaster: broadcaster.checked })
@@ -1457,7 +1538,7 @@
         panel.classList.toggle('ytcf-managing', open)
       }
       targetButton.addEventListener('click', () => setTargetsOpen(targetSettings.hidden))
-      setTargetsOpen(state.history.settings.users.length === 0 && (state.history.settings.globalUsers || []).length === 0)
+      setTargetsOpen(false)
       renderTargets(state)
       state.list.addEventListener('scroll', () => {
         state.history.follow = state.list.scrollHeight - state.list.scrollTop - state.list.clientHeight < 40
@@ -1472,6 +1553,7 @@
 
     const unmount = () => {
       if (!mounted) return
+      releaseMessageViews(mounted)
       closeAuthorCard()
       setPanelLayer(mounted, false)
       clearTimeout(mounted.statusTimer)
@@ -1522,14 +1604,7 @@
       captureTree(sourceItems, state.history)
       state.observer = new MutationObserver(mutations => {
         if (getChannel() !== state.history.channel) { scheduleRefresh(); return }
-        let changed = false
-        for (const mutation of mutations) {
-          for (const node of mutation.addedNodes) changed = captureTree(node, state.history) || changed
-          const element = mutation.target.nodeType === 1 ? mutation.target : mutation.target.parentElement
-          const line = element?.closest(MESSAGE_SELECTOR)
-          if (line) changed = captureLine(line, state.history) || changed
-        }
-        if (changed && state.history.enabled) renderMessages(state)
+        if (captureMutations(mutations, state.history)) scheduleMessageRender(state)
       })
       state.observer.observe(sourceItems, { childList: true, subtree: true, characterData: true,
         attributes: true, attributeFilter: ['author-type', 'type', 'is-deleted', 'author-external-channel-id'] })
@@ -1658,6 +1733,7 @@
       if (event.key === STORAGE_KEY || event.key === null) syncSettings()
     })
     window.addEventListener('resize', schedulePanelPosition)
+    document.addEventListener('visibilitychange', handleMessageVisibility)
     window.addEventListener('scroll', schedulePanelPosition, true)
     setInterval(refresh, 1000)
     refresh()

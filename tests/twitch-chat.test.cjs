@@ -85,12 +85,15 @@ function boot({ saved, blocked = false } = {}) {
   const storage = new Map(saved ? [['twitch-live-chat-tweaks-settings-v1', saved]] : [])
   const listeners = new Map()
   const timers = new Map()
+  const frames = new Map()
   let nextTimer = 0
   const context = {
     document, location: { pathname: '/sample_channel' }, console,
     window: { addEventListener(name, fn) { listeners.set(name, fn) } },
     setTimeout(fn, delay) { const id = ++nextTimer; timers.set(id, { fn, delay }); return id },
     clearTimeout(id) { timers.delete(id) }, setInterval() {},
+    requestAnimationFrame(fn) { const id = ++nextTimer; frames.set(id, fn); return id },
+    cancelAnimationFrame(id) { frames.delete(id) },
     MutationObserver: class { observe() {} },
     localStorage: {
       getItem(key) { if (blocked) throw Error('Blocked'); return storage.get(key) || null },
@@ -101,7 +104,8 @@ function boot({ saved, blocked = false } = {}) {
   vm.createContext(context)
   vm.runInContext(source.replace(/\}\)\(\)\s*$/, `globalThis.api = {
     normalizeUsers, getChannel, getHistory, loadSettings, saveSettings, readMessage,
-    matchesFilter, captureLine, captureTree, renderMessages, changeTargetUsers, showTargetStatus,
+    matchesFilter, captureLine, captureTree, captureMutations, renderMessages, changeTargetUsers, showTargetStatus,
+    scheduleMessageRender, releaseMessageViews, handleMessageVisibility,
     setPanelLayer, positionFilterPanel,
     setMounted: state => { mounted = state }
   }; })()`), context)
@@ -128,8 +132,11 @@ function boot({ saved, blocked = false } = {}) {
     body.textContent = text
     return { line, body, authorContainer }
   }
-  return { api: context.api, message, Element, storage, timers, location: context.location, listeners }
+  return { api: context.api, message, Element, storage, timers, frames, document, location: context.location, listeners,
+    flushFrames() { const pending = [...frames.values()]; frames.clear(); for (const fn of pending) fn() } }
 }
+
+require('./helpers/chat-update-cases.cjs')({ test, assert, boot, site: 'Twitch' })
 
 test('Twitch target status: replacing a notice restarts its three-second lifetime', () => {
   const { api, Element, timers } = boot()

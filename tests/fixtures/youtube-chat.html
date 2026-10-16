@@ -82,6 +82,8 @@
 <div class="fixture-tools">
   <button id="add-mod">新增 Moderator 訊息</button>
   <button id="add-user">新增 @alice 訊息</button>
+  <button id="burst">批次新增 100 則管理員訊息</button>
+  <button id="edit-last">修改最後一則訊息</button>
   <button id="prune">清空原聊天室 DOM</button>
   <button id="remount">重建聊天室</button>
   <button id="overlay-toggle">顯示遮擋測試物件</button>
@@ -278,6 +280,11 @@
   addMessage('@alice', 'member')
   document.getElementById('add-mod').onclick = () => addMessage('@mod_account', 'moderator')
   document.getElementById('add-user').onclick = () => addMessage('@alice')
+  document.getElementById('burst').onclick = () => { for (let i = 0; i < 100; i++) addMessage('@mod_account', 'moderator') }
+  document.getElementById('edit-last').onclick = () => {
+    const message = items().lastElementChild?.querySelector('#message')
+    if (message) message.textContent = '已更新的訊息'
+  }
   document.getElementById('prune').onclick = () => items().replaceChildren()
   document.getElementById('remount').onclick = () => {
     const renderer = document.querySelector('yt-live-chat-renderer')

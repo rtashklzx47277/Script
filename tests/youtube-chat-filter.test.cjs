@@ -139,6 +139,7 @@ function boot({ saved, blocked = false, trustedTypes = false, parentWindow, fetc
   const storage = new Map(saved ? [['youtube-live-chat-tweaks-settings-v1', saved]] : [])
   const listeners = new Map()
   const timers = new Map()
+  const frames = new Map()
   let nextTimer = 0
   const context = {
     document, location: { pathname: '/live_chat', href: 'https://www.youtube.com/live_chat?v=sample_video', origin: 'https://www.youtube.com' }, console, URL,
@@ -152,7 +153,9 @@ function boot({ saved, blocked = false, trustedTypes = false, parentWindow, fetc
       return fetchProfile ? fetchProfile(url, options) : Promise.resolve({ ok: false })
     },
     setTimeout(fn, delay) { const id = ++nextTimer; timers.set(id, { fn, delay }); return id },
-    clearTimeout(id) { timers.delete(id) }, setInterval() {}, requestAnimationFrame() {},
+    clearTimeout(id) { timers.delete(id) }, setInterval() {},
+    requestAnimationFrame(fn) { const id = ++nextTimer; frames.set(id, fn); return id },
+    cancelAnimationFrame(id) { frames.delete(id) },
     Node: { ELEMENT_NODE: 1 }, HTMLElement: Element, AbortController,
     getComputedStyle: element => ({ color: element.style.color || 'white', display: 'block', visibility: 'visible' }),
     MutationObserver: class { observe() {} disconnect() {} },
@@ -165,7 +168,8 @@ function boot({ saved, blocked = false, trustedTypes = false, parentWindow, fetc
   vm.createContext(context)
   vm.runInContext(source.replace('    // End YouTube chat filtering.', `
     globalThis.api = { normalizeAccount, getChannel, getHistory, loadSettings, saveSettings,
-      readMessage, matchesFilter, captureLine, captureTree, renderMessages, changeTargetUsers,
+      readMessage, matchesFilter, captureLine, captureTree, captureMutations, renderMessages, changeTargetUsers,
+      scheduleMessageRender, releaseMessageViews, handleMessageVisibility,
       refresh, refreshHeader, setEnabled, showTargetStatus, guardMessageMenu, guardMenuDismissal,
       getProfile, showAuthorCard, authorSnapshot, dismissCard, getAuthorCard, setPanelLayer, positionFilterPanel, fitCardText,
       setMounted: state => { mounted = state },
@@ -185,7 +189,8 @@ function boot({ saved, blocked = false, trustedTypes = false, parentWindow, fetc
     body.textContent = text
     return { line, body, author, chip }
   }
-  return { api: context.api, message, Element, storage, timers, listeners, profileCalls, menuCalls,
+  return { api: context.api, message, Element, storage, timers, frames, listeners, profileCalls, menuCalls,
+    flushFrames() { const pending = [...frames.values()]; frames.clear(); for (const fn of pending) fn() },
     location: context.location, document, window: context.window }
 }
 
@@ -218,8 +223,10 @@ test('YouTube filters: mount, toggle and remount when Trusted Types rejects HTML
   assert.ok(state.panel.isConnected)
   assert.ok(state.panel.querySelector('.ytcf-targets').querySelector('[name="broadcaster"]'))
   assert.equal(state.panel.querySelector('.ytcf-options').querySelector('[name="moderators"]'), null)
+  assert.equal(state.panel.querySelector('.ytcf-target-summary').getAttribute('aria-expanded'), 'false')
+  assert.equal(state.panel.className.includes('ytcf-managing'), false)
+  state.panel.querySelector('.ytcf-target-summary').listeners.get('click')()
   assert.equal(state.panel.querySelector('.ytcf-target-summary').getAttribute('aria-expanded'), 'true')
-  assert.ok(state.panel.className.includes('ytcf-managing'))
   state.panel.querySelector('.ytcf-target-summary').listeners.get('click')()
   assert.equal(state.panel.querySelector('.ytcf-target-summary').getAttribute('aria-expanded'), 'false')
   assert.equal(state.panel.className.includes('ytcf-managing'), false)
@@ -242,6 +249,8 @@ test('YouTube filters: mount, toggle and remount when Trusted Types rejects HTML
   assert.equal(state.button.getAttribute('aria-pressed'), 'false')
   assert.equal(scroller.getAttribute('aria-hidden'), null)
 })
+
+require('./helpers/chat-update-cases.cjs')({ test, assert, boot, site: 'YouTube' })
 
 test('YouTube message actions: author clicks are handled while message links keep default navigation', () => {
   const { api, Element, message, document } = boot()

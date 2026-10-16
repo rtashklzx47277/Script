@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        Twitch Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.5.0
+// @version     0.6.0
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
 // @description Filter chat by broadcaster, moderator and include/exclude account lists, with session history and a header toggle.
@@ -102,7 +102,7 @@
     if (!history) {
       history = {
         channel, settings: loadSettings(channel), messages: [], nodes: new WeakMap(),
-        enabled: false, follow: true,
+        enabled: false, follow: true, dirty: new Set(), removed: new Set(),
       }
     }
     histories.delete(channel)
@@ -173,48 +173,130 @@
     // Keep both roles even when unchecked so turning a role back on restores its history.
     if (!message.moderator && !message.broadcaster && !history.settings.users.includes(message.user) &&
       !(history.settings.globalUsers || []).includes(message.user)) return false
-    const fingerprint = `${message.user}\n${message.body.innerHTML}`
+    const fingerprint = `${message.user}\n${message.moderator}\n${message.broadcaster}\n${message.author.textContent}\n${message.body.innerHTML}`
     const previous = history.nodes.get(line)
     if (previous?.fingerprint === fingerprint) return false
     const view = makeMessageView(message)
-    if (previous && previous.user === message.user && history.messages.includes(previous)) {
+    let record
+    if (previous && previous.user === message.user && previous.retained) {
       // Reflect edits/deletion placeholders while the original line is still present.
       view.firstChild.textContent = previous.view.firstChild.textContent
-      previous.view.replaceWith(view)
-      Object.assign(previous, { moderator: message.moderator,
+      record = Object.assign(previous, { moderator: message.moderator,
         broadcaster: message.broadcaster, view, fingerprint })
     } else {
-      const record = { user: message.user, moderator: message.moderator,
-        broadcaster: message.broadcaster, view, fingerprint }
-      history.nodes.set(line, record)
+      record = { user: message.user, moderator: message.moderator,
+        broadcaster: message.broadcaster, view, fingerprint, retained: true }
       history.messages.push(record)
-      if (history.messages.length > MAX_MESSAGES) history.messages.shift().view.remove()
+      if (history.messages.length > MAX_MESSAGES) forgetRecord(history, history.messages.shift())
     }
+    history.nodes.set(line, record)
+    history.dirty.add(record)
     return true
   }
 
+  // Keep these collection/render helpers in sync across both chat scripts.
+  const forgetRecord = (history, record) => {
+    record.retained = false
+    history.dirty.delete(record)
+    if (record.id && history.ids?.get(record.id) === record) history.ids.delete(record.id)
+    if (record.renderedView) history.removed.add(record)
+  }
+
+  const collectMessageLines = (node, lines) => {
+    if (node.nodeType !== 1) return
+    const line = node.closest(MESSAGE_SELECTOR)
+    if (line) lines.add(line)
+    else for (const child of $$(MESSAGE_SELECTOR, node)) lines.add(child)
+  }
+
   const captureTree = (node, history) => {
-    if (node.nodeType !== 1) return false
+    const lines = new Set()
+    collectMessageLines(node, lines)
     let changed = false
-    if (node.matches(MESSAGE_SELECTOR)) changed = captureLine(node, history)
-    for (const line of $$(MESSAGE_SELECTOR, node)) changed = captureLine(line, history) || changed
+    for (const line of lines) changed = captureLine(line, history) || changed
     return changed
   }
 
-  const renderMessages = (state, rebuild = false) => {
-    const { history, list, empty, count, latest } = state
-    if (rebuild) list.replaceChildren()
-    let visible = 0
-    for (const record of history.messages) {
-      const show = matchesFilter(record, history.settings)
-      record.view.hidden = !show
-      if (show) visible++
-      if (record.view.parentElement !== list) list.appendChild(record.view)
+  const captureMutations = (mutations, history) => {
+    const lines = new Set()
+    for (const mutation of mutations) {
+      for (const node of mutation.addedNodes || []) collectMessageLines(node, lines)
+      const target = mutation.target.nodeType === 1 ? mutation.target : mutation.target.parentElement
+      const line = target?.closest(MESSAGE_SELECTOR)
+      if (line) lines.add(line)
     }
-    empty.hidden = visible > 0
-    count.textContent = `${visible} 則`
+    // Snapshot data now, even in background tabs: native renderers may be
+    // pruned/reused before the browser delivers another animation frame.
+    let changed = false
+    for (const line of lines) changed = captureLine(line, history) || changed
+    return changed
+  }
+
+  const cancelMessageRender = state => {
+    if (state.renderFrame) cancelAnimationFrame(state.renderFrame)
+    state.renderFrame = 0
+  }
+
+  const renderMessages = (state, rebuild = false) => {
+    cancelMessageRender(state)
+    const { history, list, empty, count, latest } = state
+    const filterKey = JSON.stringify(history.settings)
+    const full = rebuild || state.renderedHistory !== history || state.filterKey !== filterKey
+    if (full) state.visibleCount = 0
+    for (const record of history.removed) {
+      if (!full && record.renderedView?.parentElement === list && record.visible) state.visibleCount--
+      record.renderedView?.remove()
+      record.renderedView = null
+      record.visible = false
+    }
+    history.removed.clear()
+    for (const record of full ? history.messages : history.dirty) {
+      const oldView = record.renderedView
+      const wasVisible = oldView?.parentElement === list && record.visible
+      const show = matchesFilter(record, history.settings)
+      state.visibleCount += Number(show) - (full ? 0 : Number(!!wasVisible))
+      if (record.view.hidden !== !show) record.view.hidden = !show
+      if (oldView && oldView !== record.view) {
+        if (oldView.parentElement === list) oldView.replaceWith(record.view)
+        else oldView.remove()
+      }
+      if (record.view.parentElement !== list) list.appendChild(record.view)
+      record.renderedView = record.view
+      record.visible = show
+    }
+    history.dirty.clear()
+    state.renderedHistory = history
+    state.filterKey = filterKey
+    empty.hidden = state.visibleCount > 0
+    const countText = `${state.visibleCount} 則`
+    if (count.textContent !== countText) count.textContent = countText
+    // All row writes finish before the one layout read needed for following.
     if (history.follow) list.scrollTop = list.scrollHeight
     latest.hidden = history.follow
+  }
+
+  const scheduleMessageRender = state => {
+    if (!state.history.enabled || document.hidden || state.renderFrame) return
+    state.renderFrame = requestAnimationFrame(() => {
+      state.renderFrame = 0
+      if (mounted === state && state.history.enabled && !document.hidden) renderMessages(state)
+    })
+  }
+
+  const releaseMessageViews = state => {
+    cancelMessageRender(state)
+    for (const record of [...state.history.messages, ...state.history.removed]) {
+      record.renderedView?.remove()
+      record.renderedView = null
+      record.visible = false
+    }
+    state.history.removed.clear()
+  }
+
+  const handleMessageVisibility = () => {
+    if (!mounted) return
+    if (document.hidden) cancelMessageRender(mounted)
+    else if (mounted.history.dirty.size || mounted.history.removed.size) scheduleMessageRender(mounted)
   }
 
   let panelFramePending = false
@@ -257,13 +339,14 @@
   }
 
   const setEnabled = (state, enabled) => {
+    cancelMessageRender(state)
     state.history.enabled = enabled
     state.host.classList.toggle('ttc-active', enabled)
     state.panel.hidden = !enabled
     setPanelLayer(state, enabled)
     state.button.setAttribute('aria-pressed', String(enabled))
     state.button.title = enabled ? '' : '只看 Broadcaster、Moderator 與指定用戶'
-    if (enabled) renderMessages(state)
+    if (enabled) renderMessages(state, true)
   }
 
   const targetSettings = state => state.targetScope === 'global'
@@ -370,7 +453,7 @@
       showTargetStatus(state, saved ? message : '此瀏覽器無法儲存設定；設定僅保留至本次頁面結束。')
       renderTargets(state)
       captureTree(state.scroller, state.history)
-      renderMessages(state, true)
+      if (state.history.enabled) renderMessages(state, true)
     }
     const applyRoles = () => state.updateSettings({ ...state.history.settings,
       moderators: moderators.checked, broadcaster: broadcaster.checked })
@@ -413,7 +496,7 @@
       panel.classList.toggle('ttc-managing', open)
     }
     targetButton.addEventListener('click', () => setTargetsOpen(targetSettings.hidden))
-    setTargetsOpen(state.history.settings.users.length === 0 && (state.history.settings.globalUsers || []).length === 0)
+    setTargetsOpen(false)
     renderTargets(state)
     state.list.addEventListener('scroll', () => {
       state.history.follow = state.list.scrollHeight - state.list.scrollTop - state.list.clientHeight < 40
@@ -428,6 +511,7 @@
 
   const unmount = () => {
     if (!mounted) return
+    releaseMessageViews(mounted)
     setPanelLayer(mounted, false)
     clearTimeout(mounted.statusTimer)
     mounted.observer.disconnect()
@@ -464,14 +548,7 @@
     captureTree(scroller, state.history)
     state.observer = new MutationObserver(mutations => {
       if (getChannel() !== state.history.channel) { scheduleRefresh(); return }
-      let changed = false
-      for (const mutation of mutations) {
-        for (const node of mutation.addedNodes) changed = captureTree(node, state.history) || changed
-        const element = mutation.target.nodeType === 1 ? mutation.target : mutation.target.parentElement
-        const line = element?.closest(MESSAGE_SELECTOR)
-        if (line) changed = captureLine(line, state.history) || changed
-      }
-      if (changed && state.history.enabled) renderMessages(state)
+      if (captureMutations(mutations, state.history)) scheduleMessageRender(state)
     })
     state.observer.observe(scroller, { childList: true, subtree: true, characterData: true,
       attributes: true, attributeFilter: ['data-a-user', 'alt', 'src'] })
@@ -562,6 +639,7 @@
   })
   observer.observe(document.body, { childList: true, subtree: true })
   window.addEventListener('popstate', scheduleRefresh)
+  document.addEventListener('visibilitychange', handleMessageVisibility)
   // Twitch's SPA can reuse the same chat nodes on pushState without adding DOM.
   let lastPath = location.pathname
   setInterval(() => {
