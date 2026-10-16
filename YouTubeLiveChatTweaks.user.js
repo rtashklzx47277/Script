@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.5.0
+// @version     0.5.1
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @description Adds author profile cards, live chat account filters and session history, hides the chat mode menu, improves emoji copying and auto-follow, and adds reload.
@@ -94,7 +94,24 @@
       padding: var(--chat-message-padding-block) var(--chat-inline-padding) !important;
     }
 
-    #items > yt-live-chat-text-message-renderer > #author-photo,
+    /* Use one inline flow so wrapped text can also use the avatar's column. */
+    #item-scroller #items > yt-live-chat-text-message-renderer {
+      display: block !important;
+    }
+
+    #item-scroller #items > yt-live-chat-text-message-renderer > #content {
+      display: inline !important;
+    }
+
+    #item-scroller #items > yt-live-chat-text-message-renderer > #author-photo {
+      display: inline-block !important;
+      float: none !important;
+      width: 1.4em !important;
+      height: 1.4em !important;
+      margin: 0 4px 0 0 !important;
+      vertical-align: middle !important;
+    }
+
     #items > ytd-sponsorships-live-chat-gift-redemption-announcement-renderer > #author-photo {
       margin: 0 var(--chat-inline-padding) 0 0 !important;
     }
@@ -1105,6 +1122,18 @@
       time.className = 'ytcf-time'
       time.textContent = message.time || new Date().toLocaleTimeString('zh-TW', { hour12: false })
       row.appendChild(time)
+      if (message.avatar) {
+        const avatar = document.createElement('img')
+        avatar.className = 'ytcf-avatar'
+        avatar.src = message.avatar
+        avatar.alt = ''
+        row.appendChild(avatar)
+      }
+      const author = document.createElement('strong')
+      author.textContent = message.author.textContent
+      author.style.color = getComputedStyle(message.author).color
+      row.appendChild(author)
+      row.appendChild(document.createTextNode(' '))
       for (const badge of message.badges) {
         const copy = document.createElement('span')
         copy.className = 'ytcf-badge'
@@ -1114,11 +1143,6 @@
         else copy.textContent = badge.getAttribute('type') === 'moderator' ? '🔧' : badge.getAttribute('type') === 'owner' ? '👑' : '★'
         row.appendChild(copy)
       }
-      const author = document.createElement('strong')
-      author.textContent = message.author.textContent
-      author.style.color = getComputedStyle(message.author).color
-      row.appendChild(author)
-      row.appendChild(document.createTextNode(': '))
       const content = clonePresentation(message.body)
       content.className = `${content.className || ''} ytcf-body`
       row.appendChild(content)
@@ -1582,7 +1606,8 @@
       .ytuc-menu ytd-menu-navigation-item-renderer tp-yt-paper-item > yt-formatted-string { flex: 0 1 auto !important; width: auto !important; min-width: 0 !important; margin: 0 !important; }
       .ytuc-menu .item { flex: 0 1 auto !important; width: max-content !important; min-width: 0 !important; max-width: 100%; }
       .ytcf-time { margin-right: 6px; color: var(--yt-live-chat-secondary-text-color, #606060); font-size: 10px; }
-      .ytcf-message > img { width: 18px; height: 18px; margin-right: 3px; vertical-align: middle; }
+      .ytcf-avatar { display: inline-block; width: 1.4em; height: 1.4em; margin-right: 4px; border-radius: 50%; vertical-align: middle; }
+      .ytcf-body { display: inline !important; }
       .ytcf-message .emoji { max-height: 24px; vertical-align: middle; }
       .ytcf-badge { display: inline-flex; align-items: center; margin-right: 3px; vertical-align: middle; pointer-events: none; }
       .ytcf-badge img, .ytcf-badge svg { width: 18px; height: 18px; }

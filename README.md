@@ -44,6 +44,8 @@ javascript:(()=>{const m=/(^|\.)(youtube\.com|youtu\.be)$/.test(location.hostnam
 - **YouTubeLiveLayout**:`PRIMARY_RATIO` 控制寬視窗中播放器與聊天室的寬度比(預設 0.75);頁面寬度低於螢幕可用寬度的 `MAX_STACKED_VIEWPORT_RATIO`(預設 0.75),且側欄低於 `MIN_SIDE_CHAT_WIDTH`(預設 400px)時,聊天室改排在影片正下方並使用完整寬度。
 - **YouTubePlayerTweaks**:首次以滾輪或原生滑桿調音量後會啟用音量曲線，原生音量 25/50/100 對應約 12.5/50/200% 的輸出。同一分頁內切換影片會繼續套用，新的影片元素會接回增益；重新整理或新分頁需再次調音量啟用，啟用狀態不永久儲存。`MAX_VOLUME_GAIN` 控制最高增益(預設 2 倍)。`MAX_DVR_SECONDS` 為 DVR 回看上限(預設 7 天);`LIVE_CATCHUP_RATE` 控制追直播速度,`LIVE_CATCHUP_TARGET_BUFFER` 為可播放緩衝的追平門檻(預設 0.5 秒)。達到門檻時會停止追平並恢復原本速度。
 
+YouTube 一般訊息與篩選訊息均以「頭像、名稱、徽章、內文」同列顯示；頭像配合文字行高縮放，長訊息換行後可使用頭像下方的完整寬度。
+
 ## 腳本間的關聯與已知取捨
 
 - **LiveClock 依賴 PlayerTweaks 的 DVR 解鎖**:直播「經過時間」取自進度條位置,只有在 DVR 視窗涵蓋整場直播時才等於真實經過時間;超過 13 小時的直播需要 PlayerTweaks 放寬的回看視窗才準確。
