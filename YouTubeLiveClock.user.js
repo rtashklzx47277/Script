@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name        YouTube Live Clock
 // @namespace   https://tampermonkey.net/
-// @version     0.2.2
+// @version     0.2.3
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveClock.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveClock.user.js
-// @description Shows elapsed time on live streams and absolute clock time on live archives.
+// @description 直播顯示經過時間，直播存檔顯示對應日期與時刻，支援多種日期格式。
 // @author      Derek
 // @match       *://www.youtube.com/*
 // @grant       none

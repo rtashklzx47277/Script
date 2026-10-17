@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name        YouTube Live Layout
 // @namespace   https://tampermonkey.net/
-// @version     0.2.7
+// @version     0.2.8
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveLayout.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveLayout.user.js
-// @description Keeps default mode intact and fills theater mode, with responsive layouts when chat is visible.
+// @description 調整 YouTube 劇院模式：無聊天室時填滿視窗，有聊天室時依可用寬度切換左右或上下排列。
 // @author      Derek
 // @match       *://www.youtube.com/*
 // @grant       none

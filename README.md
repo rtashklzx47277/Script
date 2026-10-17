@@ -21,7 +21,7 @@
 | [TwitchLiveChatTweaks](https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js) | Twitch 聊天室 | 上方篩選按鈕切換一般／指定用戶聊天室，保留管理員、頻道主及指定帳號的本次頁面發言紀錄；直接在篩選視窗內管理目標用戶 |
 | [pixiv](https://raw.githubusercontent.com/rtashklzx47277/Script/main/pixiv.user.js) | Pixiv | `jump.php` 跳轉頁直接前往目標網址 |
 
-`Other/` 內另有幾支站點腳本,不納入版控。
+其他站點腳本由獨立私人 repo 管理，不納入此公開 repo 的版控。
 
 ## 書籤小工具
 
@@ -66,7 +66,7 @@ YouTube 與 Twitch 的「目標用戶」預設收合，按標題才展開管理�
 node --test tests/*.test.cjs
 ```
 
-測試涵蓋播放器追平與速度恢復、截圖 Worker 及失敗回退、SPA 導覽與等待清理、聊天室跟隨、時鐘重建、版面初始化、字幕與畫質就緒、網址跳轉,以及 `Other/` 的圖片和側欄操作。`Other/` 不在版控中,缺少這些本機腳本時會略過對應測試。
+測試涵蓋播放器追平與速度恢復、截圖 Worker 及失敗回退、SPA 導覽與等待清理、聊天室跟隨、時鐘重建、版面初始化、字幕與畫質就緒，以及網址跳轉。私人站點腳本與對應測試由私人 repo 管理。
 
 測試在 Node.js VM 中模擬瀏覽器 API;實際網站 DOM、CSS 排版、剪貼簿權限與 PNG 像素仍需在瀏覽器驗證。
 

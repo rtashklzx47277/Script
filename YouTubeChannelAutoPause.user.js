@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name        YouTube Channel Auto Pause
 // @namespace   https://tampermonkey.net/
-// @version     0.2.1
+// @version     0.2.2
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeChannelAutoPause.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeChannelAutoPause.user.js
-// @description Automatically pauses autoplaying videos on YouTube channel pages.
+// @description 進入 YouTube 頻道頁時，暫停自動播放的預告或精選影片。
 // @author      Derek
 // @match       *://www.youtube.com/*
 // @run-at      document-idle

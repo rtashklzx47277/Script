@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name          Pixiv Jump Directly
-// @version       0.2.2
+// @version       0.2.3
 // @updateURL     https://raw.githubusercontent.com/rtashklzx47277/Script/main/pixiv.user.js
 // @downloadURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/pixiv.user.js
-// @description   Pixiv Jump Directly
+// @description   略過 Pixiv 外部連結跳轉頁，直接前往原始 HTTP／HTTPS 目標網址。
 // @author        Derek
 // @match         *://www.pixiv.net/jump.php?*
 // @run-at        document-start

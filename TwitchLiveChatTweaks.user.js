@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name        Twitch Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.6.0
+// @version     0.6.1
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
-// @description Filter chat by broadcaster, moderator and include/exclude account lists, with session history and a header toggle.
+// @description 依頻道主、管理員與帳號包含／排除名單篩選 Twitch 聊天，支援頻道／全域設定、本次頁面紀錄與自動跟隨。
 // @author      Derek
 // @match       *://www.twitch.tv/*
 // @run-at      document-idle

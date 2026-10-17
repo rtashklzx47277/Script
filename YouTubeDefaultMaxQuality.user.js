@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name        YouTube Default Max Quality
 // @namespace   https://tampermonkey.net/
-// @version     0.2.2
+// @version     0.2.3
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeDefaultMaxQuality.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeDefaultMaxQuality.user.js
-// @description Sets the highest available playback quality on YouTube watch and live pages.
+// @description 自動選擇 YouTube 影片與直播提供的最高畫質，新增更高畫質選項時同步提升。
 // @author      Derek
 // @match       *://www.youtube.com/*
 // @run-at      document-idle

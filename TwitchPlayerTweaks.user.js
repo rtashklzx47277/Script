@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name        Twitch Player Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.3.0
+// @version     0.3.1
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchPlayerTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchPlayerTweaks.user.js
-// @description Hide clips and interactive extensions, add screenshot button, support wheel volume, and use native-like tooltips.
+// @description 提供 Twitch 原解析度 PNG 截圖、滾輪音量與音量增益，隱藏剪輯按鈕及互動擴充。
 // @author      Derek
 // @match       *://www.twitch.tv/*
 // @run-at      document-idle
