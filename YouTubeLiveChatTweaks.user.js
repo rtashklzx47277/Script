@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.6.1
+// @version     0.6.2
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @description 提供 YouTube 聊天室用戶資訊卡、角色與帳號包含／排除篩選、本次頁面紀錄、表情複製、重新載入與自動跟隨。
@@ -53,7 +53,7 @@
   let followLatest = true
   let pointerScrolling = false
   let pointerCancelTimer = 0
-  let scrollFramePending = false
+  let scrollFrame = 0
 
   addStyle(`
     :root {
@@ -396,16 +396,29 @@
     clickable.click()
   }
 
+  const cancelScrollFrame = () => {
+    if (scrollFrame) cancelAnimationFrame(scrollFrame)
+    scrollFrame = 0
+  }
+
   const scrollToBottom = () => {
+    if (!scroller) return
+
+    // Background tabs suspend rAF. Do not let a queued foreground frame
+    // block new messages or YouTube's resume control while the tab is hidden.
+    if (document.hidden) {
+      cancelScrollFrame()
+      if (followLatest) scroller.scrollTop = scroller.scrollHeight
+      return
+    }
+
     // One scrollTop write per frame: busy chats deliver several mutation
     // batches between frames, and each used to queue its own rAF.
-    if (!scroller || scrollFramePending) return
-
-    scrollFramePending = true
+    if (scrollFrame) return
     const targetScroller = scroller
 
-    requestAnimationFrame(() => {
-      scrollFramePending = false
+    scrollFrame = requestAnimationFrame(() => {
+      scrollFrame = 0
 
       if (followLatest && scroller === targetScroller) {
         targetScroller.scrollTop = targetScroller.scrollHeight
@@ -418,6 +431,11 @@
 
     clickShowMore()
     scrollToBottom()
+  }
+
+  const handleAutoFollowVisibility = () => {
+    cancelScrollFrame()
+    keepFollowingLatest()
   }
 
   // Window/document-level handlers live outside bindAutoFollow so rebinding
@@ -460,6 +478,7 @@
 
     if (!scroller || !items || !showMoreButton) return false
 
+    cancelScrollFrame()
     autoFollowController?.abort()
     autoFollowController = new AbortController()
     const { signal } = autoFollowController
@@ -530,6 +549,7 @@
     window.addEventListener('pointerup', handlePointerUp)
     window.addEventListener('pointercancel', handlePointerCancel)
     document.addEventListener('keydown', handleScrollKeys)
+    document.addEventListener('visibilitychange', handleAutoFollowVisibility)
 
     refreshHeader()
     bindAutoFollow()
@@ -545,6 +565,8 @@
         items?.isConnected &&
         showMoreButton?.isConnected
       ) {
+        // Also recover from native pause/layout changes without new items.
+        if (document.hidden) keepFollowingLatest()
         return
       }
 

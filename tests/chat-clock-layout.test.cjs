@@ -165,6 +165,110 @@ function addChat(browser) {
   return { scroller, items, showMore }
 }
 
+test('chat: hiding flushes a queued scroll and follows new messages without animation frames', () => {
+  const browser = createBrowser()
+  const { scroller, items, showMore } = addChat(browser)
+  browser.run('YouTubeLiveChatTweaks.user.js')
+  assert.equal(browser.frames.size, 1)
+  scroller.scrollHeight += 100
+  browser.document.hidden = true
+  browser.document.dispatchEvent(browser.event('visibilitychange'))
+  assert.equal(browser.frames.size, 0)
+  assert.equal(scroller.scrollTop, scroller.scrollHeight)
+
+  // YouTube's resume control must still work while rAF never executes.
+  showMore.attrs.delete('disabled')
+  browser.mutate(showMore)
+  assert.equal(showMore.clickCount, 1)
+  for (let index = 0; index < 3; index++) {
+    scroller.scrollHeight += 100
+    browser.mutate(items)
+    assert.equal(scroller.scrollTop, scroller.scrollHeight)
+    assert.equal(browser.frames.size, 0)
+  }
+
+  browser.document.hidden = false
+  browser.document.dispatchEvent(browser.event('visibilitychange'))
+  scroller.scrollHeight += 100
+  browser.mutate(items)
+  browser.mutate(items)
+  assert.equal(browser.frames.size, 1, 'foreground updates still coalesce')
+  browser.flushFrames()
+  assert.equal(scroller.scrollTop, scroller.scrollHeight)
+})
+
+test('chat: an initially hidden tab follows immediately and recovers native pauses without new items', () => {
+  const browser = createBrowser()
+  const { scroller, items, showMore } = addChat(browser)
+  browser.document.hidden = true
+  browser.run('YouTubeLiveChatTweaks.user.js')
+  assert.equal(scroller.scrollTop, scroller.scrollHeight)
+  assert.equal(browser.frames.size, 0)
+  scroller.scrollHeight += 100
+  browser.mutate(items)
+  assert.equal(scroller.scrollTop, scroller.scrollHeight)
+  // Native layout/pause changes may not mutate either observed element.
+  showMore.attrs.delete('disabled')
+  scroller.scrollHeight += 100
+  browser.tickIntervals()
+  assert.equal(showMore.clickCount, 1)
+  assert.equal(scroller.scrollTop, scroller.scrollHeight)
+  assert.equal(browser.frames.size, 0)
+})
+
+test('chat: background and visibility recovery preserve manual pause until returning to latest', () => {
+  const browser = createBrowser()
+  const { scroller, items, showMore } = addChat(browser)
+  browser.run('YouTubeLiveChatTweaks.user.js')
+  scroller.dispatchEvent(browser.event('wheel', { deltaY: -100 }))
+  scroller.scrollTop = 600
+  browser.document.hidden = true
+  browser.document.dispatchEvent(browser.event('visibilitychange'))
+  showMore.attrs.delete('disabled')
+  scroller.scrollHeight += 100
+  browser.mutate(items)
+  browser.tickIntervals()
+  assert.equal(scroller.scrollTop, 600)
+  assert.equal(showMore.clickCount, undefined)
+  assert.equal(browser.frames.size, 0)
+
+  browser.document.hidden = false
+  browser.document.dispatchEvent(browser.event('visibilitychange'))
+  browser.flushFrames()
+  assert.equal(scroller.scrollTop, 600)
+  showMore.click()
+  browser.document.hidden = true
+  browser.document.dispatchEvent(browser.event('visibilitychange'))
+  assert.equal(scroller.scrollTop, scroller.scrollHeight)
+})
+
+test('chat: returning to foreground catches up without another message', () => {
+  const browser = createBrowser()
+  const { scroller } = addChat(browser)
+  browser.document.hidden = true
+  browser.run('YouTubeLiveChatTweaks.user.js')
+  scroller.scrollHeight += 100
+  browser.document.hidden = false
+  browser.document.dispatchEvent(browser.event('visibilitychange'))
+  browser.flushFrames()
+  assert.equal(scroller.scrollTop, scroller.scrollHeight)
+})
+
+test('chat: replacing the scroller cancels the old pending scroll', () => {
+  const browser = createBrowser()
+  const old = addChat(browser)
+  browser.run('YouTubeLiveChatTweaks.user.js')
+  old.scroller.isConnected = false
+  old.items.isConnected = false
+  old.showMore.isConnected = false
+  const replacement = addChat(browser)
+  browser.tickIntervals()
+  assert.equal(browser.frames.size, 1)
+  browser.flushFrames()
+  assert.equal(old.scroller.scrollTop, 900)
+  assert.equal(replacement.scroller.scrollTop, replacement.scroller.scrollHeight)
+})
+
 test('chat: native touch cancellation followed by upward scroll suspends following', () => {
   const browser = createBrowser()
   const { scroller, items } = addChat(browser)
