@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.6.3
+// @version     0.6.4
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @description 提供 YouTube 聊天室用戶資訊卡、獨立 SC 紀錄、角色與帳號包含／排除篩選、表情複製、重新載入與自動跟隨。
@@ -759,6 +759,32 @@
       return history
     }
 
+    // YouTube renderer colors are packed ARGB integers. Keep the source palette
+    // rather than deriving a tier from currency-dependent purchase amounts.
+    const argbColor = value => {
+      if (!Number.isInteger(value) || value < -0x80000000 || value > 0xffffffff) return ''
+      const hex = (value >>> 0).toString(16).padStart(8, '0')
+      return `#${hex.slice(2)}${hex.slice(0, 2)}`
+    }
+    const readSuperChatColors = (line, data) => {
+      const header = $('#header', line) || line
+      const content = $('#content', line) || line
+      const paint = (node, property) => node ? getComputedStyle(node)[property] || '' : ''
+      const background = node => {
+        const value = paint(node, 'backgroundColor')
+        return value === 'transparent' || /^rgba\(\s*0,\s*0,\s*0,\s*0\s*\)$/.test(value) ? '' : value
+      }
+      const headerBackground = argbColor(data.headerBackgroundColor) || background(header)
+      return {
+        headerBackground,
+        bodyBackground: argbColor(data.bodyBackgroundColor) || background(content) || headerBackground,
+        headerText: argbColor(data.headerTextColor) || paint($('#purchase-amount', line) || header, 'color'),
+        bodyText: argbColor(data.bodyTextColor) || paint($('#message', line) || content, 'color'),
+        author: argbColor(data.authorNameTextColor) || paint($('#author-name', line), 'color'),
+        timestamp: argbColor(data.timestampColor) || argbColor(data.bodyTextColor) || paint(content, 'color'),
+      }
+    }
+
     const readMessage = (line) => {
       const author = $('#author-name', line)
       const data = rendererData(line)
@@ -788,6 +814,7 @@
         message.textContent = $('#deleted-state', line)?.textContent?.trim() || '訊息已刪除'
       }
       return { user, channelId, moderator, broadcaster, superChat, amount, author, body: message, badges, deleted,
+        colors: superChat ? readSuperChatColors(line, data) : null,
         id: line.id || '', time: $('#timestamp', line)?.textContent?.trim() || '',
         avatar: $('#author-photo img', line)?.getAttribute('src') || data.authorPhoto?.thumbnails?.[0]?.url || '',
         contextMenuEndpoint: data.contextMenuEndpoint }
@@ -1165,8 +1192,14 @@
     const makeMessageView = message => {
       const row = document.createElement('div')
       row.className = 'ytcf-message'
+      if (message.superChat) {
+        row.classList.add('ytcf-super-chat')
+        row.style.backgroundColor = message.colors.bodyBackground
+        row.style.color = message.colors.bodyText
+      }
       const time = document.createElement('time')
       time.className = 'ytcf-time'
+      if (message.superChat) time.style.color = message.colors.timestamp
       time.textContent = message.time || new Date().toLocaleTimeString('zh-TW', { hour12: false })
       row.appendChild(time)
       if (message.avatar) {
@@ -1178,7 +1211,7 @@
       }
       const author = document.createElement('strong')
       author.textContent = message.author.textContent
-      author.style.color = authorNameColor(message)
+      author.style.color = message.superChat ? message.colors.author : authorNameColor(message)
       row.appendChild(author)
       row.appendChild(document.createTextNode(' '))
       for (const badge of message.badges) {
@@ -1191,10 +1224,14 @@
         row.appendChild(copy)
       }
       if (message.superChat) {
-        row.appendChild(element('span', { class: 'ytcf-amount' }, [message.amount ? `SC ${message.amount}` : 'SC']))
+        const amount = element('span', { class: 'ytcf-amount' }, [message.amount ? `SC ${message.amount}` : 'SC'])
+        amount.style.backgroundColor = message.colors.headerBackground
+        amount.style.color = message.colors.headerText
+        row.appendChild(amount)
       }
       const content = clonePresentation(message.body)
       content.className = `${content.className || ''} ytcf-body`
+      if (message.superChat) content.style.color = message.colors.bodyText
       row.appendChild(content)
       return row
     }
@@ -1209,7 +1246,7 @@
       const message = readMessage(line)
       if (!message || (!message.superChat && !message.moderator && !message.broadcaster && !includesAuthor(history.settings.users, message) &&
         !includesAuthor(history.settings.globalUsers || [], message))) return false
-      const fingerprint = `${message.user}\n${message.channelId}\n${message.deleted}\n${message.moderator}\n${message.broadcaster}\n${message.superChat}\n${message.amount}\n${message.author.textContent}\n${message.body.innerHTML}`
+      const fingerprint = `${message.user}\n${message.channelId}\n${message.deleted}\n${message.moderator}\n${message.broadcaster}\n${message.superChat}\n${message.amount}\n${JSON.stringify(message.colors)}\n${message.author.textContent}\n${message.body.innerHTML}`
       const previous = message.id ? history.ids.get(message.id) : history.nodes.get(line)
       if (previous?.fingerprint === fingerprint) {
         history.nodes.set(line, previous)
@@ -1652,7 +1689,22 @@
       button.style.color = nativeButton ? getComputedStyle(nativeButton).color : 'var(--yt-live-chat-primary-text-color, #fff)'
       button.addEventListener('click', () => setEnabled(state, !state.history.enabled || state.history.superChatOnly))
       const scButton = element('button', { id: 'yt-chat-tweaks-sc-button', type: 'button',
-        'aria-label': '切換 SC 紀錄' }, ['SC'])
+        'aria-label': '切換 SC 紀錄' })
+      const nativeScIcon = $('#picker-buttons #product-picker svg')
+      const scIcon = nativeScIcon ? nativeScIcon.cloneNode(true) : document.createElementNS(SVG_NS, 'svg')
+      scIcon.setAttribute('width', '24')
+      scIcon.setAttribute('height', '24')
+      scIcon.setAttribute('viewBox', '0 0 24 24')
+      scIcon.setAttribute('aria-hidden', 'true')
+      scIcon.setAttribute('fill', 'currentColor')
+      if (!nativeScIcon) {
+        const scPath = document.createElementNS(SVG_NS, 'path')
+        // Native #product-picker path verified on YouTube on 2026-10-21.
+        // Chat headers can appear before the purchase picker (or on replays).
+        scPath.setAttribute('d', 'M21.5 4h-19A1.5 1.5 0 001 5.5v13A1.5 1.5 0 002.5 20h19a1.5 1.5 0 001.5-1.5v-13A1.5 1.5 0 0021.5 4ZM3 18V6h18v12H3Zm9-11.5a1 1 0 00-1 1v.638c-.357.101-.689.26-.979.49A2.35 2.35 0 009.13 10.5c-.007.424.112.84.342 1.197.21.31.497.563.831.734.546.29 1.23.411 1.693.502.557.109.899.19 1.117.315.087.048.11.082.114.09.004.005.028.044.028.162 0 .024-.008.118-.165.235-.162.122-.5.27-1.09.27-.721 0-1.049-.21-1.181-.323a.7.7 0 01-.132-.15l-.01-.018.005.013.006.014.002.009a.996.996 0 00-1.884.64l.947-.316-.003.001c-.9.3-.942.315-.943.317l.001.003.003.006.004.015.012.032c.045.111.1.218.162.321.146.236.324.444.535.624.357.306.841.566 1.476.702v.605a1 1 0 002 0v-.614c1.29-.289 2.245-1.144 2.245-2.386 0-.44-.103-.852-.327-1.212-.22-.355-.52-.6-.82-.77-.555-.316-1.244-.445-1.719-.539-.568-.111-.915-.185-1.143-.305a.5.5 0 01-.1-.07l-.004-.002V10.6a.401.401 0 01-.012-.1c0-.158.053-.244.14-.314.109-.086.34-.19.74-.19.373-.001.73.144.997.404a.995.995 0 001.518-1.286l-.699.58.698-.582v-.001l-.002-.001-.002-.003-.006-.006-.016-.018a2.984 2.984 0 00-.178-.182A3.44 3.44 0 0013 8.154V7.5a1 1 0 00-1-1Z')
+        scIcon.appendChild(scPath)
+      }
+      scButton.appendChild(scIcon)
       scButton.style.color = button.style.color
       state.scButton = scButton
       button.insertAdjacentElement('afterend', scButton)
@@ -1664,7 +1716,7 @@
         if (captureMutations(mutations, state.history)) scheduleMessageRender(state)
       })
       state.observer.observe(sourceItems, { childList: true, subtree: true, characterData: true,
-        attributes: true, attributeFilter: ['author-type', 'type', 'is-deleted', 'author-external-channel-id'] })
+        attributes: true, attributeFilter: ['author-type', 'type', 'is-deleted', 'author-external-channel-id', 'style'] })
       mounted = state
       setEnabled(state, state.history.enabled, state.history.superChatOnly)
     }
@@ -1689,7 +1741,6 @@
     const style = document.createElement('style')
     style.textContent = `
       #yt-chat-tweaks-filter-button, #yt-chat-tweaks-sc-button { display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box; flex: 0 0 40px; width: 40px; height: 40px; min-width: 40px; min-height: 40px; margin: 0; padding: 8px; border: 0; border-radius: 50%; color: inherit; background: transparent; cursor: pointer; }
-      #yt-chat-tweaks-sc-button { font: 700 13px/1 Roboto, Arial, sans-serif; }
       #yt-chat-tweaks-filter-button[aria-pressed="true"], #yt-chat-tweaks-sc-button[aria-pressed="true"] { color: var(--yt-live-chat-link-text-color, #3ea6ff) !important; }
       /* The native popup caches small limits after header buttons are injected.
          Keep it inside the iframe and let its content use the available space. */
@@ -1720,6 +1771,8 @@
       .ytcf-list { flex: 1; min-height: 0; overflow: auto; overflow-anchor: none; padding: 6px 0; }
       .ytcf-message { padding: 5px 10px; overflow-wrap: anywhere; line-height: 1.6; }
       .ytcf-message:hover { background: var(--yt-live-chat-action-panel-background-color, #8882); }
+      .ytcf-super-chat { margin: 3px 6px; border-radius: 4px; }
+      .ytcf-super-chat .ytcf-body a { color: inherit; text-decoration: underline; }
       .ytcf-amount { display: inline-block; margin-right: 5px; padding: 0 5px; border-radius: 4px; color: var(--yt-live-chat-primary-text-color, #0f0f0f); background: var(--yt-live-chat-action-panel-background-color, #8882); font-weight: 600; }
       .ytuc-card { position: fixed; z-index: 2200; box-sizing: border-box; overflow: auto; overscroll-behavior: contain; border: 1px solid var(--yt-live-chat-message-input-border-color, #8884); border-radius: 8px; box-shadow: 0 8px 28px #0006; color: var(--yt-live-chat-primary-text-color, #0f0f0f); background: var(--yt-live-chat-background-color, #fff); font: 13px/1.5 Roboto, Arial, sans-serif; }
       .ytuc-card[hidden], .ytuc-card [hidden] { display: none !important; }

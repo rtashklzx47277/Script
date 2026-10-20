@@ -157,7 +157,8 @@ function boot({ saved, blocked = false, trustedTypes = false, parentWindow, fetc
     requestAnimationFrame(fn) { const id = ++nextTimer; frames.set(id, fn); return id },
     cancelAnimationFrame(id) { frames.delete(id) },
     Node: { ELEMENT_NODE: 1 }, HTMLElement: Element, AbortController,
-    getComputedStyle: element => ({ color: element.style.color || 'white', display: 'block', visibility: 'visible' }),
+    getComputedStyle: element => ({ color: element.style.color || 'white',
+      backgroundColor: element.style.backgroundColor || 'rgba(0, 0, 0, 0)', display: 'block', visibility: 'visible' }),
     MutationObserver: class { observe() {} disconnect() {} },
     localStorage: {
       getItem(key) { if (blocked) throw Error('Blocked'); return storage.get(key) || null },
@@ -260,6 +261,64 @@ test('YouTube Super Chats: retain amount-only payments, update amounts and dedup
   assert.equal(history.messages.length, 1)
 })
 
+test('YouTube Super Chats: preserve all source tier palettes independently of amounts and later native changes', () => {
+  const env = boot()
+  const history = env.api.getHistory('channel:@host')
+  for (const [index, [header, body, text]] of [
+    ['1565c0', '1e88e5', 'ffffff'], ['00b8d4', '00e5ff', '000000'],
+    ['00bfa5', '1de9b6', '000000'], ['ffb300', 'ffca28', '000000'],
+    ['e65100', 'f57c00', 'ffffff'], ['c2185b', 'e91e63', 'ffffff'],
+    ['d00000', 'e62117', 'ffffff'],
+  ].entries()) {
+    const paid = superChatMessage(env, '@donor', index ? '謝謝直播' : null, '跨幣別金額', `palette-${index}`)
+    paid.line.polymerController = { data: {
+      headerBackgroundColor: parseInt(`ff${header}`, 16),
+      bodyBackgroundColor: parseInt(`ff${body}`, 16),
+      headerTextColor: parseInt(`ff${text}`, 16), bodyTextColor: parseInt(`ff${text}`, 16),
+      authorNameTextColor: parseInt(`ff${text}`, 16), timestampColor: parseInt(`b3${text}`, 16),
+    } }
+    assert.equal(env.api.captureLine(paid.line, history), true)
+    const row = history.messages.at(-1).view
+    assert.equal(row.style.backgroundColor, `#${body}ff`)
+    assert.equal(row.style.color, `#${text}ff`)
+    assert.equal(row.querySelector('.ytcf-amount').style.backgroundColor, `#${header}ff`)
+    assert.equal(row.querySelector('.ytcf-amount').style.color, `#${text}ff`)
+    assert.equal(row.querySelector('strong').style.color, `#${text}ff`)
+    assert.equal(row.querySelector('time').style.color, `#${text}b3`)
+    assert.equal(row.children.at(-1).style.color, `#${text}ff`)
+    paid.line.polymerController.data.bodyBackgroundColor = 0
+    assert.equal(row.style.backgroundColor, `#${body}ff`, 'retained colors must not depend on live renderer data')
+  }
+})
+
+test('YouTube Super Chats: native CSS fallback and late palette changes update the same record', () => {
+  const env = boot()
+  const history = env.api.getHistory('channel:@host')
+  const paid = superChatMessage(env, '@donor', 'hello', 'NT$150')
+  const header = paid.line.appendChild(new env.Element())
+  header.id = 'header'
+  header.style.backgroundColor = 'rgb(255, 179, 0)'
+  const content = paid.line.appendChild(new env.Element())
+  content.id = 'content'
+  content.style.backgroundColor = 'rgb(255, 202, 40)'
+  paid.author.style.color = paid.body.style.color = paid.purchase.style.color = 'rgb(0, 0, 0)'
+  env.api.captureLine(paid.line, history)
+  const record = history.messages[0]
+  assert.equal(record.view.style.backgroundColor, 'rgb(255, 202, 40)')
+  assert.equal(record.view.querySelector('.ytcf-amount').style.backgroundColor, 'rgb(255, 179, 0)')
+  assert.equal(record.view.style.color, 'rgb(0, 0, 0)')
+  const time = record.view.firstChild.textContent
+  content.style.backgroundColor = 'rgb(30, 136, 229)'
+  assert.equal(env.api.captureMutations([{ target: content, addedNodes: [] }], history), true)
+  assert.equal(history.messages.length, 1)
+  assert.equal(record.view.style.backgroundColor, 'rgb(30, 136, 229)')
+  assert.equal(record.view.firstChild.textContent, time)
+  paid.line.data = { bodyBackgroundColor: -65536, headerTextColor: 0 }
+  env.api.captureLine(paid.line, history)
+  assert.equal(record.view.style.backgroundColor, '#ff0000ff', 'signed ARGB is supported')
+  assert.equal(record.view.querySelector('.ytcf-amount').style.color, '#00000000', 'zero is a valid transparent ARGB color')
+})
+
 test('YouTube filters: mount, toggle and remount when Trusted Types rejects HTML strings', () => {
   const env = boot({ trustedTypes: true })
   const { document, Element, api } = env
@@ -282,6 +341,8 @@ test('YouTube filters: mount, toggle and remount when Trusted Types rejects HTML
   let state = api.mounted
   assert.ok(state.button.isConnected)
   assert.ok(state.button.querySelector('svg').querySelector('path'))
+  assert.ok(state.scButton.querySelector('svg').querySelector('path'))
+  assert.equal(state.scButton.textContent, '')
   api.refreshHeader()
   assert.equal(header.children.map(node => node.id || node.getAttribute('id')).join(','),
     'live-chat-header-context-menu,yt-chat-tweaks-filter-button,yt-chat-tweaks-sc-button,yt-chat-tweaks-reload-button,close-button')
