@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name        YouTube Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.6.2
+// @version     0.6.3
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
-// @description 提供 YouTube 聊天室用戶資訊卡、角色與帳號包含／排除篩選、本次頁面紀錄、表情複製、重新載入與自動跟隨。
+// @description 提供 YouTube 聊天室用戶資訊卡、獨立 SC 紀錄、角色與帳號包含／排除篩選、表情複製、重新載入與自動跟隨。
 // @author      Derek
 // @match       *://www.youtube.com/live_chat*
 // @match       *://www.youtube.com/live_chat_replay*
@@ -154,11 +154,13 @@
     }
 
     #yt-chat-tweaks-filter-button:hover,
+    #yt-chat-tweaks-sc-button:hover,
     #yt-chat-tweaks-reload-button:hover {
       background-color: var(--yt-live-chat-button-default-background-color, #8882) !important;
     }
 
     #yt-chat-tweaks-filter-button:active,
+    #yt-chat-tweaks-sc-button:active,
     #yt-chat-tweaks-reload-button:active {
       background-color: var(--yt-live-chat-button-default-background-color, #8884) !important;
     }
@@ -298,7 +300,7 @@
       location.reload()
     })
 
-    const filterButton = $('#yt-chat-tweaks-filter-button')
+    const filterButton = $('#yt-chat-tweaks-sc-button') || $('#yt-chat-tweaks-filter-button')
     const anchor = filterButton?.parentElement === contextMenu.parentElement ? filterButton : contextMenu
     anchor.insertAdjacentElement('afterend', reloadButton)
     syncReloadButtonColor()
@@ -748,7 +750,7 @@
       if (!history) {
         history = {
           channel, settings: loadSettings(channel), messages: [], nodes: new WeakMap(), ids: new Map(),
-          enabled: false, follow: true, dirty: new Set(), removed: new Set(),
+          enabled: false, superChatOnly: false, follow: true, dirty: new Set(), removed: new Set(),
         }
       }
       histories.delete(channel)
@@ -767,7 +769,12 @@
       // The renderer retains the sender's stable ID even when its DOM shows a handle.
       const rawId = data.authorExternalChannelId || line.getAttribute('author-external-channel-id')
       const channelId = typeof rawId === 'string' && /^UC[\w-]{22}$/.test(rawId) ? rawId : ''
+      const superChat = line.matches('yt-live-chat-paid-message-renderer')
+      const amount = superChat ? ($('#purchase-amount', line)?.textContent?.trim() ||
+        data.purchaseAmountText?.simpleText || data.purchaseAmountText?.runs?.map(run => run.text).join('') || '') : ''
       let message = $('#message, #sticker, #header-subtext', line)
+      // Low-tier Super Chats may have no message element at all.
+      if (!message && superChat) message = document.createElement('span')
       if (!author || !user || !message) return null
       const chip = author.closest('yt-live-chat-author-chip') || line
       const badges = $$('yt-live-chat-author-badge-renderer', chip)
@@ -780,7 +787,7 @@
         message = document.createElement('span')
         message.textContent = $('#deleted-state', line)?.textContent?.trim() || '訊息已刪除'
       }
-      return { user, channelId, moderator, broadcaster, author, body: message, badges, deleted,
+      return { user, channelId, moderator, broadcaster, superChat, amount, author, body: message, badges, deleted,
         id: line.id || '', time: $('#timestamp', line)?.textContent?.trim() || '',
         avatar: $('#author-photo img', line)?.getAttribute('src') || data.authorPhoto?.thumbnails?.[0]?.url || '',
         contextMenuEndpoint: data.contextMenuEndpoint }
@@ -1137,7 +1144,8 @@
     const matchesFilter = (message, settings) =>
       !includesAuthor(settings.excludedUsers || [], message) && !includesAuthor(settings.globalExcludedUsers || [], message) && (
         (settings.moderators && message.moderator) ||
-        (settings.broadcaster && message.broadcaster) || includesAuthor(settings.users, message) || includesAuthor(settings.globalUsers || [], message)
+        (settings.broadcaster && message.broadcaster) ||
+        includesAuthor(settings.users, message) || includesAuthor(settings.globalUsers || [], message)
       )
 
     const clonePresentation = source => {
@@ -1182,6 +1190,9 @@
         else copy.textContent = badge.getAttribute('type') === 'moderator' ? '🔧' : badge.getAttribute('type') === 'owner' ? '👑' : '★'
         row.appendChild(copy)
       }
+      if (message.superChat) {
+        row.appendChild(element('span', { class: 'ytcf-amount' }, [message.amount ? `SC ${message.amount}` : 'SC']))
+      }
       const content = clonePresentation(message.body)
       content.className = `${content.className || ''} ytcf-body`
       row.appendChild(content)
@@ -1196,9 +1207,9 @@
         if (author.getAttribute('aria-label') !== '查看用戶資訊') author.setAttribute('aria-label', '查看用戶資訊')
       }
       const message = readMessage(line)
-      if (!message || (!message.moderator && !message.broadcaster && !includesAuthor(history.settings.users, message) &&
+      if (!message || (!message.superChat && !message.moderator && !message.broadcaster && !includesAuthor(history.settings.users, message) &&
         !includesAuthor(history.settings.globalUsers || [], message))) return false
-      const fingerprint = `${message.user}\n${message.channelId}\n${message.deleted}\n${message.moderator}\n${message.broadcaster}\n${message.author.textContent}\n${message.body.innerHTML}`
+      const fingerprint = `${message.user}\n${message.channelId}\n${message.deleted}\n${message.moderator}\n${message.broadcaster}\n${message.superChat}\n${message.amount}\n${message.author.textContent}\n${message.body.innerHTML}`
       const previous = message.id ? history.ids.get(message.id) : history.nodes.get(line)
       if (previous?.fingerprint === fingerprint) {
         history.nodes.set(line, previous)
@@ -1209,10 +1220,10 @@
       if (previous?.retained) {
         view.firstChild.textContent = previous.view.firstChild.textContent
         record = Object.assign(previous, { user: message.user, channelId: message.channelId, moderator: message.moderator,
-          broadcaster: message.broadcaster, view, fingerprint })
+          broadcaster: message.broadcaster, superChat: message.superChat, view, fingerprint })
       } else {
         record = { id: message.id, user: message.user, channelId: message.channelId, moderator: message.moderator,
-          broadcaster: message.broadcaster, view, fingerprint, retained: true }
+          broadcaster: message.broadcaster, superChat: message.superChat, view, fingerprint, retained: true }
         history.messages.push(record)
         if (history.messages.length > MAX_MESSAGES) {
           const oldest = history.messages.shift()
@@ -1271,7 +1282,7 @@
     const renderMessages = (state, rebuild = false) => {
       cancelMessageRender(state)
       const { history, list, empty, count, latest } = state
-      const filterKey = JSON.stringify(history.settings)
+      const filterKey = JSON.stringify([history.settings, history.superChatOnly])
       const full = rebuild || state.renderedHistory !== history || state.filterKey !== filterKey
       if (full) state.visibleCount = 0
       for (const record of history.removed) {
@@ -1284,7 +1295,7 @@
       for (const record of full ? history.messages : history.dirty) {
         const oldView = record.renderedView
         const wasVisible = oldView?.parentElement === list && record.visible
-        const show = matchesFilter(record, history.settings)
+        const show = history.superChatOnly ? record.superChat : matchesFilter(record, history.settings)
         state.visibleCount += Number(show) - (full ? 0 : Number(!!wasVisible))
         if (record.view.hidden !== !show) record.view.hidden = !show
         if (oldView && oldView !== record.view) {
@@ -1388,10 +1399,11 @@
       positionFilterPanel(state)
     }
 
-    const setEnabled = (state, enabled) => {
+    const setEnabled = (state, enabled, superChatOnly = false) => {
       cancelMessageRender(state)
       if (enabled) closeAuthorCard()
       state.history.enabled = enabled
+      state.history.superChatOnly = superChatOnly
       state.host.classList.toggle('ytcf-active', enabled)
       setNativeChatAccessible(state, enabled)
       if (enabled) {
@@ -1402,7 +1414,21 @@
       }
       state.panel.hidden = !enabled
       setPanelLayer(state, enabled)
-      state.button.setAttribute('aria-pressed', String(enabled))
+      state.button.setAttribute('aria-pressed', String(enabled && !superChatOnly))
+      state.scButton?.setAttribute('aria-pressed', String(enabled && superChatOnly))
+      state.panel.setAttribute('aria-label', superChatOnly ? 'SC 紀錄' : '指定用戶聊天室')
+      const summary = $('.ytcf-target-summary', state.panel)
+      const title = $('.ytcf-sc-title', state.panel)
+      if (summary) summary.hidden = superChatOnly
+      if (title) title.hidden = !superChatOnly
+      if (superChatOnly) {
+        const targets = $('.ytcf-targets', state.panel)
+        if (targets) targets.hidden = true
+        summary?.setAttribute('aria-expanded', 'false')
+        state.panel.classList.remove('ytcf-managing')
+      }
+      if (state.empty) state.empty.textContent = superChatOnly ? '本次頁面尚未收到 SC。'
+        : '尚無符合條件的發言。新增目標帳號後開始收集。'
       if (enabled) renderMessages(state, true)
     }
 
@@ -1466,6 +1492,7 @@
         element('div', { class: 'ytcf-options' }, [
           element('button', { type: 'button', class: 'ytcf-target-summary', 'aria-label': '目標用戶',
             'aria-controls': 'ytcf-target-settings', 'aria-expanded': 'false' }, ['目標用戶']),
+          element('span', { class: 'ytcf-sc-title', hidden: '' }, ['SC 紀錄']),
           element('span', { class: 'ytcf-count' }),
         ]),
         element('div', { class: 'ytcf-targets', id: 'ytcf-target-settings', hidden: '' }, [
@@ -1581,6 +1608,7 @@
       clearTimeout(mounted.statusTimer)
       mounted.observer.disconnect()
       mounted.button.remove()
+      mounted.scButton.remove()
       mounted.panel.remove()
       setNativeChatAccessible(mounted, false)
       mounted.host.classList.remove('ytcf-host', 'ytcf-active')
@@ -1595,7 +1623,8 @@
       const sourceItems = scroller && $('#items', scroller)
       const menu = $('#live-chat-header-context-menu')
       if (mounted && (mounted.history.channel !== channel || mounted.header !== header ||
-        mounted.scroller !== scroller || mounted.items !== sourceItems || !mounted.button.isConnected || !mounted.panel.isConnected)) unmount()
+        mounted.scroller !== scroller || mounted.items !== sourceItems || !mounted.button.isConnected ||
+        !mounted.scButton.isConnected || !mounted.panel.isConnected)) unmount()
       if (mounted || !header || !menu || !sourceItems || !scroller?.parentElement) return
       const state = { history: getHistory(channel), header, scroller, items: sourceItems,
         renderer: scroller.closest('yt-live-chat-renderer'),
@@ -1621,7 +1650,13 @@
       menu.insertAdjacentElement('afterend', button)
       const nativeButton = $('#close-button button')
       button.style.color = nativeButton ? getComputedStyle(nativeButton).color : 'var(--yt-live-chat-primary-text-color, #fff)'
-      button.addEventListener('click', () => setEnabled(state, !state.history.enabled))
+      button.addEventListener('click', () => setEnabled(state, !state.history.enabled || state.history.superChatOnly))
+      const scButton = element('button', { id: 'yt-chat-tweaks-sc-button', type: 'button',
+        'aria-label': '切換 SC 紀錄' }, ['SC'])
+      scButton.style.color = button.style.color
+      state.scButton = scButton
+      button.insertAdjacentElement('afterend', scButton)
+      scButton.addEventListener('click', () => setEnabled(state, !state.history.enabled || !state.history.superChatOnly, true))
       createPanel(state)
       captureTree(sourceItems, state.history)
       state.observer = new MutationObserver(mutations => {
@@ -1631,7 +1666,7 @@
       state.observer.observe(sourceItems, { childList: true, subtree: true, characterData: true,
         attributes: true, attributeFilter: ['author-type', 'type', 'is-deleted', 'author-external-channel-id'] })
       mounted = state
-      setEnabled(state, state.history.enabled)
+      setEnabled(state, state.history.enabled, state.history.superChatOnly)
     }
 
     const scheduleRefresh = () => {
@@ -1653,8 +1688,9 @@
 
     const style = document.createElement('style')
     style.textContent = `
-      #yt-chat-tweaks-filter-button { display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box; flex: 0 0 40px; width: 40px; height: 40px; min-width: 40px; min-height: 40px; margin: 0; padding: 8px; border: 0; border-radius: 50%; color: inherit; background: transparent; cursor: pointer; }
-      #yt-chat-tweaks-filter-button[aria-pressed="true"] { color: var(--yt-live-chat-link-text-color, #3ea6ff) !important; }
+      #yt-chat-tweaks-filter-button, #yt-chat-tweaks-sc-button { display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box; flex: 0 0 40px; width: 40px; height: 40px; min-width: 40px; min-height: 40px; margin: 0; padding: 8px; border: 0; border-radius: 50%; color: inherit; background: transparent; cursor: pointer; }
+      #yt-chat-tweaks-sc-button { font: 700 13px/1 Roboto, Arial, sans-serif; }
+      #yt-chat-tweaks-filter-button[aria-pressed="true"], #yt-chat-tweaks-sc-button[aria-pressed="true"] { color: var(--yt-live-chat-link-text-color, #3ea6ff) !important; }
       /* The native popup caches small limits after header buttons are injected.
          Keep it inside the iframe and let its content use the available space. */
       yt-live-chat-app > tp-yt-iron-dropdown:not([id]):has(yt-live-chat-toggle-renderer) { left: auto !important; right: 8px !important; max-width: calc(100vw - 16px) !important; }
@@ -1662,7 +1698,7 @@
       yt-live-chat-app > tp-yt-iron-dropdown:not([id]):has(yt-live-chat-toggle-renderer) tp-yt-paper-item { white-space: normal !important; }
       yt-live-chat-app > tp-yt-iron-dropdown:not([id]):has(yt-live-chat-toggle-renderer) .text-wrapper { min-width: 0; }
       yt-live-chat-app > tp-yt-iron-dropdown:not([id]):has(yt-live-chat-toggle-renderer) yt-formatted-string { white-space: normal !important; overflow-wrap: anywhere; }
-      #yt-chat-tweaks-filter-button:focus-visible, .ytcf-panel button:focus-visible { outline: 2px solid var(--yt-live-chat-button-default-text-color, #065fd4); outline-offset: -2px; }
+      #yt-chat-tweaks-filter-button:focus-visible, #yt-chat-tweaks-sc-button:focus-visible, .ytcf-panel button:focus-visible { outline: 2px solid var(--yt-live-chat-button-default-text-color, #065fd4); outline-offset: -2px; }
       .ytcf-host { position: relative; }
       .ytcf-active > .ytcf-source { pointer-events: none; isolation: isolate; }
       .ytcf-panel { position: absolute; inset: 0; z-index: 2147483647; display: flex; flex-direction: column; box-sizing: border-box; min-height: 0; max-width: none; max-height: none; margin: 0; padding: 0; border: 0; color: var(--yt-live-chat-primary-text-color, #0f0f0f); background: var(--yt-live-chat-background-color, #fff); font-size: 13px; }
@@ -1684,6 +1720,7 @@
       .ytcf-list { flex: 1; min-height: 0; overflow: auto; overflow-anchor: none; padding: 6px 0; }
       .ytcf-message { padding: 5px 10px; overflow-wrap: anywhere; line-height: 1.6; }
       .ytcf-message:hover { background: var(--yt-live-chat-action-panel-background-color, #8882); }
+      .ytcf-amount { display: inline-block; margin-right: 5px; padding: 0 5px; border-radius: 4px; color: var(--yt-live-chat-primary-text-color, #0f0f0f); background: var(--yt-live-chat-action-panel-background-color, #8882); font-weight: 600; }
       .ytuc-card { position: fixed; z-index: 2200; box-sizing: border-box; overflow: auto; overscroll-behavior: contain; border: 1px solid var(--yt-live-chat-message-input-border-color, #8884); border-radius: 8px; box-shadow: 0 8px 28px #0006; color: var(--yt-live-chat-primary-text-color, #0f0f0f); background: var(--yt-live-chat-background-color, #fff); font: 13px/1.5 Roboto, Arial, sans-serif; }
       .ytuc-card[hidden], .ytuc-card [hidden] { display: none !important; }
       .ytuc-header { display: flex; align-items: flex-start; gap: 12px; padding: 16px 12px; }

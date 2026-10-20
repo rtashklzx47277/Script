@@ -82,6 +82,8 @@
 <div class="fixture-tools">
   <button id="add-mod">新增 Moderator 訊息</button>
   <button id="add-user">新增 @alice 訊息</button>
+  <button id="add-sc">新增 SC</button>
+  <button id="add-empty-sc">新增無留言 SC</button>
   <button id="burst">批次新增 100 則管理員訊息</button>
   <button id="edit-last">修改最後一則訊息</button>
   <button id="prune">清空原聊天室 DOM</button>
@@ -211,8 +213,8 @@
   }
   let serial = 0
   const items = () => document.querySelector('#item-scroller #items')
-  function addMessage(user, role = '') {
-    const line = document.createElement('yt-live-chat-text-message-renderer')
+  function addMessage(user, role = '', amount = '', noMessage = false) {
+    const line = document.createElement(amount ? 'yt-live-chat-paid-message-renderer' : 'yt-live-chat-text-message-renderer')
     line.id = `message-${++serial}`
     line.setAttribute('author-type', role)
     line.setAttribute('whole-message-clickable', 'fixture')
@@ -239,6 +241,11 @@
     const author = chip.appendChild(document.createElement('span'))
     author.id = 'author-name'
     author.textContent = user
+    if (amount) {
+      const purchase = content.appendChild(document.createElement('span'))
+      purchase.id = 'purchase-amount'
+      purchase.textContent = amount
+    }
     const highlighted = role === 'owner' && fixtureParams.has('highlightedOwner')
     if (highlighted) chip.setAttribute('is-highlighted', '')
     if (role) {
@@ -267,6 +274,7 @@
     const link = message.appendChild(document.createElement('a'))
     link.href = '#fixture-link'
     link.textContent = '連結'
+    if (noMessage) message.remove()
     const menu = line.appendChild(document.createElement('div'))
     menu.id = 'menu'
     const button = menu.appendChild(document.createElement('button'))
@@ -280,6 +288,8 @@
   addMessage('@alice', 'member')
   document.getElementById('add-mod').onclick = () => addMessage('@mod_account', 'moderator')
   document.getElementById('add-user').onclick = () => addMessage('@alice')
+  document.getElementById('add-sc').onclick = () => addMessage('@donor', '', 'NT$150.00')
+  document.getElementById('add-empty-sc').onclick = () => addMessage('@donor', '', '¥200', true)
   document.getElementById('burst').onclick = () => { for (let i = 0; i < 100; i++) addMessage('@mod_account', 'moderator') }
   document.getElementById('edit-last').onclick = () => {
     const message = items().lastElementChild?.querySelector('#message')
@@ -289,7 +299,7 @@
   document.getElementById('remount').onclick = () => {
     const renderer = document.querySelector('yt-live-chat-renderer')
     const copy = renderer.cloneNode(true)
-    copy.querySelectorAll('.ytcf-panel, #yt-chat-tweaks-filter-button, #yt-chat-tweaks-reload-button').forEach(node => node.remove())
+    copy.querySelectorAll('.ytcf-panel, #yt-chat-tweaks-filter-button, #yt-chat-tweaks-sc-button, #yt-chat-tweaks-reload-button').forEach(node => node.remove())
     copy.querySelector('#chat-contents').className = ''
     const scroller = copy.querySelector('#item-scroller')
     scroller.className = ''

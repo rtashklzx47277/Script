@@ -194,6 +194,72 @@ function boot({ saved, blocked = false, trustedTypes = false, parentWindow, fetc
     location: context.location, document, window: context.window }
 }
 
+function superChatMessage(env, user, text, amount, id = 'sc-1') {
+  const result = env.message(user, text || '', '', id)
+  result.line.tagName = 'yt-live-chat-paid-message-renderer'
+  const purchase = result.line.appendChild(new env.Element('span'))
+  purchase.id = 'purchase-amount'
+  purchase.textContent = amount
+  if (text === null) result.body.remove()
+  return { ...result, purchase }
+}
+
+test('YouTube Super Chats: collect before opening and keep the SC list independent of user filters', () => {
+  const env = boot({ trustedTypes: true })
+  const history = env.api.getHistory('channel:@host')
+  history.settings.moderators = false
+  history.settings.broadcaster = false
+  const paid = superChatMessage(env, '@donor', '謝謝直播', 'NT$150.00')
+  assert.equal(env.api.captureLine(paid.line, history), true)
+  assert.equal(env.api.captureLine(env.message('@donor', '一般留言').line, history), false)
+  const state = { history, list: new env.Element(), empty: {}, count: {}, latest: {} }
+  env.api.renderMessages(state)
+  assert.equal(state.count.textContent, '0 則')
+  paid.purchase.textContent = '原生 DOM 已清除'
+  history.superChatOnly = true
+  env.api.renderMessages(state)
+  assert.equal(state.count.textContent, '1 則')
+  assert.equal(state.list.firstChild.querySelector('.ytcf-amount').textContent, 'SC NT$150.00')
+  assert.equal(state.list.firstChild.children.at(-1).textContent, '謝謝直播')
+  for (const key of ['excludedUsers', 'globalExcludedUsers']) {
+    history.settings[key] = ['@donor']
+    env.api.renderMessages(state)
+    assert.equal(state.count.textContent, '1 則', 'SC records are independent of target account settings')
+    history.settings[key] = []
+  }
+  history.superChatOnly = false
+  env.api.renderMessages(state)
+  assert.equal(state.count.textContent, '0 則')
+  history.settings.users = ['@donor']
+  env.api.renderMessages(state)
+  assert.equal(state.count.textContent, '1 則', 'selected authors still include their SC in the user filter')
+})
+
+test('YouTube Super Chats: retain amount-only payments, update amounts and deduplicate replay IDs', () => {
+  const env = boot()
+  const history = env.api.getHistory('channel:@host')
+  history.superChatOnly = true
+  const paid = superChatMessage(env, '@donor', null, '¥200')
+  assert.equal(env.api.captureLine(paid.line, history), true)
+  const record = history.messages[0]
+  const firstTime = record.view.firstChild.textContent
+  assert.equal(record.view.querySelector('.ytcf-amount').textContent, 'SC ¥200')
+  assert.equal(env.api.captureLine(superChatMessage(env, '@donor', null, '¥200').line, history), false)
+  paid.purchase.textContent = '¥500'
+  assert.equal(env.api.captureLine(paid.line, history), true)
+  assert.equal(history.messages.length, 1)
+  assert.equal(record.view.querySelector('.ytcf-amount').textContent, 'SC ¥500')
+  assert.equal(record.view.firstChild.textContent, firstTime)
+  paid.purchase.remove()
+  paid.line.data = { purchaseAmountText: { runs: [{ text: '$' }, { text: '5.00' }] } }
+  assert.equal(env.api.captureLine(paid.line, history), true)
+  assert.equal(record.view.querySelector('.ytcf-amount').textContent, 'SC $5.00')
+  paid.line.setAttribute('is-deleted', '')
+  assert.equal(env.api.captureLine(paid.line, history), true)
+  assert.equal(record.view.children.at(-1).textContent, '訊息已刪除')
+  assert.equal(history.messages.length, 1)
+})
+
 test('YouTube filters: mount, toggle and remount when Trusted Types rejects HTML strings', () => {
   const env = boot({ trustedTypes: true })
   const { document, Element, api } = env
@@ -210,14 +276,15 @@ test('YouTube filters: mount, toggle and remount when Trusted Types rejects HTML
   const items = offset.appendChild(new Element('div'))
   items.id = 'items'
   items.appendChild(env.message('@host', 'hello', 'owner', 'owner-1').line)
+  items.appendChild(superChatMessage(env, '@donor', null, 'NT$30').line)
   assert.throws(() => { menu.innerHTML = '<span>blocked</span>' }, /TrustedHTML/)
   api.refresh()
   let state = api.mounted
   assert.ok(state.button.isConnected)
   assert.ok(state.button.querySelector('svg').querySelector('path'))
   api.refreshHeader()
-  assert.equal(header.children.map(node => node.id).join(','),
-    'live-chat-header-context-menu,yt-chat-tweaks-filter-button,yt-chat-tweaks-reload-button,close-button')
+  assert.equal(header.children.map(node => node.id || node.getAttribute('id')).join(','),
+    'live-chat-header-context-menu,yt-chat-tweaks-filter-button,yt-chat-tweaks-sc-button,yt-chat-tweaks-reload-button,close-button')
   assert.equal(state.button.title, undefined)
   assert.equal(header.querySelector('#yt-chat-tweaks-reload-button').title, undefined)
   assert.ok(state.panel.isConnected)
@@ -236,6 +303,17 @@ test('YouTube filters: mount, toggle and remount when Trusted Types rejects HTML
   assert.equal(state.panel.hidden, false)
   assert.equal(state.count.textContent, '1 則')
   assert.equal(scroller.getAttribute('aria-hidden'), 'true')
+  assert.equal(state.panel.querySelector('[name="super-chat"]'), null)
+  state.panel.querySelector('.ytcf-target-summary').listeners.get('click')()
+  state.scButton.listeners.get('click')()
+  assert.equal(state.count.textContent, '1 則')
+  assert.equal(state.button.getAttribute('aria-pressed'), 'false')
+  assert.equal(state.scButton.getAttribute('aria-pressed'), 'true')
+  assert.equal(state.panel.getAttribute('aria-label'), 'SC 紀錄')
+  assert.equal(state.panel.querySelector('.ytcf-target-summary').hidden, true)
+  assert.equal(state.panel.querySelector('.ytcf-targets').hidden, true)
+  assert.equal(state.panel.className.includes('ytcf-managing'), false)
+  assert.equal(state.list.children.find(row => !row.hidden).querySelector('.ytcf-amount').textContent, 'SC NT$30')
   state.button.remove()
   state.updateSettings(state.history.settings, '已移除帳號。')
   const oldTimer = state.statusTimer
@@ -243,9 +321,20 @@ test('YouTube filters: mount, toggle and remount when Trusted Types rejects HTML
   assert.equal(env.timers.has(oldTimer), false)
   state = api.mounted
   assert.equal(header.querySelectorAll('#yt-chat-tweaks-filter-button').length, 1)
+  assert.equal(header.querySelectorAll('#yt-chat-tweaks-sc-button').length, 1)
   assert.equal(host.querySelectorAll('.ytcf-panel').length, 1)
   assert.equal(state.count.textContent, '1 則')
-  api.setEnabled(state, false)
+  assert.equal(state.scButton.getAttribute('aria-pressed'), 'true')
+  state.scButton.listeners.get('click')()
+  assert.equal(state.panel.hidden, true)
+  assert.equal(state.scButton.getAttribute('aria-pressed'), 'false')
+  state.scButton.listeners.get('click')()
+  state.button.listeners.get('click')()
+  assert.equal(state.panel.hidden, false)
+  assert.equal(state.button.getAttribute('aria-pressed'), 'true')
+  assert.equal(state.scButton.getAttribute('aria-pressed'), 'false')
+  assert.equal(state.panel.querySelector('.ytcf-target-summary').hidden, false)
+  state.button.listeners.get('click')()
   assert.equal(state.button.getAttribute('aria-pressed'), 'false')
   assert.equal(scroller.getAttribute('aria-hidden'), null)
 })

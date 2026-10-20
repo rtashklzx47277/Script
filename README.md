@@ -13,7 +13,7 @@
 | [YouTubePlayerTweaks](https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubePlayerTweaks.user.js) | YouTube | 播放器加截圖鍵(`S`)、滾輪調音量(含 Shorts)/播放速度、直播追平(1.5x 追到最低延遲);解鎖無 DVR 直播的回看,並將回看視窗放寬到 7 天 |
 | [YouTubeLiveClock](https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveClock.user.js) | YouTube | 直播顯示經過時間,直播存檔顯示當下時間點的絕對時刻 |
 | [YouTubeLiveLayout](https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveLayout.user.js) | YouTube | 一般模式不改動版面;無聊天室時將劇院模式滿版;有聊天室時使用響應式劇院版面,窄視窗將聊天室排在影片下方 |
-| [YouTubeLiveChatTweaks](https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js) | YouTube 聊天室 | 用戶資訊卡、隱藏聊天模式選單、Broadcaster／Moderator 與帳號包含／排除篩選、本次頁面紀錄、表情複製、重新載入、自動跟隨最新訊息 |
+| [YouTubeLiveChatTweaks](https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js) | YouTube 聊天室 | 用戶資訊卡、獨立 SC 紀錄按鈕、隱藏聊天模式選單、Broadcaster／Moderator 與帳號包含／排除篩選、本次頁面紀錄、表情複製、重新載入、自動跟隨最新訊息 |
 | [YouTubeAutoDisableSubtitles](https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeAutoDisableSubtitles.user.js) | YouTube | 進入影片自動關閉字幕 |
 | [YouTubeDefaultMaxQuality](https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeDefaultMaxQuality.user.js) | YouTube | 自動切到最高畫質 |
 | [YouTubeChannelAutoPause](https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeChannelAutoPause.user.js) | YouTube | 頻道頁自動暫停自動播放的預告影片 |
@@ -73,6 +73,8 @@ node --test tests/*.test.cjs
 Twitch 篩選聊天室另有 `tests/fixtures/twitch-chat.html` 測試頁，搭配本機靜態伺服器將該頁提供在 `/fixture_channel`，並將新腳本提供在 `/TwitchLiveChatTweaks.user.js`，可驗證指定帳號管理、訊息清理、聊天室重建、頻道切換及跨分頁同步，並用「顯示遮擋測試物件」確認整個篩選面板保持最上層。此頁不會傳送聊天訊息。
 
 YouTube 篩選聊天室有 `tests/fixtures/youtube-chat.html` 測試頁，將該頁提供在 `/live_chat?v=fixture_video`，並提供 `/YouTubeLiveChatTweaks.user.js`，可驗證角色與帳號篩選、排除優先、DOM 清理／重建、單列排版、聊天模式選單隱藏及用戶資訊卡，並用「顯示遮擋測試物件」確認整個篩選面板保持最上層。資訊卡使用模擬的名稱查詢、原生事件橋接與操作確認視窗，頁面底部顯示請求次數；`failProfile`、`failMenu`、`profileDelay`、`menuDelay` 及 `signedOut` query 參數可驗證失敗、延遲與未登入狀態。「切換聊天摘要」可重現摘要占用高度，確認篩選區不跟著縮小；`longName` 可驗證超長頻道名稱與帳號保持單行，「切換聊天室寬度」可檢查字體隨可用寬度調整；`highlightedOwner` 重現高亮頻道主的淺底黑字，搭配 `light` 可驗證深淺主題的名稱與徽章配色。`channel` 可指定測試頻道，以驗證跨頻道全域名單及頻道名單隔離。此頁不會傳送聊天訊息或執行實際帳號操作。
+
+聊天室上方另有獨立「SC」按鈕，點擊切換 SC 紀錄，再點一次回到一般聊天室；與漏斗篩選按鈕可直接切換。SC 紀錄顯示時間、發送者、原幣別金額與留言，也保留沒有留言的 SC，不套用目標用戶或排除名單。一般聊天室與用戶篩選模式下都會持續收集本次頁面已載入的 SC，沿用每頻道最多 2,000 則、最近 5 個頻道的共用紀錄上限，重新整理清空；回放以訊息 ID 去重，沒有載入的歷史 SC 不會補抓。SC 不含超級貼圖與會員贈禮。測試頁的「新增 SC」與「新增無留言 SC」可驗證獨立列表、金額與切換行為。
 
 ## 版本
 
