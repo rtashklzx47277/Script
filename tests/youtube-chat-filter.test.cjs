@@ -122,7 +122,7 @@ function boot({ saved, blocked = false, trustedTypes = false, parentWindow, fetc
       copy.className = this.className
       copy.style = { ...this.style }
       copy._innerHTML = this.innerHTML
-      copy.textContent = this.textContent
+      copy.textContent = this._textContent || ''
       if (deep) for (const child of this.children) copy.appendChild(child.cloneNode(true))
       return copy
     }
@@ -205,6 +205,108 @@ function superChatMessage(env, user, text, amount, id = 'sc-1') {
   return { ...result, purchase }
 }
 
+function membershipMessage(env, { tag = 'yt-live-chat-membership-item-renderer', primary = '',
+  subtext = '', text = null, id = 'member-1' } = {}) {
+  const result = env.message('@member', text || '', 'member', id)
+  result.line.tagName = tag
+  const headers = []
+  for (const [name, value] of [['header-primary-text', primary], ['header-subtext', subtext]]) {
+    if (!value) continue
+    const header = result.line.appendChild(new env.Element('span'))
+    header.id = name
+    header.textContent = header._innerHTML = value
+    headers.push(header)
+  }
+  result.body.remove()
+  if (text !== null) result.line.appendChild(result.body)
+  return { ...result, headers }
+}
+
+test('YouTube membership events: retain welcome and milestone details plus comments without including ordinary member chat', () => {
+  const env = boot({ trustedTypes: true })
+  const history = env.api.getHistory('channel:@host')
+  const welcome = membershipMessage(env, { subtext: 'Welcome to Bronze!' })
+  const milestone = membershipMessage(env, { id: 'milestone-1', primary: 'Member for 12 months',
+    subtext: 'Silver', text: '謝謝這一年的直播！' })
+  assert.equal(env.api.captureLine(welcome.line, history), true)
+  assert.equal(env.api.captureLine(milestone.line, history), true)
+  assert.equal(env.api.captureLine(env.message('@member', 'ordinary chat', 'member').line, history), false)
+  assert.equal(history.messages[0].supportEvent, 'membership')
+  assert.equal(history.messages[1].supportEvent, 'milestone')
+  history.settings.excludedUsers = ['@member']
+  const state = { history, list: new env.Element(), empty: {}, count: {}, latest: {} }
+  env.api.renderMessages(state)
+  assert.equal(state.count.textContent, '0 則')
+  history.supportOnly = true
+  env.api.renderMessages(state)
+  assert.equal(state.count.textContent, '2 則')
+  assert.equal(state.list.children[0].querySelector('.ytcf-amount').textContent, '會員加入')
+  assert.equal(state.list.children[0].querySelector('.ytcf-event-details').textContent, 'Welcome to Bronze!')
+  const row = state.list.children[1]
+  assert.equal(row.querySelector('.ytcf-amount').textContent, '會員里程碑')
+  assert.equal(row.querySelectorAll('.ytcf-event-details').map(node => node.textContent).join(' / '), 'Member for 12 months / Silver')
+  assert.equal(row.children.at(-1).textContent, '謝謝這一年的直播！')
+  milestone.body.textContent = '原生 DOM 清除'
+  milestone.headers[0].textContent = '原生 DOM 清除'
+  assert.equal(row.children.at(-1).textContent, '謝謝這一年的直播！')
+  assert.equal(row.querySelector('.ytcf-event-details').textContent, 'Member for 12 months')
+})
+
+test('YouTube membership events: capture both native gift renderer variants and nested gift donor identities', () => {
+  const env = boot()
+  const history = env.api.getHistory('channel:@host')
+  const root = new env.Element()
+  for (const tag of ['ytd-sponsorships-live-chat-gift-purchase-announcement-renderer',
+    'yt-live-chat-sponsorships-gift-purchase-announcement-renderer']) {
+    const gift = membershipMessage(env, { tag, id: tag })
+    gift.author.remove()
+    gift.line.data = { header: { sponsorshipsLiveChatHeaderRenderer: {
+      authorName: { simpleText: '@donor' }, authorExternalChannelId: 'UCAbCdEfGhIjKlMnOpQrStUv',
+    } }, primaryText: { runs: [{ text: 'Gifted ' }, { text: '10' }, { text: ' memberships' }] } }
+    root.appendChild(gift.line)
+  }
+  for (const tag of ['ytd-sponsorships-live-chat-gift-redemption-announcement-renderer',
+    'yt-live-chat-sponsorships-gift-redemption-announcement-renderer']) {
+    const gift = membershipMessage(env, { tag, id: tag, text: 'Received a gift membership from @donor' })
+    root.appendChild(gift.line)
+  }
+  assert.equal(env.api.captureTree(root, history), true)
+  assert.equal(history.messages.length, 4)
+  for (const record of history.messages.slice(0, 2)) {
+    assert.equal(record.supportEvent, 'membershipGift')
+    assert.equal(record.user, '@donor')
+    assert.equal(record.channelId, 'UCAbCdEfGhIjKlMnOpQrStUv')
+    assert.equal(record.view.querySelector('.ytcf-amount').textContent, '會員贈禮')
+    assert.equal(record.view.querySelector('.ytcf-event-details').textContent, 'Gifted 10 memberships')
+  }
+  for (const record of history.messages.slice(2)) {
+    assert.equal(record.supportEvent, 'giftRedemption')
+    assert.equal(record.view.querySelector('.ytcf-amount').textContent, '獲贈會員')
+    assert.equal(record.view.children.at(-1).textContent, 'Received a gift membership from @donor')
+  }
+})
+
+test('YouTube membership events: deduplicate replays and update header-only changes without losing comments or time', () => {
+  const env = boot()
+  const history = env.api.getHistory('channel:@host')
+  const options = { primary: 'Member for 6 months', text: 'hello' }
+  const member = membershipMessage(env, options)
+  env.api.captureLine(member.line, history)
+  assert.equal(env.api.captureLine(membershipMessage(env, options).line, history), false)
+  const record = history.messages[0]
+  const time = record.view.firstChild.textContent
+  member.headers[0].textContent = member.headers[0]._innerHTML = 'Member for 7 months'
+  assert.equal(env.api.captureMutations([{ target: member.headers[0], addedNodes: [] }], history), true)
+  assert.equal(history.messages.length, 1)
+  assert.equal(record.view.querySelector('.ytcf-event-details').textContent, 'Member for 7 months')
+  assert.equal(record.view.children.at(-1).textContent, 'hello')
+  assert.equal(record.view.firstChild.textContent, time)
+  member.line.setAttribute('is-deleted', '')
+  env.api.captureLine(member.line, history)
+  assert.equal(record.view.children.at(-1).textContent, '訊息已刪除')
+  assert.equal(history.messages.length, 1)
+})
+
 test('YouTube Super Chats: collect before opening and keep the SC list independent of user filters', () => {
   const env = boot({ trustedTypes: true })
   const history = env.api.getHistory('channel:@host')
@@ -217,7 +319,7 @@ test('YouTube Super Chats: collect before opening and keep the SC list independe
   env.api.renderMessages(state)
   assert.equal(state.count.textContent, '0 則')
   paid.purchase.textContent = '原生 DOM 已清除'
-  history.superChatOnly = true
+  history.supportOnly = true
   env.api.renderMessages(state)
   assert.equal(state.count.textContent, '1 則')
   assert.equal(state.list.firstChild.querySelector('.ytcf-amount').textContent, 'SC NT$150.00')
@@ -228,7 +330,7 @@ test('YouTube Super Chats: collect before opening and keep the SC list independe
     assert.equal(state.count.textContent, '1 則', 'SC records are independent of target account settings')
     history.settings[key] = []
   }
-  history.superChatOnly = false
+  history.supportOnly = false
   env.api.renderMessages(state)
   assert.equal(state.count.textContent, '0 則')
   history.settings.users = ['@donor']
@@ -239,7 +341,7 @@ test('YouTube Super Chats: collect before opening and keep the SC list independe
 test('YouTube Super Chats: retain amount-only payments, update amounts and deduplicate replay IDs', () => {
   const env = boot()
   const history = env.api.getHistory('channel:@host')
-  history.superChatOnly = true
+  history.supportOnly = true
   const paid = superChatMessage(env, '@donor', null, '¥200')
   assert.equal(env.api.captureLine(paid.line, history), true)
   const record = history.messages[0]
@@ -370,7 +472,7 @@ test('YouTube filters: mount, toggle and remount when Trusted Types rejects HTML
   assert.equal(state.count.textContent, '1 則')
   assert.equal(state.button.getAttribute('aria-pressed'), 'false')
   assert.equal(state.scButton.getAttribute('aria-pressed'), 'true')
-  assert.equal(state.panel.getAttribute('aria-label'), 'SC 紀錄')
+  assert.equal(state.panel.getAttribute('aria-label'), 'SC／會員紀錄')
   assert.equal(state.panel.querySelector('.ytcf-target-summary').hidden, true)
   assert.equal(state.panel.querySelector('.ytcf-targets').hidden, true)
   assert.equal(state.panel.className.includes('ytcf-managing'), false)

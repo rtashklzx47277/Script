@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name        YouTube Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.6.4
+// @version     0.6.5
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
-// @description 提供 YouTube 聊天室用戶資訊卡、獨立 SC 紀錄、角色與帳號包含／排除篩選、表情複製、重新載入與自動跟隨。
+// @description 提供 YouTube 聊天室用戶資訊卡、獨立 SC／會員事件紀錄、角色與帳號包含／排除篩選、表情複製、重新載入與自動跟隨。
 // @author      Derek
 // @match       *://www.youtube.com/live_chat*
 // @match       *://www.youtube.com/live_chat_replay*
@@ -170,10 +170,14 @@
     }
   `)
 
+  const MEMBERSHIP_EVENT_SELECTORS = {
+    membership: 'yt-live-chat-membership-item-renderer',
+    membershipGift: 'ytd-sponsorships-live-chat-gift-purchase-announcement-renderer, yt-live-chat-sponsorships-gift-purchase-announcement-renderer',
+    giftRedemption: 'ytd-sponsorships-live-chat-gift-redemption-announcement-renderer, yt-live-chat-sponsorships-gift-redemption-announcement-renderer',
+  }
   const NATIVE_MESSAGE_SELECTOR = [
     'yt-live-chat-text-message-renderer', 'yt-live-chat-paid-message-renderer',
-    'yt-live-chat-paid-sticker-renderer', 'yt-live-chat-membership-item-renderer',
-    'yt-live-chat-sponsorships-gift-purchase-announcement-renderer',
+    'yt-live-chat-paid-sticker-renderer', ...Object.values(MEMBERSHIP_EVENT_SELECTORS),
   ].join(', ')
 
   const rendererData = line => line.polymerController?.data || line.data || {}
@@ -750,7 +754,7 @@
       if (!history) {
         history = {
           channel, settings: loadSettings(channel), messages: [], nodes: new WeakMap(), ids: new Map(),
-          enabled: false, superChatOnly: false, follow: true, dirty: new Set(), removed: new Set(),
+          enabled: false, supportOnly: false, follow: true, dirty: new Set(), removed: new Set(),
         }
       }
       histories.delete(channel)
@@ -766,7 +770,7 @@
       const hex = (value >>> 0).toString(16).padStart(8, '0')
       return `#${hex.slice(2)}${hex.slice(0, 2)}`
     }
-    const readSuperChatColors = (line, data) => {
+    const readEventColors = (line, data) => {
       const header = $('#header', line) || line
       const content = $('#content', line) || line
       const paint = (node, property) => node ? getComputedStyle(node)[property] || '' : ''
@@ -785,22 +789,45 @@
       }
     }
 
+    const textValue = value => value?.simpleText || value?.runs?.map(run => run.text || '').join('') || ''
+    const EVENT_LABELS = { membership: '會員加入', milestone: '會員里程碑', membershipGift: '會員贈禮', giftRedemption: '獲贈會員' }
+
     const readMessage = (line) => {
-      const author = $('#author-name', line)
+      let author = $('#author-name', line)
       const data = rendererData(line)
+      const identity = data.header?.sponsorshipsLiveChatHeaderRenderer || data
+      const superChat = line.matches('yt-live-chat-paid-message-renderer')
+      let supportEvent = superChat ? 'superChat' : Object.entries(MEMBERSHIP_EVENT_SELECTORS)
+        .find(([, selector]) => line.matches(selector))?.[0] || ''
+      if (supportEvent === 'membership' && (textValue(data.headerPrimaryText) || $('#header-primary-text', line)?.textContent?.trim())) {
+        supportEvent = 'milestone'
+      }
       // Other name-restoring scripts may change the DOM. Keep identity based
       // on YouTube's original author handle and stable channel ID.
-      const originalName = data.authorName?.simpleText || data.authorName?.runs?.map(run => run.text).join('')
+      const originalName = textValue(identity.authorName) || textValue(data.authorName)
+      if (!author && supportEvent && originalName) author = element('span', {}, [originalName])
       const user = normalizeAccount(originalName || author?.textContent)
       // The renderer retains the sender's stable ID even when its DOM shows a handle.
-      const rawId = data.authorExternalChannelId || line.getAttribute('author-external-channel-id')
+      const rawId = identity.authorExternalChannelId || data.authorExternalChannelId || line.getAttribute('author-external-channel-id')
       const channelId = typeof rawId === 'string' && /^UC[\w-]{22}$/.test(rawId) ? rawId : ''
-      const superChat = line.matches('yt-live-chat-paid-message-renderer')
       const amount = superChat ? ($('#purchase-amount', line)?.textContent?.trim() ||
-        data.purchaseAmountText?.simpleText || data.purchaseAmountText?.runs?.map(run => run.text).join('') || '') : ''
-      let message = $('#message, #sticker, #header-subtext', line)
-      // Low-tier Super Chats may have no message element at all.
-      if (!message && superChat) message = document.createElement('span')
+        textValue(data.purchaseAmountText)) : ''
+      // Membership headers and the optional milestone comment are separate
+      // fields. Preserve both instead of taking the first node in DOM order.
+      let message = $('#message', line) || $('#sticker', line)
+      let details = []
+      if (supportEvent && !superChat) {
+        const headers = $$('#header-primary-text, #header-subtext, #primary-text', line)
+        details = headers.filter(node => node !== message && !node.contains(message) &&
+          !headers.some(other => other !== node && other.contains(node)))
+        if (!details.length) {
+          details = [data.headerPrimaryText, data.headerSubtext, data.primaryText]
+            .map(textValue).filter(Boolean).map(text => element('span', {}, [text]))
+        }
+      }
+      // Low-tier SC, welcome announcements and gifts may have no comment.
+      if (!message && supportEvent) message = document.createElement('span')
+      if (!message) message = $('#header-subtext', line)
       if (!author || !user || !message) return null
       const chip = author.closest('yt-live-chat-author-chip') || line
       const badges = $$('yt-live-chat-author-badge-renderer', chip)
@@ -813,11 +840,11 @@
         message = document.createElement('span')
         message.textContent = $('#deleted-state', line)?.textContent?.trim() || '訊息已刪除'
       }
-      return { user, channelId, moderator, broadcaster, superChat, amount, author, body: message, badges, deleted,
-        colors: superChat ? readSuperChatColors(line, data) : null,
-        id: line.id || '', time: $('#timestamp', line)?.textContent?.trim() || '',
-        avatar: $('#author-photo img', line)?.getAttribute('src') || data.authorPhoto?.thumbnails?.[0]?.url || '',
-        contextMenuEndpoint: data.contextMenuEndpoint }
+      return { user, channelId, moderator, broadcaster, superChat, supportEvent, amount, author, body: message, details, badges, deleted,
+        colors: supportEvent ? readEventColors(line, data) : null,
+        id: line.id || data.id || '', time: $('#timestamp', line)?.textContent?.trim() || textValue(data.timestampText),
+        avatar: $('#author-photo img', line)?.getAttribute('src') || identity.authorPhoto?.thumbnails?.[0]?.url || '',
+        contextMenuEndpoint: data.contextMenuEndpoint || identity.contextMenuEndpoint }
     }
 
     // Profile lookups are public, on demand, and shared by channel ID. No
@@ -1192,14 +1219,14 @@
     const makeMessageView = message => {
       const row = document.createElement('div')
       row.className = 'ytcf-message'
-      if (message.superChat) {
-        row.classList.add('ytcf-super-chat')
+      if (message.supportEvent) {
+        row.classList.add('ytcf-support-event')
         row.style.backgroundColor = message.colors.bodyBackground
         row.style.color = message.colors.bodyText
       }
       const time = document.createElement('time')
       time.className = 'ytcf-time'
-      if (message.superChat) time.style.color = message.colors.timestamp
+      if (message.supportEvent) time.style.color = message.colors.timestamp
       time.textContent = message.time || new Date().toLocaleTimeString('zh-TW', { hour12: false })
       row.appendChild(time)
       if (message.avatar) {
@@ -1211,7 +1238,7 @@
       }
       const author = document.createElement('strong')
       author.textContent = message.author.textContent
-      author.style.color = message.superChat ? message.colors.author : authorNameColor(message)
+      author.style.color = message.supportEvent ? message.colors.author : authorNameColor(message)
       row.appendChild(author)
       row.appendChild(document.createTextNode(' '))
       for (const badge of message.badges) {
@@ -1223,15 +1250,22 @@
         else copy.textContent = badge.getAttribute('type') === 'moderator' ? '🔧' : badge.getAttribute('type') === 'owner' ? '👑' : '★'
         row.appendChild(copy)
       }
-      if (message.superChat) {
-        const amount = element('span', { class: 'ytcf-amount' }, [message.amount ? `SC ${message.amount}` : 'SC'])
+      if (message.supportEvent) {
+        const label = message.superChat ? message.amount ? `SC ${message.amount}` : 'SC' : EVENT_LABELS[message.supportEvent]
+        const amount = element('span', { class: 'ytcf-amount' }, [label])
         amount.style.backgroundColor = message.colors.headerBackground
         amount.style.color = message.colors.headerText
         row.appendChild(amount)
       }
+      for (const detail of message.details) {
+        const copy = clonePresentation(detail)
+        copy.className = `${copy.className || ''} ytcf-event-details`
+        copy.style.color = message.colors.bodyText
+        row.appendChild(copy)
+      }
       const content = clonePresentation(message.body)
       content.className = `${content.className || ''} ytcf-body`
-      if (message.superChat) content.style.color = message.colors.bodyText
+      if (message.supportEvent) content.style.color = message.colors.bodyText
       row.appendChild(content)
       return row
     }
@@ -1244,9 +1278,9 @@
         if (author.getAttribute('aria-label') !== '查看用戶資訊') author.setAttribute('aria-label', '查看用戶資訊')
       }
       const message = readMessage(line)
-      if (!message || (!message.superChat && !message.moderator && !message.broadcaster && !includesAuthor(history.settings.users, message) &&
+      if (!message || (!message.supportEvent && !message.moderator && !message.broadcaster && !includesAuthor(history.settings.users, message) &&
         !includesAuthor(history.settings.globalUsers || [], message))) return false
-      const fingerprint = `${message.user}\n${message.channelId}\n${message.deleted}\n${message.moderator}\n${message.broadcaster}\n${message.superChat}\n${message.amount}\n${JSON.stringify(message.colors)}\n${message.author.textContent}\n${message.body.innerHTML}`
+      const fingerprint = `${message.user}\n${message.channelId}\n${message.deleted}\n${message.moderator}\n${message.broadcaster}\n${message.supportEvent}\n${message.amount}\n${JSON.stringify(message.colors)}\n${message.details.map(node => node.innerHTML || node.textContent).join('\n')}\n${message.author.textContent}\n${message.body.innerHTML}`
       const previous = message.id ? history.ids.get(message.id) : history.nodes.get(line)
       if (previous?.fingerprint === fingerprint) {
         history.nodes.set(line, previous)
@@ -1257,10 +1291,10 @@
       if (previous?.retained) {
         view.firstChild.textContent = previous.view.firstChild.textContent
         record = Object.assign(previous, { user: message.user, channelId: message.channelId, moderator: message.moderator,
-          broadcaster: message.broadcaster, superChat: message.superChat, view, fingerprint })
+          broadcaster: message.broadcaster, superChat: message.superChat, supportEvent: message.supportEvent, view, fingerprint })
       } else {
         record = { id: message.id, user: message.user, channelId: message.channelId, moderator: message.moderator,
-          broadcaster: message.broadcaster, superChat: message.superChat, view, fingerprint, retained: true }
+          broadcaster: message.broadcaster, superChat: message.superChat, supportEvent: message.supportEvent, view, fingerprint, retained: true }
         history.messages.push(record)
         if (history.messages.length > MAX_MESSAGES) {
           const oldest = history.messages.shift()
@@ -1319,7 +1353,7 @@
     const renderMessages = (state, rebuild = false) => {
       cancelMessageRender(state)
       const { history, list, empty, count, latest } = state
-      const filterKey = JSON.stringify([history.settings, history.superChatOnly])
+      const filterKey = JSON.stringify([history.settings, history.supportOnly])
       const full = rebuild || state.renderedHistory !== history || state.filterKey !== filterKey
       if (full) state.visibleCount = 0
       for (const record of history.removed) {
@@ -1332,7 +1366,7 @@
       for (const record of full ? history.messages : history.dirty) {
         const oldView = record.renderedView
         const wasVisible = oldView?.parentElement === list && record.visible
-        const show = history.superChatOnly ? record.superChat : matchesFilter(record, history.settings)
+        const show = history.supportOnly ? !!record.supportEvent : matchesFilter(record, history.settings)
         state.visibleCount += Number(show) - (full ? 0 : Number(!!wasVisible))
         if (record.view.hidden !== !show) record.view.hidden = !show
         if (oldView && oldView !== record.view) {
@@ -1436,11 +1470,11 @@
       positionFilterPanel(state)
     }
 
-    const setEnabled = (state, enabled, superChatOnly = false) => {
+    const setEnabled = (state, enabled, supportOnly = false) => {
       cancelMessageRender(state)
       if (enabled) closeAuthorCard()
       state.history.enabled = enabled
-      state.history.superChatOnly = superChatOnly
+      state.history.supportOnly = supportOnly
       state.host.classList.toggle('ytcf-active', enabled)
       setNativeChatAccessible(state, enabled)
       if (enabled) {
@@ -1451,20 +1485,20 @@
       }
       state.panel.hidden = !enabled
       setPanelLayer(state, enabled)
-      state.button.setAttribute('aria-pressed', String(enabled && !superChatOnly))
-      state.scButton?.setAttribute('aria-pressed', String(enabled && superChatOnly))
-      state.panel.setAttribute('aria-label', superChatOnly ? 'SC 紀錄' : '指定用戶聊天室')
+      state.button.setAttribute('aria-pressed', String(enabled && !supportOnly))
+      state.scButton?.setAttribute('aria-pressed', String(enabled && supportOnly))
+      state.panel.setAttribute('aria-label', supportOnly ? 'SC／會員紀錄' : '指定用戶聊天室')
       const summary = $('.ytcf-target-summary', state.panel)
       const title = $('.ytcf-sc-title', state.panel)
-      if (summary) summary.hidden = superChatOnly
-      if (title) title.hidden = !superChatOnly
-      if (superChatOnly) {
+      if (summary) summary.hidden = supportOnly
+      if (title) title.hidden = !supportOnly
+      if (supportOnly) {
         const targets = $('.ytcf-targets', state.panel)
         if (targets) targets.hidden = true
         summary?.setAttribute('aria-expanded', 'false')
         state.panel.classList.remove('ytcf-managing')
       }
-      if (state.empty) state.empty.textContent = superChatOnly ? '本次頁面尚未收到 SC。'
+      if (state.empty) state.empty.textContent = supportOnly ? '本次頁面尚未收到 SC 或會員事件。'
         : '尚無符合條件的發言。新增目標帳號後開始收集。'
       if (enabled) renderMessages(state, true)
     }
@@ -1529,7 +1563,7 @@
         element('div', { class: 'ytcf-options' }, [
           element('button', { type: 'button', class: 'ytcf-target-summary', 'aria-label': '目標用戶',
             'aria-controls': 'ytcf-target-settings', 'aria-expanded': 'false' }, ['目標用戶']),
-          element('span', { class: 'ytcf-sc-title', hidden: '' }, ['SC 紀錄']),
+          element('span', { class: 'ytcf-sc-title', hidden: '' }, ['SC／會員紀錄']),
           element('span', { class: 'ytcf-count' }),
         ]),
         element('div', { class: 'ytcf-targets', id: 'ytcf-target-settings', hidden: '' }, [
@@ -1687,9 +1721,9 @@
       menu.insertAdjacentElement('afterend', button)
       const nativeButton = $('#close-button button')
       button.style.color = nativeButton ? getComputedStyle(nativeButton).color : 'var(--yt-live-chat-primary-text-color, #fff)'
-      button.addEventListener('click', () => setEnabled(state, !state.history.enabled || state.history.superChatOnly))
+      button.addEventListener('click', () => setEnabled(state, !state.history.enabled || state.history.supportOnly))
       const scButton = element('button', { id: 'yt-chat-tweaks-sc-button', type: 'button',
-        'aria-label': '切換 SC 紀錄' })
+        'aria-label': '切換 SC／會員紀錄' })
       const nativeScIcon = $('#picker-buttons #product-picker svg')
       const scIcon = nativeScIcon ? nativeScIcon.cloneNode(true) : document.createElementNS(SVG_NS, 'svg')
       scIcon.setAttribute('width', '24')
@@ -1708,7 +1742,7 @@
       scButton.style.color = button.style.color
       state.scButton = scButton
       button.insertAdjacentElement('afterend', scButton)
-      scButton.addEventListener('click', () => setEnabled(state, !state.history.enabled || !state.history.superChatOnly, true))
+      scButton.addEventListener('click', () => setEnabled(state, !state.history.enabled || !state.history.supportOnly, true))
       createPanel(state)
       captureTree(sourceItems, state.history)
       state.observer = new MutationObserver(mutations => {
@@ -1718,7 +1752,7 @@
       state.observer.observe(sourceItems, { childList: true, subtree: true, characterData: true,
         attributes: true, attributeFilter: ['author-type', 'type', 'is-deleted', 'author-external-channel-id', 'style'] })
       mounted = state
-      setEnabled(state, state.history.enabled, state.history.superChatOnly)
+      setEnabled(state, state.history.enabled, state.history.supportOnly)
     }
 
     const scheduleRefresh = () => {
@@ -1771,8 +1805,9 @@
       .ytcf-list { flex: 1; min-height: 0; overflow: auto; overflow-anchor: none; padding: 6px 0; }
       .ytcf-message { padding: 5px 10px; overflow-wrap: anywhere; line-height: 1.6; }
       .ytcf-message:hover { background: var(--yt-live-chat-action-panel-background-color, #8882); }
-      .ytcf-super-chat { margin: 3px 6px; border-radius: 4px; }
-      .ytcf-super-chat .ytcf-body a { color: inherit; text-decoration: underline; }
+      .ytcf-support-event { margin: 3px 6px; border-radius: 4px; }
+      .ytcf-support-event .ytcf-body a, .ytcf-event-details a { color: inherit; text-decoration: underline; }
+      .ytcf-event-details { display: block; }
       .ytcf-amount { display: inline-block; margin-right: 5px; padding: 0 5px; border-radius: 4px; color: var(--yt-live-chat-primary-text-color, #0f0f0f); background: var(--yt-live-chat-action-panel-background-color, #8882); font-weight: 600; }
       .ytuc-card { position: fixed; z-index: 2200; box-sizing: border-box; overflow: auto; overscroll-behavior: contain; border: 1px solid var(--yt-live-chat-message-input-border-color, #8884); border-radius: 8px; box-shadow: 0 8px 28px #0006; color: var(--yt-live-chat-primary-text-color, #0f0f0f); background: var(--yt-live-chat-background-color, #fff); font: 13px/1.5 Roboto, Arial, sans-serif; }
       .ytuc-card[hidden], .ytuc-card [hidden] { display: none !important; }
