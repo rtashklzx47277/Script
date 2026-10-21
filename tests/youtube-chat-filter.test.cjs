@@ -252,7 +252,7 @@ test('YouTube membership events: retain welcome and milestone details plus comme
   assert.equal(row.querySelector('.ytcf-event-details').textContent, 'Member for 12 months')
 })
 
-test('YouTube membership events: capture both native gift renderer variants and nested gift donor identities', () => {
+test('YouTube membership events: capture gifts with nested donor identities and ignore gift redemptions', () => {
   const env = boot()
   const history = env.api.getHistory('channel:@host')
   const root = new env.Element()
@@ -268,22 +268,22 @@ test('YouTube membership events: capture both native gift renderer variants and 
   for (const tag of ['ytd-sponsorships-live-chat-gift-redemption-announcement-renderer',
     'yt-live-chat-sponsorships-gift-redemption-announcement-renderer']) {
     const gift = membershipMessage(env, { tag, id: tag, text: 'Received a gift membership from @donor' })
+    assert.equal(env.api.captureLine(gift.line, history), false)
     root.appendChild(gift.line)
   }
   assert.equal(env.api.captureTree(root, history), true)
-  assert.equal(history.messages.length, 4)
-  for (const record of history.messages.slice(0, 2)) {
+  assert.equal(history.messages.length, 2)
+  for (const record of history.messages) {
     assert.equal(record.supportEvent, 'membershipGift')
     assert.equal(record.user, '@donor')
     assert.equal(record.channelId, 'UCAbCdEfGhIjKlMnOpQrStUv')
     assert.equal(record.view.querySelector('.ytcf-amount').textContent, '會員贈禮')
     assert.equal(record.view.querySelector('.ytcf-event-details').textContent, 'Gifted 10 memberships')
   }
-  for (const record of history.messages.slice(2)) {
-    assert.equal(record.supportEvent, 'giftRedemption')
-    assert.equal(record.view.querySelector('.ytcf-amount').textContent, '獲贈會員')
-    assert.equal(record.view.children.at(-1).textContent, 'Received a gift membership from @donor')
-  }
+  history.supportOnly = true
+  const state = { history, list: new env.Element(), empty: {}, count: {}, latest: {} }
+  env.api.renderMessages(state)
+  assert.equal(state.count.textContent, '2 則')
 })
 
 test('YouTube membership events: deduplicate replays and update header-only changes without losing comments or time', () => {

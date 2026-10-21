@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.6.5
+// @version     0.6.6
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @description 提供 YouTube 聊天室用戶資訊卡、獨立 SC／會員事件紀錄、角色與帳號包含／排除篩選、表情複製、重新載入與自動跟隨。
@@ -173,7 +173,6 @@
   const MEMBERSHIP_EVENT_SELECTORS = {
     membership: 'yt-live-chat-membership-item-renderer',
     membershipGift: 'ytd-sponsorships-live-chat-gift-purchase-announcement-renderer, yt-live-chat-sponsorships-gift-purchase-announcement-renderer',
-    giftRedemption: 'ytd-sponsorships-live-chat-gift-redemption-announcement-renderer, yt-live-chat-sponsorships-gift-redemption-announcement-renderer',
   }
   const NATIVE_MESSAGE_SELECTOR = [
     'yt-live-chat-text-message-renderer', 'yt-live-chat-paid-message-renderer',
@@ -790,7 +789,7 @@
     }
 
     const textValue = value => value?.simpleText || value?.runs?.map(run => run.text || '').join('') || ''
-    const EVENT_LABELS = { membership: '會員加入', milestone: '會員里程碑', membershipGift: '會員贈禮', giftRedemption: '獲贈會員' }
+    const EVENT_LABELS = { membership: '會員加入', milestone: '會員里程碑', membershipGift: '會員贈禮' }
 
     const readMessage = (line) => {
       let author = $('#author-name', line)
