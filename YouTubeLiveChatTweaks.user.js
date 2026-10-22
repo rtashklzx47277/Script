@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.6.7
+// @version     0.7.0
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @description 提供 YouTube 聊天室用戶資訊卡、獨立 SC／會員事件紀錄、角色與帳號包含／排除篩選、表情複製、重新載入與自動跟隨。
@@ -587,6 +587,9 @@
     const STORAGE_KEY = 'youtube-live-chat-tweaks-settings-v1'
     const MAX_MESSAGES = 2000
     const MAX_CHANNELS = 5
+    const ARCHIVE_DB = 'youtube-live-chat-tweaks-history-v1'
+    const RETENTION_MS = 7 * 24 * 60 * 60 * 1000
+    const OLDER_BATCH = 200
     const STREAMS_KEY = 'youtube-live-chat-tweaks-streams-v1'
     const histories = new Map()
     let globalTargets = { users: [], excludedUsers: [] }
@@ -594,6 +597,10 @@
     let mounted = null
     isFilteredChat = () => !!mounted?.history.enabled
     let refreshTimer = 0
+    let archiveDatabase
+    const pageKey = `${Date.now()}-${Math.random().toString(36).slice(2)}`
+    let anonymousMessage = 0
+    let messageOrder = 0
 
     const $ = (selector, root = document) => root.querySelector(selector)
     const $$ = (selector, root = document) => [...root.querySelectorAll(selector)]
@@ -629,6 +636,244 @@
       } catch (_) { return Object.create(null) }
     }
     const readSavedSettings = () => readStorageObject(STORAGE_KEY)
+
+    const openArchive = () => {
+      if (!archiveDatabase) archiveDatabase = new Promise((resolve, reject) => {
+        const request = indexedDB.open(ARCHIVE_DB, 1)
+        request.onupgradeneeded = () => {
+          const store = request.result.createObjectStore('messages', { keyPath: ['scope', 'storageId'] })
+          store.createIndex('scope', 'scope')
+          store.createIndex('expiresAt', 'expiresAt')
+        }
+        request.onsuccess = () => {
+          const database = request.result
+          database.onversionchange = () => { database.close(); archiveDatabase = null }
+          resolve(database)
+        }
+        request.onerror = () => { archiveDatabase = null; reject(request.error) }
+        request.onblocked = () => { archiveDatabase = null; reject(new Error('History database is blocked')) }
+      })
+      return archiveDatabase
+    }
+    const transactionDone = transaction => new Promise((resolve, reject) => {
+      transaction.oncomplete = () => resolve()
+      transaction.onerror = transaction.onabort = () => reject(transaction.error || new Error('History transaction failed'))
+    })
+    const pruneArchive = async () => {
+      if (typeof indexedDB === 'undefined') return
+      const database = await openArchive()
+      const transaction = database.transaction('messages', 'readwrite')
+      const done = transactionDone(transaction)
+      const request = transaction.objectStore('messages').index('expiresAt').openCursor()
+      const now = Date.now()
+      request.onsuccess = () => {
+        const cursor = request.result
+        if (!cursor || cursor.value.expiresAt > now) return
+        cursor.delete()
+        cursor.continue()
+      }
+      await done
+    }
+
+    // Store presentation as a small DOM tree. Restoring never uses innerHTML,
+    // and only inert elements, safe URLs and color properties are accepted.
+    const ARCHIVE_TAGS = new Set(['div', 'span', 'strong', 'time', 'img', 'a', 'b', 'i', 'em', 'br',
+      'svg', 'path', 'g', 'circle', 'rect', 'ellipse', 'line', 'polygon', 'polyline'])
+    const ARCHIVE_ATTRIBUTES = new Set(['class', 'src', 'alt', 'href', 'aria-label', 'viewBox', 'd',
+      'fill', 'stroke', 'stroke-width', 'width', 'height', 'x', 'y', 'r', 'cx', 'cy', 'rx', 'ry', 'points', 'transform'])
+    const archiveTree = (node, depth = 0) => {
+      if (depth > 20) return null
+      if (node.nodeType === 3 || node.tagName === '#text') return { text: node.textContent }
+      if (node.nodeType !== 1) return null
+      return {
+        tag: (node.localName || node.tagName).toLowerCase(), svg: node.namespaceURI === SVG_NS,
+        attributes: [...node.attributes].filter(attr => ARCHIVE_ATTRIBUTES.has(attr.name)).map(attr => [attr.name, attr.value]),
+        color: node.style.color || '', background: node.style.backgroundColor || '',
+        children: [...node.childNodes].map(child => archiveTree(child, depth + 1)).filter(Boolean),
+      }
+    }
+    const safeArchiveUrl = value => {
+      try {
+        const url = new URL(value, location.href)
+        return ['https:', 'http:'].includes(url.protocol) || /^data:image\/(png|gif|jpe?g|webp);base64,/i.test(value) ? url.href : ''
+      } catch (_) { return '' }
+    }
+    const restoreTree = (tree, budget = { remaining: 3000 }, depth = 0) => {
+      if (!tree || typeof tree !== 'object' || depth > 20 || --budget.remaining < 0) return null
+      if (typeof tree.text === 'string') return document.createTextNode(tree.text)
+      const tag = ARCHIVE_TAGS.has(tree.tag) ? tree.tag : 'span'
+      const node = tree.svg && ['svg', 'path', 'g', 'circle', 'rect', 'ellipse', 'line', 'polygon', 'polyline'].includes(tag)
+        ? document.createElementNS(SVG_NS, tag) : document.createElement(tag)
+      for (const attr of Array.isArray(tree.attributes) ? tree.attributes : []) {
+        if (!Array.isArray(attr) || attr.length !== 2) continue
+        let [name, value] = attr
+        if (!ARCHIVE_ATTRIBUTES.has(name) || typeof value !== 'string') continue
+        if (name === 'href' || name === 'src') {
+          value = safeArchiveUrl(value)
+          if (!value) continue
+        }
+        if (['fill', 'stroke'].includes(name) && /url\s*\(/i.test(value)) continue
+        if (name === 'class') value = value.split(/\s+/).filter(part => part.startsWith('ytcf-') || part === 'emoji').join(' ')
+        node.setAttribute(name, value)
+      }
+      if (tag === 'a') { node.target = '_blank'; node.rel = 'noopener noreferrer' }
+      if (typeof tree.color === 'string') node.style.color = tree.color
+      if (typeof tree.background === 'string') node.style.backgroundColor = tree.background
+      for (const child of Array.isArray(tree.children) ? tree.children : []) {
+        const restored = restoreTree(child, budget, depth + 1)
+        if (restored) node.appendChild(restored)
+      }
+      return node
+    }
+    const archiveRecord = (history, record) => ({
+      scope: history.scope, storageId: record.storageId, createdAt: record.createdAt,
+      order: record.order,
+      expiresAt: record.createdAt + RETENTION_MS, id: record.id, user: record.user, channelId: record.channelId,
+      moderator: record.moderator, broadcaster: record.broadcaster, verified: record.verified,
+      superChat: record.superChat, supportEvent: record.supportEvent, fingerprint: record.fingerprint,
+      tree: archiveTree(record.view),
+    })
+    const validArchiveRecord = (saved, scope) => saved && saved.scope === scope &&
+      typeof saved.storageId === 'string' && typeof saved.id === 'string' && typeof saved.user === 'string' &&
+      Number.isFinite(saved.createdAt) && saved.createdAt <= Date.now() && saved.createdAt + RETENTION_MS > Date.now() &&
+      saved.tree && typeof saved.tree === 'object'
+    const restoreRecord = saved => {
+      if (saved.tree?.tag !== 'div') return null
+      const view = restoreTree(saved.tree)
+      if (!view || view.firstChild?.tagName?.toLowerCase() !== 'time') return null
+      view.classList.add('ytcf-message')
+      return { id: saved.id, storageId: saved.storageId, createdAt: saved.createdAt,
+        order: Number.isSafeInteger(saved.order) ? saved.order : 0,
+        user: saved.user, channelId: typeof saved.channelId === 'string' ? saved.channelId : '',
+        moderator: saved.moderator === true, broadcaster: saved.broadcaster === true, verified: saved.verified === true,
+        superChat: saved.superChat === true,
+        supportEvent: ['superChat', 'membership', 'milestone', 'membershipGift'].includes(saved.supportEvent) ? saved.supportEvent : '',
+        fingerprint: saved.fingerprint, view, retained: true }
+    }
+    const updateArchiveStatus = history => {
+      if (mounted?.history !== history) return
+      const status = $('.ytcf-history-status', mounted.panel)
+      if (!status) return
+      status.hidden = history.archiveReady && !history.archiveError
+      status.textContent = history.archiveError ? '此瀏覽器無法保存紀錄；目前僅暫存於本次頁面。'
+        : history.archiveReady ? '' : '正在載入已保存的紀錄…'
+    }
+    const flushHistory = async history => {
+      if (!history.archiveReady || history.archiveError) return
+      if (history.writePromise) {
+        try { await history.writePromise } catch (_) {}
+        return flushHistory(history)
+      }
+      if (!history.saveQueue.size) return
+      const batch = [...history.saveQueue.values()]
+      history.saveQueue.clear()
+      history.writePromise = (async () => {
+        const database = await openArchive()
+        const transaction = database.transaction('messages', 'readwrite')
+        const done = transactionDone(transaction)
+        const store = transaction.objectStore('messages')
+        for (const saved of batch) {
+          const request = store.get([saved.scope, saved.storageId])
+          request.onsuccess = () => {
+            const previous = request.result
+            if (previous && Number.isFinite(previous.createdAt) && previous.createdAt <= saved.createdAt) {
+              saved.createdAt = previous.createdAt
+              saved.order = Number.isSafeInteger(previous.order) ? previous.order : saved.order
+            }
+            saved.expiresAt = saved.createdAt + RETENTION_MS
+            const current = saved.id ? history.ids.get(saved.id) : null
+            if (current?.storageId === saved.storageId) {
+              current.createdAt = Math.min(current.createdAt, saved.createdAt)
+              current.order = saved.order
+            }
+            const older = history.older.get(saved.storageId)
+            if (older) older.createdAt = Math.min(older.createdAt, saved.createdAt)
+            if (saved.expiresAt > Date.now()) store.put(saved)
+          }
+        }
+        await done
+      })()
+      try { await history.writePromise }
+      catch (_) {
+        history.archiveError = true
+        updateArchiveStatus(history)
+      } finally { history.writePromise = null }
+    }
+    const saveRecord = (history, record) => {
+      if (history.archiveError) return
+      history.saveQueue.set(record.storageId, archiveRecord(history, record))
+      if (history.saveScheduled) return
+      history.saveScheduled = true
+      Promise.resolve().then(() => { history.saveScheduled = false; return flushHistory(history) })
+    }
+    const trimHistory = history => {
+      while (history.messages.length > history.displayLimit) {
+        const oldest = history.messages.shift()
+        if (!history.archiveError) history.older.set(oldest.storageId, archiveRecord(history, oldest))
+        forgetRecord(history, oldest)
+      }
+    }
+    const restoreHistory = async history => {
+      if (typeof indexedDB === 'undefined') {
+        history.archiveReady = true
+        history.archiveError = true
+        return
+      }
+      try {
+        const database = await openArchive()
+        await pruneArchive()
+        const transaction = database.transaction('messages', 'readonly')
+        const done = transactionDone(transaction)
+        const request = transaction.objectStore('messages').index('scope').getAll(history.scope)
+        const read = new Promise((resolve, reject) => {
+          request.onsuccess = () => resolve(request.result)
+          request.onerror = () => reject(request.error)
+        })
+        const [saved] = await Promise.all([read, done])
+        const records = saved.filter(item => validArchiveRecord(item, history.scope))
+          .sort((a, b) => a.createdAt - b.createdAt || (a.order || 0) - (b.order || 0))
+        for (const item of records) {
+          const current = item.id ? history.ids.get(item.id) : null
+          if (current) {
+            current.createdAt = Math.min(current.createdAt, item.createdAt)
+            current.order = Number.isSafeInteger(item.order) ? item.order : current.order
+            current.view.firstChild.textContent = restoreTree(item.tree)?.firstChild?.textContent || current.view.firstChild.textContent
+            saveRecord(history, current)
+          } else history.older.set(item.storageId, item)
+        }
+        const take = Math.max(0, history.displayLimit - history.messages.length)
+        const latest = take ? [...history.older.values()].slice(-take) : []
+        const restored = []
+        for (const item of latest) {
+          history.older.delete(item.storageId)
+          const record = restoreRecord(item)
+          if (!record) continue
+          restored.push(record)
+          if (record.id) history.ids.set(record.id, record)
+          history.dirty.add(record)
+        }
+        history.messages.unshift(...restored)
+        history.messages.sort((a, b) => a.createdAt - b.createdAt || a.order - b.order)
+        history.archiveReady = true
+        await flushHistory(history)
+        if (mounted?.history === history && history.enabled) renderMessages(mounted, true)
+      } catch (_) { history.archiveReady = true; history.archiveError = true }
+      updateArchiveStatus(history)
+    }
+    const pruneHistories = () => {
+      const cutoff = Date.now() - RETENTION_MS
+      for (const history of histories.values()) {
+        history.messages = history.messages.filter(record => {
+          if (record.createdAt > cutoff) return true
+          forgetRecord(history, record)
+          history.saveQueue.delete(record.storageId)
+          return false
+        })
+        for (const [key, saved] of history.older) if (saved.createdAt <= cutoff) history.older.delete(key)
+      }
+      if (mounted?.history.enabled) renderMessages(mounted)
+      pruneArchive().catch(() => {})
+    }
 
     const scopeFromOwner = root => {
       const link = root?.querySelector('#owner a[href^="/@"], #owner a[href^="/channel/"]')
@@ -729,7 +974,9 @@
     }
 
     const getHistory = (channel) => {
+      const scope = unresolvedScope || channel
       let history = histories.get(channel)
+      if (history && history.scope !== scope) history = null
       const pending = channel.startsWith('channel:') ? histories.get(unresolvedScope) : null
       if (pending && !history) {
         history = pending
@@ -739,23 +986,26 @@
         if (saved[channel]) history.settings = loadSettings(channel)
         else if (saved[unresolvedScope]) saveSettings(history)
       } else if (pending && pending !== history) {
+        for (const [key, saved] of pending.older) {
+          if (!saved.id || !history.ids.has(saved.id)) history.older.set(key, saved)
+        }
         for (const record of pending.messages) {
           if (record.id && history.ids.has(record.id)) continue
           history.messages.push(record)
           history.dirty.add(record)
           if (record.id) history.ids.set(record.id, record)
         }
-        while (history.messages.length > MAX_MESSAGES) {
-          const oldest = history.messages.shift()
-          forgetRecord(history, oldest)
-        }
+        trimHistory(history)
         histories.delete(unresolvedScope)
       }
       if (!history) {
         history = {
           channel, settings: loadSettings(channel), messages: [], nodes: new WeakMap(), ids: new Map(),
           enabled: false, supportOnly: false, follow: true, dirty: new Set(), removed: new Set(),
+          scope, older: new Map(), saveQueue: new Map(), displayLimit: MAX_MESSAGES,
+          archiveReady: false, archiveError: false,
         }
+        history.restorePromise = restoreHistory(history)
       }
       histories.delete(channel)
       histories.set(channel, history)
@@ -1284,6 +1534,7 @@
       const message = readMessage(line)
       if (!message) return false
       const previous = message.id ? history.ids.get(message.id) : history.nodes.get(line)
+      const archived = message.id ? history.older.get(message.id) : null
       if (!previous?.retained && (!message.supportEvent && !message.moderator && !message.broadcaster && !message.verified && !includesAuthor(history.settings.users, message) &&
         !includesAuthor(history.settings.globalUsers || [], message))) return false
       const fingerprint = `${message.user}\n${message.channelId}\n${message.deleted}\n${message.moderator}\n${message.broadcaster}\n${message.verified}\n${message.supportEvent}\n${message.amount}\n${JSON.stringify(message.colors)}\n${message.details.map(node => node.innerHTML || node.textContent).join('\n')}\n${message.author.textContent}\n${message.body.innerHTML}`
@@ -1299,16 +1550,21 @@
           broadcaster: message.broadcaster, verified: message.verified, superChat: message.superChat, supportEvent: message.supportEvent, view, fingerprint })
       } else {
         record = { id: message.id, user: message.user, channelId: message.channelId, moderator: message.moderator,
-          broadcaster: message.broadcaster, verified: message.verified, superChat: message.superChat, supportEvent: message.supportEvent, view, fingerprint, retained: true }
-        history.messages.push(record)
-        if (history.messages.length > MAX_MESSAGES) {
-          const oldest = history.messages.shift()
-          forgetRecord(history, oldest)
+          broadcaster: message.broadcaster, verified: message.verified, superChat: message.superChat, supportEvent: message.supportEvent,
+          storageId: message.id || `${pageKey}-${++anonymousMessage}`,
+          createdAt: archived?.createdAt || Date.now(), order: archived?.order || ++messageOrder,
+          view, fingerprint, retained: true }
+        if (archived) {
+          view.firstChild.textContent = restoreTree(archived.tree)?.firstChild?.textContent || view.firstChild.textContent
+          history.older.delete(message.id)
         }
+        history.messages.push(record)
+        trimHistory(history)
       }
       history.nodes.set(line, record)
       if (message.id) history.ids.set(message.id, record)
       history.dirty.add(record)
+      saveRecord(history, record)
       return true
     }
 
@@ -1378,7 +1634,7 @@
           if (oldView.parentElement === list) oldView.replaceWith(record.view)
           else oldView.remove()
         }
-        if (record.view.parentElement !== list) list.appendChild(record.view)
+        if (full || record.view.parentElement !== list) list.appendChild(record.view)
         record.renderedView = record.view
         record.visible = show
       }
@@ -1388,6 +1644,10 @@
       empty.hidden = state.visibleCount > 0
       const countText = `${state.visibleCount} 則`
       if (count.textContent !== countText) count.textContent = countText
+      if (state.older) {
+        state.older.hidden = !history.older.size
+        state.older.textContent = `載入較早紀錄（${history.older.size}）`
+      }
       // All row writes finish before the one layout read needed for following.
       if (history.follow) list.scrollTop = list.scrollHeight
       latest.hidden = history.follow
@@ -1489,6 +1749,7 @@
         keepFollowingLatest()
       }
       state.panel.hidden = !enabled
+      updateArchiveStatus(state.history)
       setPanelLayer(state, enabled)
       state.button.setAttribute('aria-pressed', String(enabled && !supportOnly))
       state.scButton?.setAttribute('aria-pressed', String(enabled && supportOnly))
@@ -1599,6 +1860,8 @@
         ]),
       ]))
       panel.appendChild(element('p', { class: 'ytcf-empty' }, ['尚無符合條件的發言。新增目標帳號後開始收集。']))
+      panel.appendChild(element('p', { class: 'ytcf-history-status', role: 'status', hidden: '' }))
+      panel.appendChild(element('button', { class: 'ytcf-older', type: 'button', hidden: '' }, ['載入較早紀錄']))
       panel.appendChild(element('div', { class: 'ytcf-list', role: 'log',
         'aria-label': '篩選後的聊天訊息', 'aria-live': 'off' }))
       panel.appendChild(element('button', { class: 'ytcf-latest', type: 'button', hidden: '' }, ['回到最新訊息']))
@@ -1607,6 +1870,27 @@
       state.empty = $('.ytcf-empty', panel)
       state.count = $('.ytcf-count', panel)
       state.latest = $('.ytcf-latest', panel)
+      state.older = $('.ytcf-older', panel)
+      state.older.addEventListener('click', () => {
+        const history = state.history
+        const saved = [...history.older.values()].slice(-OLDER_BATCH)
+        const restored = []
+        const beforeHeight = state.list.scrollHeight
+        const beforeTop = state.list.scrollTop
+        for (const item of saved) {
+          history.older.delete(item.storageId)
+          if (!validArchiveRecord(item, history.scope)) continue
+          const record = restoreRecord(item)
+          if (!record) continue
+          restored.push(record)
+          if (record.id) history.ids.set(record.id, record)
+        }
+        history.displayLimit += restored.length
+        history.messages.unshift(...restored)
+        history.follow = false
+        renderMessages(state, true)
+        state.list.scrollTop = beforeTop + state.list.scrollHeight - beforeHeight
+      })
       const moderators = $('[name="moderators"]', panel)
       const broadcaster = $('[name="broadcaster"]', panel)
       const verified = $('[name="verified"]', panel)
@@ -1702,7 +1986,7 @@
       const scroller = $('#item-scroller')
       const sourceItems = scroller && $('#items', scroller)
       const menu = $('#live-chat-header-context-menu')
-      if (mounted && (mounted.history.channel !== channel || mounted.header !== header ||
+      if (mounted && (mounted.history.channel !== channel || mounted.history.scope !== unresolvedScope || mounted.header !== header ||
         mounted.scroller !== scroller || mounted.items !== sourceItems || !mounted.button.isConnected ||
         !mounted.scButton.isConnected || !mounted.panel.isConnected)) unmount()
       if (mounted || !header || !menu || !sourceItems || !scroller?.parentElement) return
@@ -1762,6 +2046,7 @@
         attributes: true, attributeFilter: ['author-type', 'type', 'is-deleted', 'author-external-channel-id', 'style'] })
       mounted = state
       setEnabled(state, state.history.enabled, state.history.supportOnly)
+      updateArchiveStatus(state.history)
     }
 
     const scheduleRefresh = () => {
@@ -1812,6 +2097,8 @@
       .ytcf-users button[type="submit"] { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; padding: 0 10px; border: 1px solid var(--yt-live-chat-message-input-border-color, #8886); border-radius: 4px; color: var(--yt-live-chat-primary-text-color, #0f0f0f); background: var(--yt-live-chat-button-default-background-color, #8882); font-weight: 600; line-height: 1; }
       .ytcf-users button[type="submit"]:hover { filter: brightness(1.2); }
       .ytcf-empty { padding: 16px 12px; color: var(--yt-live-chat-secondary-text-color, #606060); }
+      .ytcf-history-status { margin: 0; padding: 8px 12px; color: var(--yt-live-chat-secondary-text-color, #606060); font-size: 12px; }
+      .ytcf-older { align-self: center; flex-shrink: 0; margin: 6px; }
       .ytcf-list { flex: 1; min-height: 0; overflow: auto; overflow-anchor: none; padding: 6px 0; }
       .ytcf-message { padding: 5px 10px; overflow-wrap: anywhere; line-height: 1.6; }
       .ytcf-message:hover { background: var(--yt-live-chat-action-panel-background-color, #8882); }
@@ -1864,7 +2151,7 @@
       yt-live-chat-header-renderer > #viewer-leaderboard-entry-point { order: -1 !important; margin-inline-start: 0 !important; margin-inline-end: auto !important; }
       .ytcf-latest { position: absolute; bottom: 8px; align-self: center; }
       .ytcf-managing > .ytcf-toolbar { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow-y: auto; }
-      .ytcf-managing > .ytcf-empty, .ytcf-managing > .ytcf-list, .ytcf-managing > .ytcf-latest { display: none !important; }
+      .ytcf-managing > .ytcf-empty, .ytcf-managing > .ytcf-list, .ytcf-managing > .ytcf-latest, .ytcf-managing > .ytcf-older { display: none !important; }
       .ytcf-options { flex-shrink: 0; }
       .ytcf-panel .ytcf-target-summary { display: inline-flex; align-items: center; gap: 3px; flex-shrink: 0; padding: 0; color: var(--yt-live-chat-button-default-text-color, #065fd4); background: transparent; white-space: nowrap; font: inherit; cursor: pointer; }
       .ytcf-target-summary::before { content: '▸'; }
@@ -1891,8 +2178,16 @@
     })
     window.addEventListener('resize', schedulePanelPosition)
     document.addEventListener('visibilitychange', handleMessageVisibility)
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) pruneHistories()
+      else for (const history of histories.values()) flushHistory(history)
+    })
+    window.addEventListener('pagehide', () => {
+      for (const history of histories.values()) flushHistory(history)
+    })
     window.addEventListener('scroll', schedulePanelPosition, true)
     setInterval(refresh, 1000)
+    setInterval(pruneHistories, 60000)
     refresh()
     // End YouTube chat filtering.
   })()

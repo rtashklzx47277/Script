@@ -227,7 +227,8 @@
   const items = () => document.querySelector('#item-scroller #items')
   function addMessage(user, role = '', amount = '', noMessage = false, palette = scPalettes[2]) {
     const line = document.createElement(amount ? 'yt-live-chat-paid-message-renderer' : 'yt-live-chat-text-message-renderer')
-    line.id = `message-${++serial}`
+    serial++
+    line.id = serial <= 4 ? `message-${serial}` : `message-${Date.now()}-${serial}`
     line.setAttribute('author-type', role)
     line.setAttribute('whole-message-clickable', 'fixture')
     line.addEventListener('click', () => { document.getElementById('message-action-menu').parentElement.hidden = false })

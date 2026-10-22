@@ -4,7 +4,7 @@ const fs = require('node:fs')
 const vm = require('node:vm')
 const path = require('node:path')
 
-function boot({ saved, blocked = false, trustedTypes = false, parentWindow, fetchProfile, nativeMenu } = {}) {
+function boot({ saved, blocked = false, trustedTypes = false, parentWindow, fetchProfile, nativeMenu, database, now } = {}) {
   const profileCalls = []
   const menuCalls = []
   class Element {
@@ -20,10 +20,15 @@ function boot({ saved, blocked = false, trustedTypes = false, parentWindow, fetc
       this.hidden = false
       this.value = ''
     }
-    get attributes() { return [...this.attrs].map(([name, value]) => ({ name, value })) }
+    get attributes() {
+      const attributes = new Map(this.attrs)
+      if (this.className) attributes.set('class', this.className)
+      return [...attributes].map(([name, value]) => ({ name, value }))
+    }
     get textContent() { return (this._textContent || '') + this.children.map(child => child.textContent).join('') }
     set textContent(value) { this._textContent = String(value); this.replaceChildren() }
     get firstChild() { return this.children[0] }
+    get childNodes() { return [...(this._textContent ? [{ nodeType: 3, textContent: this._textContent }] : []), ...this.children] }
     get innerHTML() { return this._innerHTML }
     set innerHTML(value) {
       if (trustedTypes) throw new TypeError('This document requires TrustedHTML assignment')
@@ -143,6 +148,8 @@ function boot({ saved, blocked = false, trustedTypes = false, parentWindow, fetc
   let nextTimer = 0
   const context = {
     document, location: { pathname: '/live_chat', href: 'https://www.youtube.com/live_chat?v=sample_video', origin: 'https://www.youtube.com' }, console, URL,
+    indexedDB: database,
+    Date: now ? class extends Date { static now() { return now() } } : Date,
     window: { parent: parentWindow, addEventListener(name, fn) {
       const previous = listeners.get(name)
       listeners.set(name, previous ? event => { previous(event); fn(event) } : fn)
@@ -171,6 +178,7 @@ function boot({ saved, blocked = false, trustedTypes = false, parentWindow, fetc
     globalThis.api = { normalizeAccount, getChannel, getHistory, loadSettings, saveSettings,
       readMessage, matchesFilter, captureLine, captureTree, captureMutations, renderMessages, changeTargetUsers,
       scheduleMessageRender, releaseMessageViews, handleMessageVisibility,
+      archiveTree, restoreTree, archiveRecord, restoreRecord, flushHistory, pruneHistories, pruneArchive,
       refresh, refreshHeader, setEnabled, showTargetStatus, guardMessageMenu, guardMenuDismissal,
       getProfile, showAuthorCard, authorSnapshot, dismissCard, getAuthorCard, setPanelLayer, positionFilterPanel, fitCardText,
       setMounted: state => { mounted = state },
@@ -221,6 +229,144 @@ function membershipMessage(env, { tag = 'yt-live-chat-membership-item-renderer',
   if (text !== null) result.line.appendChild(result.body)
   return { ...result, headers }
 }
+
+const fakeIndexedDB = require('./helpers/indexeddb.cjs')
+
+test('YouTube archive: persist SC and filtered messages across reloads with colors, emoji, headers and IDs', async () => {
+  const database = fakeIndexedDB()
+  const env = boot({ database, trustedTypes: true })
+  const history = env.api.getHistory('channel:@host')
+  await history.restorePromise
+  const sc = superChatMessage(env, '@donor', '謝謝直播', 'NT$150', 'sc-persist')
+  sc.line.data = { bodyBackgroundColor: 0xff1de9b6, headerBackgroundColor: 0xff00bfa5, bodyTextColor: 0xff000000 }
+  const emoji = sc.body.appendChild(new env.Element('img'))
+  emoji.setAttribute('src', 'https://example.com/emoji.png')
+  emoji.setAttribute('alt', ':smile:')
+  env.api.captureLine(sc.line, history)
+  env.api.captureLine(env.message('@mod', 'moderator comment', 'moderator', 'mod-persist').line, history)
+  env.api.captureLine(membershipMessage(env, { primary: 'Member for 12 months', text: 'milestone comment', id: 'member-persist' }).line, history)
+  await env.api.flushHistory(history)
+  assert.equal(database.records.size, 3)
+  const fresh = boot({ database, trustedTypes: true })
+  const restored = fresh.api.getHistory('channel:@host')
+  await restored.restorePromise
+  assert.equal(restored.messages.length, 3)
+  assert.equal(restored.ids.size, 3)
+  const scRecord = restored.ids.get('sc-persist')
+  assert.equal(scRecord.view.style.backgroundColor, '#1de9b6ff')
+  assert.equal(scRecord.view.querySelector('.ytcf-amount').textContent, 'SC NT$150')
+  assert.equal(scRecord.view.querySelector('img').getAttribute('src'), 'https://example.com/emoji.png')
+  assert.equal(restored.ids.get('mod-persist').view.children.at(-1).textContent, 'moderator comment')
+  assert.equal(restored.ids.get('member-persist').view.querySelector('.ytcf-event-details').textContent, 'Member for 12 months')
+  assert.equal(fresh.api.captureLine(fresh.message('@mod', 'moderator comment', 'moderator', 'mod-persist').line, restored), false)
+  assert.equal(restored.messages.length, 3)
+})
+
+test('YouTube archive: messages received during startup merge with saved history without resetting seven-day expiry', async () => {
+  const database = fakeIndexedDB()
+  let now = Date.now()
+  const firstSeen = now
+  const env = boot({ database, now: () => now })
+  const history = env.api.getHistory('channel:@host')
+  await history.restorePromise
+  env.api.captureLine(env.message('@mod', 'earlier message', 'moderator', 'first-id').line, history)
+  env.api.captureLine(env.message('@mod', 'first version', 'moderator', 'same-id').line, history)
+  await env.api.flushHistory(history)
+  now += 6 * 24 * 60 * 60 * 1000
+  const fresh = boot({ database, now: () => now })
+  const restored = fresh.api.getHistory('channel:@host')
+  fresh.api.captureLine(fresh.message('@mod', 'updated version', 'moderator', 'same-id').line, restored)
+  fresh.api.captureLine(fresh.message('@mod', 'new message', 'moderator', 'new-id').line, restored)
+  await restored.restorePromise
+  await fresh.api.flushHistory(restored)
+  assert.equal(restored.messages.length, 3)
+  assert.equal(restored.messages.map(record => record.id).join(','), 'first-id,same-id,new-id')
+  assert.equal(restored.ids.get('same-id').createdAt, firstSeen)
+  assert.equal(restored.ids.get('same-id').view.children.at(-1).textContent, 'updated version')
+  now = firstSeen + 7 * 24 * 60 * 60 * 1000
+  fresh.api.pruneHistories()
+  await fresh.api.pruneArchive()
+  assert.equal(restored.messages.length, 1)
+  assert.equal(restored.ids.has('same-id'), false)
+  assert.equal(database.records.size, 1)
+  assert.equal([...database.records.values()][0].id, 'new-id')
+})
+
+test('YouTube archive: isolate videos, retain evicted history on disk and merge concurrent writers', async () => {
+  const database = fakeIndexedDB()
+  const first = boot({ database })
+  const second = boot({ database })
+  const a = first.api.getHistory('channel:@host')
+  const b = second.api.getHistory('channel:@host')
+  await Promise.all([a.restorePromise, b.restorePromise])
+  a.displayLimit = 2
+  for (let index = 0; index < 3; index++) first.api.captureLine(first.message('@mod', `message ${index}`, 'moderator', `id-${index}`).line, a)
+  second.api.captureLine(second.message('@mod', 'other tab', 'moderator', 'id-other').line, b)
+  first.api.captureLine(first.message('@mod', 'same message', 'moderator', 'shared-id').line, a)
+  second.api.captureLine(second.message('@mod', 'same message', 'moderator', 'shared-id').line, b)
+  await Promise.all([first.api.flushHistory(a), second.api.flushHistory(b)])
+  assert.equal(a.messages.length, 2)
+  assert.equal(a.older.size, 2)
+  assert.equal(database.records.size, 5)
+  const fresh = boot({ database })
+  const restored = fresh.api.getHistory('channel:@host')
+  await restored.restorePromise
+  assert.equal(restored.messages.length, 5)
+  fresh.location.href = 'https://www.youtube.com/live_chat?v=other_video'
+  fresh.api.getChannel()
+  const otherVideo = fresh.api.getHistory('channel:@host')
+  await otherVideo.restorePromise
+  assert.notEqual(otherVideo, restored)
+  assert.equal(otherVideo.messages.length, 0)
+  assert.equal(database.records.size, 5)
+})
+
+test('YouTube archive: write failures keep the page history and unsafe saved markup stays inert', async () => {
+  const database = fakeIndexedDB()
+  const env = boot({ database, trustedTypes: true })
+  const history = env.api.getHistory('channel:@host')
+  await history.restorePromise
+  database.failWrites = true
+  env.api.captureLine(env.message('@mod', 'keep in memory', 'moderator', 'quota').line, history)
+  await env.api.flushHistory(history)
+  assert.equal(history.archiveError, true)
+  assert.equal(history.messages.length, 1)
+  const link = env.api.restoreTree({ tag: 'a', attributes: [['href', 'javascript:alert(1)'], ['onclick', 'alert(1)']],
+    children: [{ tag: 'script', children: [{ text: 'untrusted text' }] }] })
+  assert.equal(link.getAttribute('href'), null)
+  assert.equal(link.getAttribute('onclick'), null)
+  assert.equal(link.children[0].tagName, 'span')
+  assert.equal(link.textContent, 'untrusted text')
+})
+
+test('YouTube archive: older saved messages remain accessible beyond the initial view limit', async () => {
+  const database = fakeIndexedDB()
+  const first = boot({ database })
+  const history = first.api.getHistory('video:sample_video')
+  await history.restorePromise
+  for (let index = 0; index < 3; index++) first.api.captureLine(first.message('@mod', `old ${index}`, 'moderator', `older-${index}`).line, history)
+  await first.api.flushHistory(history)
+  const fresh = boot({ database })
+  const { document, Element } = fresh
+  const header = document.body.appendChild(new Element('yt-live-chat-header-renderer'))
+  header.appendChild(new Element('button')).id = 'live-chat-header-context-menu'
+  const scroller = document.body.appendChild(new Element('div')).appendChild(new Element('div'))
+  scroller.id = 'item-scroller'
+  scroller.appendChild(new Element('div')).id = 'items'
+  fresh.api.refresh()
+  const state = fresh.api.mounted
+  state.history.displayLimit = 2
+  await state.history.restorePromise
+  fresh.api.setEnabled(state, true)
+  assert.equal(state.count.textContent, '2 則')
+  assert.equal(state.older.hidden, false)
+  state.list.scrollHeight = 100
+  state.list.scrollTop = 0
+  state.older.listeners.get('click')()
+  assert.equal(state.count.textContent, '3 則')
+  assert.equal(state.older.hidden, true)
+  assert.equal(state.list.firstChild.children.at(-1).textContent, 'old 0')
+})
 
 test('YouTube verified users: recognize native badge types and renderer icons while exclusions still take priority', () => {
   const env = boot()
