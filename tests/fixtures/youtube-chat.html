@@ -82,6 +82,7 @@
 <div class="fixture-tools">
   <button id="add-mod">新增 Moderator 訊息</button>
   <button id="add-user">新增 @alice 訊息</button>
+  <button id="add-verified">新增已驗證用戶訊息</button>
   <button id="add-sc">新增 SC</button>
   <button id="add-empty-sc">新增無留言 SC</button>
   <button id="add-sc-colors">新增七色 SC</button>
@@ -271,12 +272,12 @@
     if (role) {
       const badge = (highlighted ? author : chip).appendChild(document.createElement('yt-live-chat-author-badge-renderer'))
       badge.setAttribute('type', highlighted ? 'verified' : role)
-      badge.setAttribute('aria-label', highlighted ? '確認済み' : role === 'member' ? '會員' : role === 'owner' ? 'Broadcaster' : 'Moderator')
+      badge.setAttribute('aria-label', highlighted || role === 'verified' ? '確認済み' : role === 'member' ? '會員' : role === 'owner' ? 'Broadcaster' : 'Moderator')
       const svg = badge.appendChild(document.createElementNS('http://www.w3.org/2000/svg', 'svg'))
       svg.setAttribute('viewBox', '0 0 24 24')
       const path = svg.appendChild(document.createElementNS('http://www.w3.org/2000/svg', 'path'))
       path.setAttribute('fill', 'currentColor')
-      path.setAttribute('d', highlighted
+      path.setAttribute('d', highlighted || role === 'verified'
         ? 'M12 1C5.925 1 1 5.925 1 12s4.925 11 11 11 11-4.925 11-11S18.075 1 12 1Zm5.707 7.293a1 1 0 010 1.414L10 17.414l-3.707-3.707a1 1 0 111.414-1.414L10 14.586l6.293-6.293a1 1 0 011.414 0Z'
         : 'M4 3h6v7H4zm10 0h6v7h-6zM4 14h6v7H4zm10 0h6v7h-6z')
     }
@@ -346,6 +347,7 @@
   addMessage('@alice', 'member')
   document.getElementById('add-mod').onclick = () => addMessage('@mod_account', 'moderator')
   document.getElementById('add-user').onclick = () => addMessage('@alice')
+  document.getElementById('add-verified').onclick = () => addMessage('@verified_creator', 'verified')
   document.getElementById('add-sc').onclick = () => addMessage('@donor', '', 'NT$150.00')
   document.getElementById('add-empty-sc').onclick = () => addMessage('@donor', '', '¥200', true, scPalettes[0])
   document.getElementById('add-sc-colors').onclick = () => {

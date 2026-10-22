@@ -222,6 +222,68 @@ function membershipMessage(env, { tag = 'yt-live-chat-membership-item-renderer',
   return { ...result, headers }
 }
 
+test('YouTube verified users: recognize native badge types and renderer icons while exclusions still take priority', () => {
+  const env = boot()
+  const history = env.api.getHistory('channel:@host')
+  history.settings.verified = false
+  const variants = [
+    message => message.line.setAttribute('author-type', 'verified'),
+    message => {
+      const badge = message.chip.appendChild(new env.Element('yt-live-chat-author-badge-renderer'))
+      badge.setAttribute('type', 'verified')
+    },
+    message => {
+      const badge = message.chip.appendChild(new env.Element('yt-live-chat-author-badge-renderer'))
+      badge.data = { icon: { iconType: 'VERIFIED' } }
+    },
+    message => { message.line.data = { authorBadges: [{ liveChatAuthorBadgeRenderer: { icon: { iconType: 'VERIFIED' } } }] } },
+  ]
+  for (const [index, decorate] of variants.entries()) {
+    const message = env.message(`@verified${index}`, 'hello', '', `verified-${index}`)
+    decorate(message)
+    assert.equal(env.api.captureLine(message.line, history), true, 'verified messages are retained while the option is off')
+  }
+  const ordinary = env.message('@verified_name', 'VERIFIED', 'member')
+  const badge = ordinary.chip.appendChild(new env.Element('yt-live-chat-author-badge-renderer'))
+  badge.setAttribute('type', 'member')
+  badge.setAttribute('aria-label', 'Verified')
+  assert.equal(env.api.captureLine(ordinary.line, history), false)
+  const state = { history, list: new env.Element(), empty: {}, count: {}, latest: {} }
+  env.api.renderMessages(state)
+  assert.equal(state.count.textContent, '0 則')
+  history.settings.verified = true
+  env.api.renderMessages(state)
+  assert.equal(state.count.textContent, '4 則')
+  history.settings.excludedUsers = ['@verified0']
+  history.settings.globalExcludedUsers = ['@verified1']
+  env.api.renderMessages(state)
+  assert.equal(state.count.textContent, '2 則')
+  history.supportOnly = true
+  env.api.renderMessages(state)
+  assert.equal(state.count.textContent, '0 則', 'ordinary verified messages do not enter the SC/membership list')
+})
+
+test('YouTube verified users: update retained verification status when badges appear or disappear', () => {
+  const env = boot()
+  const history = env.api.getHistory('channel:@host')
+  const message = env.message('@alice', 'hello', '', 'verified-1')
+  assert.equal(env.api.captureLine(message.line, history), false)
+  const badge = message.chip.appendChild(new env.Element('yt-live-chat-author-badge-renderer'))
+  badge.setAttribute('type', 'verified')
+  env.api.captureMutations([{ target: message.chip, addedNodes: [badge] }], history)
+  const record = history.messages[0]
+  const time = record.view.firstChild.textContent
+  assert.equal(record.verified, true)
+  badge.remove()
+  assert.equal(env.api.captureMutations([{ target: message.chip, addedNodes: [] }], history), true)
+  assert.equal(history.messages.length, 1)
+  assert.equal(record.verified, false)
+  assert.equal(record.view.firstChild.textContent, time)
+  assert.equal(env.api.matchesFilter(record, history.settings), false)
+  history.settings.users = ['@alice']
+  assert.equal(env.api.matchesFilter(record, history.settings), true)
+})
+
 test('YouTube membership events: retain welcome and milestone details plus comments without including ordinary member chat', () => {
   const env = boot({ trustedTypes: true })
   const history = env.api.getHistory('channel:@host')
@@ -452,6 +514,20 @@ test('YouTube filters: mount, toggle and remount when Trusted Types rejects HTML
   assert.equal(header.querySelector('#yt-chat-tweaks-reload-button').title, undefined)
   assert.ok(state.panel.isConnected)
   assert.ok(state.panel.querySelector('.ytcf-targets').querySelector('[name="broadcaster"]'))
+  const verifiedOption = state.panel.querySelector('[name="verified"]')
+  assert.equal(verifiedOption.checked, true)
+  verifiedOption.checked = false
+  verifiedOption.listeners.get('change')()
+  const savedSettings = env.storage.get('youtube-live-chat-tweaks-settings-v1')
+  const fresh = boot({ saved: savedSettings })
+  assert.equal(fresh.api.loadSettings(state.history.channel).verified, false)
+  assert.equal(fresh.api.loadSettings('channel:@another').verified, true)
+  const syncedSettings = JSON.parse(savedSettings)
+  syncedSettings[state.history.channel].verified = true
+  env.storage.set('youtube-live-chat-tweaks-settings-v1', JSON.stringify(syncedSettings))
+  env.listeners.get('storage')({ key: 'youtube-live-chat-tweaks-settings-v1' })
+  assert.equal(verifiedOption.checked, true)
+  assert.equal(state.history.settings.verified, true)
   assert.equal(state.panel.querySelector('.ytcf-options').querySelector('[name="moderators"]'), null)
   assert.equal(state.panel.querySelector('.ytcf-target-summary').getAttribute('aria-expanded'), 'false')
   assert.equal(state.panel.className.includes('ytcf-managing'), false)

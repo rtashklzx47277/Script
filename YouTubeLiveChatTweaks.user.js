@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.6.6
+// @version     0.6.7
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @description 提供 YouTube 聊天室用戶資訊卡、獨立 SC／會員事件紀錄、角色與帳號包含／排除篩選、表情複製、重新載入與自動跟隨。
@@ -692,18 +692,19 @@
         return {
           moderators: saved?.moderators !== false,
           broadcaster: saved?.broadcaster !== false,
+          verified: saved?.verified !== false,
           users: normalizeUsers(Array.isArray(saved?.users) ? saved.users.join(' ') : ''),
           excludedUsers: normalizeUsers(Array.isArray(saved?.excludedUsers) ? saved.excludedUsers.join(' ') : ''),
           globalUsers: globalTargets.users, globalExcludedUsers: globalTargets.excludedUsers,
         }
       } catch (_) {
-        return { moderators: true, broadcaster: true, users: [], excludedUsers: [],
+        return { moderators: true, broadcaster: true, verified: true, users: [], excludedUsers: [],
           globalUsers: globalTargets.users, globalExcludedUsers: globalTargets.excludedUsers }
       }
     }
 
     const saveSettings = (history, global = false) => {
-      const { moderators, broadcaster, users, excludedUsers = [], globalUsers = [], globalExcludedUsers = [] } = history.settings
+      const { moderators, broadcaster, verified, users, excludedUsers = [], globalUsers = [], globalExcludedUsers = [] } = history.settings
       if (global) {
         globalTargets = { users: globalUsers, excludedUsers: globalExcludedUsers }
         for (const item of histories.values()) Object.assign(item.settings, { globalUsers, globalExcludedUsers })
@@ -711,7 +712,7 @@
       try {
         const saved = readSavedSettings()
         if (global) saved['@global'] = globalTargets
-        else saved[history.channel] = { moderators, broadcaster, users, excludedUsers }
+        else saved[history.channel] = { moderators, broadcaster, verified, users, excludedUsers }
         localStorage.setItem(STORAGE_KEY, JSON.stringify(saved))
         return true
       } catch (_) { return false }
@@ -834,12 +835,15 @@
       const classes = (author.getAttribute('class') || '').split(/\s+/)
       const moderator = type === 'moderator' || classes.includes('moderator') || badges.some(b => b.getAttribute('type') === 'moderator')
       const broadcaster = type === 'owner' || classes.includes('owner') || badges.some(b => b.getAttribute('type') === 'owner')
+      const verified = type === 'verified' || badges.some(b => b.getAttribute('type') === 'verified' ||
+        rendererData(b).icon?.iconType === 'VERIFIED') ||
+        (identity.authorBadges || data.authorBadges || []).some(b => b?.liveChatAuthorBadgeRenderer?.icon?.iconType === 'VERIFIED')
       const deleted = line.hasAttribute('is-deleted')
       if (deleted) {
         message = document.createElement('span')
         message.textContent = $('#deleted-state', line)?.textContent?.trim() || '訊息已刪除'
       }
-      return { user, channelId, moderator, broadcaster, superChat, supportEvent, amount, author, body: message, details, badges, deleted,
+      return { user, channelId, moderator, broadcaster, verified, superChat, supportEvent, amount, author, body: message, details, badges, deleted,
         colors: supportEvent ? readEventColors(line, data) : null,
         id: line.id || data.id || '', time: $('#timestamp', line)?.textContent?.trim() || textValue(data.timestampText),
         avatar: $('#author-photo img', line)?.getAttribute('src') || identity.authorPhoto?.thumbnails?.[0]?.url || '',
@@ -1198,6 +1202,7 @@
       !includesAuthor(settings.excludedUsers || [], message) && !includesAuthor(settings.globalExcludedUsers || [], message) && (
         (settings.moderators && message.moderator) ||
         (settings.broadcaster && message.broadcaster) ||
+        (settings.verified && message.verified) ||
         includesAuthor(settings.users, message) || includesAuthor(settings.globalUsers || [], message)
       )
 
@@ -1277,10 +1282,11 @@
         if (author.getAttribute('aria-label') !== '查看用戶資訊') author.setAttribute('aria-label', '查看用戶資訊')
       }
       const message = readMessage(line)
-      if (!message || (!message.supportEvent && !message.moderator && !message.broadcaster && !includesAuthor(history.settings.users, message) &&
-        !includesAuthor(history.settings.globalUsers || [], message))) return false
-      const fingerprint = `${message.user}\n${message.channelId}\n${message.deleted}\n${message.moderator}\n${message.broadcaster}\n${message.supportEvent}\n${message.amount}\n${JSON.stringify(message.colors)}\n${message.details.map(node => node.innerHTML || node.textContent).join('\n')}\n${message.author.textContent}\n${message.body.innerHTML}`
+      if (!message) return false
       const previous = message.id ? history.ids.get(message.id) : history.nodes.get(line)
+      if (!previous?.retained && (!message.supportEvent && !message.moderator && !message.broadcaster && !message.verified && !includesAuthor(history.settings.users, message) &&
+        !includesAuthor(history.settings.globalUsers || [], message))) return false
+      const fingerprint = `${message.user}\n${message.channelId}\n${message.deleted}\n${message.moderator}\n${message.broadcaster}\n${message.verified}\n${message.supportEvent}\n${message.amount}\n${JSON.stringify(message.colors)}\n${message.details.map(node => node.innerHTML || node.textContent).join('\n')}\n${message.author.textContent}\n${message.body.innerHTML}`
       if (previous?.fingerprint === fingerprint) {
         history.nodes.set(line, previous)
         return false
@@ -1290,10 +1296,10 @@
       if (previous?.retained) {
         view.firstChild.textContent = previous.view.firstChild.textContent
         record = Object.assign(previous, { user: message.user, channelId: message.channelId, moderator: message.moderator,
-          broadcaster: message.broadcaster, superChat: message.superChat, supportEvent: message.supportEvent, view, fingerprint })
+          broadcaster: message.broadcaster, verified: message.verified, superChat: message.superChat, supportEvent: message.supportEvent, view, fingerprint })
       } else {
         record = { id: message.id, user: message.user, channelId: message.channelId, moderator: message.moderator,
-          broadcaster: message.broadcaster, superChat: message.superChat, supportEvent: message.supportEvent, view, fingerprint, retained: true }
+          broadcaster: message.broadcaster, verified: message.verified, superChat: message.superChat, supportEvent: message.supportEvent, view, fingerprint, retained: true }
         history.messages.push(record)
         if (history.messages.length > MAX_MESSAGES) {
           const oldest = history.messages.shift()
@@ -1569,6 +1575,7 @@
           element('div', { class: 'ytcf-roles' }, [
             element('label', {}, [element('input', { type: 'checkbox', name: 'broadcaster' }), ' Broadcaster']),
             element('label', {}, [element('input', { type: 'checkbox', name: 'moderators' }), ' Moderator']),
+            element('label', {}, [element('input', { type: 'checkbox', name: 'verified' }), ' Verified']),
           ]),
           element('label', { class: 'ytcf-target-scope' }, ['名單範圍', element('select', { name: 'target-scope' }, [
             element('option', { value: 'channel' }, ['目前頻道']),
@@ -1602,9 +1609,11 @@
       state.latest = $('.ytcf-latest', panel)
       const moderators = $('[name="moderators"]', panel)
       const broadcaster = $('[name="broadcaster"]', panel)
+      const verified = $('[name="verified"]', panel)
       const users = $('[name="users"]', panel)
       moderators.checked = state.history.settings.moderators
       broadcaster.checked = state.history.settings.broadcaster
+      verified.checked = state.history.settings.verified
       state.status = $('.ytcf-target-status', panel)
       state.targetMode = 'include'
       state.targetScope = 'channel'
@@ -1617,9 +1626,10 @@
         if (state.history.enabled) renderMessages(state, true)
       }
       const applyRoles = () => state.updateSettings({ ...state.history.settings,
-        moderators: moderators.checked, broadcaster: broadcaster.checked })
+        moderators: moderators.checked, broadcaster: broadcaster.checked, verified: verified.checked })
       moderators.addEventListener('change', applyRoles)
       broadcaster.addEventListener('change', applyRoles)
+      verified.addEventListener('change', applyRoles)
       $('.ytcf-users', panel).addEventListener('submit', event => {
         event.preventDefault()
         const exclude = state.targetMode === 'exclude'
@@ -1766,6 +1776,7 @@
       const { panel, history } = mounted
       $('[name="moderators"]', panel).checked = history.settings.moderators
       $('[name="broadcaster"]', panel).checked = history.settings.broadcaster
+      $('[name="verified"]', panel).checked = history.settings.verified
       renderTargets(mounted)
       captureTree(mounted.scroller, history)
       if (history.enabled) renderMessages(mounted, true)
@@ -1789,7 +1800,7 @@
       .ytcf-panel [hidden], .ytcf-panel[hidden] { display: none !important; }
       .ytcf-toolbar { flex: 0 0 auto; padding: 10px; border-bottom: 1px solid var(--yt-live-chat-message-input-border-color, #8884); }
       .ytcf-options { display: flex; align-items: center; gap: 6px; flex-wrap: nowrap; font-size: 12px; }
-      .ytcf-roles { display: flex; align-items: center; gap: 12px; flex-shrink: 0; margin-bottom: 12px; }
+      .ytcf-roles { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; flex-shrink: 0; margin-bottom: 12px; }
       .ytcf-roles label { display: flex; align-items: center; gap: 3px; white-space: nowrap; }
       .ytcf-roles input { width: 13px; height: 13px; margin: 0; accent-color: var(--yt-live-chat-button-default-text-color, #065fd4); }
       .ytcf-count { margin-left: auto; flex-shrink: 0; white-space: nowrap; color: var(--yt-live-chat-secondary-text-color, #606060); }

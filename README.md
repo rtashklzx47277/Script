@@ -13,7 +13,7 @@
 | [YouTubePlayerTweaks](https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubePlayerTweaks.user.js) | YouTube | 播放器加截圖鍵(`S`)、滾輪調音量(含 Shorts)/播放速度、直播追平(1.5x 追到最低延遲);解鎖無 DVR 直播的回看,並將回看視窗放寬到 7 天 |
 | [YouTubeLiveClock](https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveClock.user.js) | YouTube | 直播顯示經過時間,直播存檔顯示當下時間點的絕對時刻 |
 | [YouTubeLiveLayout](https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveLayout.user.js) | YouTube | 一般模式不改動版面;無聊天室時將劇院模式滿版;有聊天室時使用響應式劇院版面,窄視窗將聊天室排在影片下方 |
-| [YouTubeLiveChatTweaks](https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js) | YouTube 聊天室 | 用戶資訊卡、獨立 SC／會員紀錄按鈕、隱藏聊天模式選單、Broadcaster／Moderator 與帳號包含／排除篩選、本次頁面紀錄、表情複製、重新載入、自動跟隨最新訊息 |
+| [YouTubeLiveChatTweaks](https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js) | YouTube 聊天室 | 用戶資訊卡、獨立 SC／會員紀錄按鈕、隱藏聊天模式選單、Broadcaster／Moderator／Verified 與帳號包含／排除篩選、本次頁面紀錄、表情複製、重新載入、自動跟隨最新訊息 |
 | [YouTubeAutoDisableSubtitles](https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeAutoDisableSubtitles.user.js) | YouTube | 進入影片自動關閉字幕 |
 | [YouTubeDefaultMaxQuality](https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeDefaultMaxQuality.user.js) | YouTube | 自動切到最高畫質 |
 | [YouTubeChannelAutoPause](https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeChannelAutoPause.user.js) | YouTube | 頻道頁自動暫停自動播放的預告影片 |
@@ -79,6 +79,8 @@ YouTube 篩選聊天室有 `tests/fixtures/youtube-chat.html` 測試頁，將該
 SC／會員按鈕沿用 YouTube 原生支援按鈕的鈔票圖示；原生按鈕尚未載入或回放沒有購買按鈕時，使用已從實際聊天室確認的相同 SVG。紀錄保留原訊息的背景、金額底色與文字配色，不以金額或幣別推算顏色；測試頁的「新增七色 SC」可檢查各色級距。
 
 「SC／會員紀錄」也會自動收集會員加入（membership）、會員里程碑（milestone）與會員贈禮（membershipGift），不記錄獲贈會員公告。里程碑保留累積月份、會員等級和完整留言；贈禮保留送禮者、數量與公告文字。不論是否開啟紀錄列表都會收集，與 SC 共用本次頁面紀錄上限，回放去重；一般會員的普通聊天仍依原本的用戶篩選條件處理。測試頁提供三種會員事件按鈕與獲贈會員的忽略測試按鈕。
+
+用戶篩選的「目標用戶」內提供預設開啟的 Verified 選項，與 Broadcaster、Moderator 並列，依頻道儲存與同步。已驗證用戶的本次頁面發言會持續收集，取消勾選後再開啟仍可查看已收集的訊息；頻道與全域排除名單均優先。只依 YouTube 原生驗證徽章與驗證圖示資料辨識，不依帳號名稱或會員徽章判斷，也不將一般已驗證用戶發言加入 SC／會員紀錄。測試頁的「新增已驗證用戶訊息」可驗證。
 
 ## 版本
 
