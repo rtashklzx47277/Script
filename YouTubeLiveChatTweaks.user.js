@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.7.1
+// @version     0.7.2
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @description 提供 YouTube 聊天室用戶資訊卡、獨立 SC／會員事件紀錄、角色與帳號包含／排除篩選、表情複製、重新載入與自動跟隨。
@@ -1231,7 +1231,14 @@
       const name = record.profileName || record.authorName
       const handle = displayHandle(record.profileHandle) || record.authorHandle
       const label = handle && name.toLowerCase() !== handle.toLowerCase() ? `${name} ${handle}` : name
-      if (author.textContent !== label) author.textContent = label
+      if (author.textContent === label && (!handle || $('.ytcf-handle-at', author))) return
+      author.textContent = ''
+      if (handle) {
+        const at = label.length - handle.length
+        if (at) author.appendChild(document.createTextNode(label.slice(0, at)))
+        author.appendChild(element('span', { class: 'ytcf-handle-at' }, ['@']))
+        author.appendChild(document.createTextNode(label.slice(at + 1)))
+      } else author.textContent = label
     }
     const resolveSupportAuthor = (history, record) => {
       if (!record.supportEvent || !record.retained || !/^UC[\w-]{22}$/.test(record.channelId) ||
@@ -2191,6 +2198,8 @@
       .ytcf-older { align-self: center; flex-shrink: 0; margin: 6px; }
       .ytcf-list { flex: 1; min-height: 0; overflow: auto; overflow-anchor: none; padding: 6px 0; }
       .ytcf-message { padding: 5px 10px; overflow-wrap: anywhere; line-height: 1.6; }
+      /* Lift the handle's @ optically without changing text flow or line height. */
+      .ytcf-author .ytcf-handle-at { position: relative; top: -0.08em; }
       .ytcf-message:hover { background: var(--yt-live-chat-action-panel-background-color, #8882); }
       .ytcf-support-event { margin: 3px 6px; border-radius: 4px; }
       .ytcf-support-event .ytcf-body a, .ytcf-event-details a { color: inherit; text-decoration: underline; }
