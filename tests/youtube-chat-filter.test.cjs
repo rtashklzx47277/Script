@@ -179,6 +179,7 @@ function boot({ saved, blocked = false, trustedTypes = false, parentWindow, fetc
       readMessage, matchesFilter, captureLine, captureTree, captureMutations, renderMessages, changeTargetUsers,
       scheduleMessageRender, releaseMessageViews, handleMessageVisibility,
       archiveTree, restoreTree, archiveRecord, restoreRecord, flushHistory, pruneHistories, pruneArchive,
+      applySupportAuthor, resolveSupportAuthor,
       refresh, refreshHeader, setEnabled, showTargetStatus, guardMessageMenu, guardMenuDismissal,
       getProfile, showAuthorCard, authorSnapshot, dismissCard, getAuthorCard, setPanelLayer, positionFilterPanel, fitCardText,
       setMounted: state => { mounted = state },
@@ -231,6 +232,102 @@ function membershipMessage(env, { tag = 'yt-live-chat-membership-item-renderer',
 }
 
 const fakeIndexedDB = require('./helpers/indexeddb.cjs')
+
+test('YouTube SC author names: share channel lookups, keep handles and persist resolved names without changing filters or expiry', async () => {
+  const database = fakeIndexedDB()
+  const id = 'UCAbCdEfGhIjKlMnOpQrStUv'
+  let finishProfile
+  const env = boot({ database, fetchProfile: () => new Promise(resolve => { finishProfile = resolve }) })
+  const history = env.api.getHistory('channel:@host')
+  await history.restorePromise
+  const first = superChatMessage(env, '@sender', 'first', 'NT$150', 'author-sc-1')
+  first.line.data = { authorExternalChannelId: id, authorName: { simpleText: '@sender' } }
+  first.author.textContent = 'third-party display name'
+  const second = superChatMessage(env, '@sender', 'second', 'NT$300', 'author-sc-2')
+  second.line.data = first.line.data
+  env.api.captureLine(first.line, history)
+  env.api.captureLine(second.line, history)
+  assert.equal(env.profileCalls.length, 0, 'collection itself must not query names')
+  const record = history.ids.get('author-sc-1')
+  const createdAt = record.createdAt
+  const requests = [env.api.resolveSupportAuthor(history, record), env.api.resolveSupportAuthor(history, history.ids.get('author-sc-2'))]
+  assert.equal(env.profileCalls.length, 1)
+  first.body.textContent = first.body._innerHTML = 'new comment while name is loading'
+  env.api.captureLine(first.line, history)
+  finishProfile({ ok: true, json: async () => ({ metadata: { channelMetadataRenderer: {
+    externalId: id, title: '真正的頻道名稱', vanityChannelUrl: 'https://www.youtube.com/@OriginalHandle',
+  } } }) })
+  await Promise.all(requests)
+  for (const row of history.messages) assert.equal(row.view.querySelector('strong').textContent, '真正的頻道名稱 @OriginalHandle')
+  assert.equal(record.view.children.at(-1).textContent, 'new comment while name is loading')
+  assert.equal(record.user, '@sender', 'display names must not change account filtering identity')
+  assert.equal(record.channelId, id)
+  assert.equal(record.createdAt, createdAt)
+  await env.api.flushHistory(history)
+  const fresh = boot({ database })
+  const restored = fresh.api.getHistory('channel:@host')
+  // Native messages can arrive before the saved archive finishes loading.
+  const live = superChatMessage(fresh, '@sender', 'new comment while name is loading', 'NT$150', 'author-sc-1')
+  live.line.data = { authorExternalChannelId: id }
+  fresh.api.captureLine(live.line, restored)
+  await restored.restorePromise
+  assert.equal(restored.messages.length, 2)
+  assert.equal(restored.ids.get('author-sc-1').view.querySelector('strong').textContent, '真正的頻道名稱 @OriginalHandle')
+  assert.equal(restored.ids.get('author-sc-2').view.querySelector('strong').textContent, '真正的頻道名稱 @OriginalHandle')
+  assert.equal(restored.ids.get('author-sc-1').createdAt, createdAt)
+})
+
+test('YouTube SC author names: upgrade older archived rows that contain only the native handle', async () => {
+  const database = fakeIndexedDB()
+  const id = 'UCAbCdEfGhIjKlMnOpQrStUv'
+  const old = boot({ database })
+  const history = old.api.getHistory('channel:@host')
+  await history.restorePromise
+  const sc = superChatMessage(old, '@sender', 'older SC', 'NT$150')
+  sc.line.data = { authorExternalChannelId: id }
+  old.api.captureLine(sc.line, history)
+  await old.api.flushHistory(history)
+  for (const saved of database.records.values()) {
+    for (const field of ['authorName', 'authorHandle', 'profileName', 'profileHandle']) delete saved[field]
+  }
+  const fresh = boot({ database, fetchProfile: async () => ({ ok: true, json: async () => ({ metadata: {
+    channelMetadataRenderer: { externalId: id, title: '真實名稱', vanityChannelUrl: 'https://www.youtube.com/@sender' },
+  } }) }) })
+  const restored = fresh.api.getHistory('channel:@host')
+  await restored.restorePromise
+  assert.equal(restored.messages[0].view.querySelector('strong').textContent, '@sender')
+  await fresh.api.resolveSupportAuthor(restored, restored.messages[0])
+  assert.equal(restored.messages[0].view.querySelector('strong').textContent, '真實名稱 @sender')
+})
+
+test('YouTube SC author names: fall back to native handles on failures and never rename ordinary filtered messages', async () => {
+  const id = 'UCAbCdEfGhIjKlMnOpQrStUv'
+  const failed = boot()
+  const history = failed.api.getHistory('channel:@host')
+  const sc = superChatMessage(failed, '@Sender', 'hello', 'NT$150')
+  sc.line.data = { authorExternalChannelId: id }
+  failed.api.captureLine(sc.line, history)
+  const record = history.messages[0]
+  await failed.api.resolveSupportAuthor(history, record)
+  await failed.api.resolveSupportAuthor(history, record)
+  assert.equal(failed.profileCalls.length, 1)
+  assert.equal(record.view.querySelector('strong').textContent, '@Sender')
+  const mod = failed.message('@mod', 'ordinary chat', 'moderator', 'ordinary-name')
+  mod.line.data = { authorExternalChannelId: id }
+  failed.api.captureLine(mod.line, history)
+  await failed.api.resolveSupportAuthor(history, history.ids.get('ordinary-name'))
+  assert.equal(failed.profileCalls.length, 1)
+  assert.equal(history.ids.get('ordinary-name').view.querySelector('strong').textContent, '@mod')
+  const env = boot({ fetchProfile: async () => ({ ok: true, json: async () => ({ metadata: {
+    channelMetadataRenderer: { externalId: id, title: '真正的頻道名稱' },
+  } }) }) })
+  const h = env.api.getHistory('channel:@host')
+  const missingHandle = superChatMessage(env, '@Sender', 'hello', 'NT$150')
+  missingHandle.line.data = { authorExternalChannelId: id }
+  env.api.captureLine(missingHandle.line, h)
+  await env.api.resolveSupportAuthor(h, h.messages[0])
+  assert.equal(h.messages[0].view.querySelector('strong').textContent, '真正的頻道名稱 @Sender')
+})
 
 test('YouTube archive: persist SC and filtered messages across reloads with colors, emoji, headers and IDs', async () => {
   const database = fakeIndexedDB()

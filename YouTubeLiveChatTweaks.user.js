@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.7.0
+// @version     0.7.1
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @description 提供 YouTube 聊天室用戶資訊卡、獨立 SC／會員事件紀錄、角色與帳號包含／排除篩選、表情複製、重新載入與自動跟隨。
@@ -731,6 +731,8 @@
       expiresAt: record.createdAt + RETENTION_MS, id: record.id, user: record.user, channelId: record.channelId,
       moderator: record.moderator, broadcaster: record.broadcaster, verified: record.verified,
       superChat: record.superChat, supportEvent: record.supportEvent, fingerprint: record.fingerprint,
+      authorName: record.authorName, authorHandle: record.authorHandle,
+      profileName: record.profileName, profileHandle: record.profileHandle,
       tree: archiveTree(record.view),
     })
     const validArchiveRecord = (saved, scope) => saved && saved.scope === scope &&
@@ -742,13 +744,19 @@
       const view = restoreTree(saved.tree)
       if (!view || view.firstChild?.tagName?.toLowerCase() !== 'time') return null
       view.classList.add('ytcf-message')
-      return { id: saved.id, storageId: saved.storageId, createdAt: saved.createdAt,
+      const record = { id: saved.id, storageId: saved.storageId, createdAt: saved.createdAt,
         order: Number.isSafeInteger(saved.order) ? saved.order : 0,
         user: saved.user, channelId: typeof saved.channelId === 'string' ? saved.channelId : '',
         moderator: saved.moderator === true, broadcaster: saved.broadcaster === true, verified: saved.verified === true,
         superChat: saved.superChat === true,
         supportEvent: ['superChat', 'membership', 'milestone', 'membershipGift'].includes(saved.supportEvent) ? saved.supportEvent : '',
+        authorName: typeof saved.authorName === 'string' ? saved.authorName : '',
+        authorHandle: typeof saved.authorHandle === 'string' ? saved.authorHandle : '',
+        profileName: typeof saved.profileName === 'string' ? saved.profileName : '',
+        profileHandle: typeof saved.profileHandle === 'string' ? saved.profileHandle : '',
         fingerprint: saved.fingerprint, view, retained: true }
+      applySupportAuthor(record)
+      return record
     }
     const updateArchiveStatus = history => {
       if (mounted?.history !== history) return
@@ -837,6 +845,11 @@
           if (current) {
             current.createdAt = Math.min(current.createdAt, item.createdAt)
             current.order = Number.isSafeInteger(item.order) ? item.order : current.order
+            if (!current.profileName && typeof item.profileName === 'string') {
+              current.profileName = item.profileName
+              current.profileHandle = typeof item.profileHandle === 'string' ? item.profileHandle : ''
+              applySupportAuthor(current)
+            }
             current.view.firstChild.textContent = restoreTree(item.tree)?.firstChild?.textContent || current.view.firstChild.textContent
             saveRecord(history, current)
           } else history.older.set(item.storageId, item)
@@ -1094,14 +1107,15 @@
         message.textContent = $('#deleted-state', line)?.textContent?.trim() || '訊息已刪除'
       }
       return { user, channelId, moderator, broadcaster, verified, superChat, supportEvent, amount, author, body: message, details, badges, deleted,
+        authorHandle: [originalName, author.textContent].find(name => typeof name === 'string' && name.trim().startsWith('@') && normalizeAccount(name))?.trim() || '',
         colors: supportEvent ? readEventColors(line, data) : null,
         id: line.id || data.id || '', time: $('#timestamp', line)?.textContent?.trim() || textValue(data.timestampText),
         avatar: $('#author-photo img', line)?.getAttribute('src') || identity.authorPhoto?.thumbnails?.[0]?.url || '',
         contextMenuEndpoint: data.contextMenuEndpoint || identity.contextMenuEndpoint }
     }
 
-    // Profile lookups are public, on demand, and shared by channel ID. No
-    // per-message requests or network interception are needed.
+    // Profile lookups are public and shared by channel ID, for cards and
+    // visible SC/membership authors. No network interception is needed.
     const profiles = new Map()
     const profileRequests = new Map()
     const cardStates = new WeakMap()
@@ -1201,6 +1215,60 @@
       profileRequests.set(channelId, request)
       request.finally(() => profileRequests.delete(channelId))
       return request
+    }
+
+    const supportAuthorViews = new WeakMap()
+    const supportAuthorQueue = []
+    let activeAuthorLookups = 0
+    const displayHandle = value => typeof value === 'string' && value.trim().startsWith('@') && normalizeAccount(value) ? value.trim() : ''
+    const applySupportAuthor = record => {
+      if (!record.supportEvent) return
+      const author = $('.ytcf-author', record.view) || $('strong', record.view)
+      if (!author) return
+      author.classList.add('ytcf-author')
+      if (!record.authorName) record.authorName = author.textContent.trim()
+      record.authorHandle = displayHandle(record.authorHandle) || displayHandle(record.authorName)
+      const name = record.profileName || record.authorName
+      const handle = displayHandle(record.profileHandle) || record.authorHandle
+      const label = handle && name.toLowerCase() !== handle.toLowerCase() ? `${name} ${handle}` : name
+      if (author.textContent !== label) author.textContent = label
+    }
+    const resolveSupportAuthor = (history, record) => {
+      if (!record.supportEvent || !record.retained || !/^UC[\w-]{22}$/.test(record.channelId) ||
+        record.profileResolved || record.profileRetryAt > Date.now()) return Promise.resolve(null)
+      if (record.profileRequest) return record.profileRequest
+      record.profileRequest = (async () => {
+        const channelId = record.channelId
+        try {
+          const profile = await getProfile(channelId)
+          if (!record.retained || record.channelId !== channelId) return null
+          if (!profile) { record.profileRetryAt = Date.now() + 30000; return null }
+          record.profileName = profile.title
+          record.profileHandle = displayHandle(profile.handle)
+          record.profileResolved = true
+          applySupportAuthor(record)
+          saveRecord(history, record)
+          return profile
+        } catch (_) { record.profileRetryAt = Date.now() + 30000; return null }
+        finally { record.profileRequest = null }
+      })()
+      return record.profileRequest
+    }
+    const drainSupportAuthors = () => {
+      while (activeAuthorLookups < 4 && supportAuthorQueue.length) {
+        const { history, record } = supportAuthorQueue.shift()
+        record.profileQueued = false
+        if (mounted?.history !== history || !history.enabled || !history.supportOnly || !record.retained) continue
+        activeAuthorLookups++
+        resolveSupportAuthor(history, record).finally(() => { activeAuthorLookups--; drainSupportAuthors() })
+      }
+    }
+    const queueSupportAuthor = (history, record) => {
+      if (record.profileQueued || record.profileRequest || record.profileResolved || record.profileRetryAt > Date.now() ||
+        !/^UC[\w-]{22}$/.test(record.channelId)) return
+      record.profileQueued = true
+      supportAuthorQueue.push({ history, record })
+      drainSupportAuthors()
     }
 
     const fitCardText = state => {
@@ -1491,6 +1559,7 @@
         row.appendChild(avatar)
       }
       const author = document.createElement('strong')
+      author.className = 'ytcf-author'
       author.textContent = message.author.textContent
       author.style.color = message.supportEvent ? message.colors.author : authorNameColor(message)
       row.appendChild(author)
@@ -1547,9 +1616,12 @@
       if (previous?.retained) {
         view.firstChild.textContent = previous.view.firstChild.textContent
         record = Object.assign(previous, { user: message.user, channelId: message.channelId, moderator: message.moderator,
+          authorName: message.author.textContent.trim(), authorHandle: message.authorHandle,
           broadcaster: message.broadcaster, verified: message.verified, superChat: message.superChat, supportEvent: message.supportEvent, view, fingerprint })
       } else {
         record = { id: message.id, user: message.user, channelId: message.channelId, moderator: message.moderator,
+          authorName: message.author.textContent.trim(), authorHandle: message.authorHandle,
+          profileName: archived?.profileName || '', profileHandle: archived?.profileHandle || '',
           broadcaster: message.broadcaster, verified: message.verified, superChat: message.superChat, supportEvent: message.supportEvent,
           storageId: message.id || `${pageKey}-${++anonymousMessage}`,
           createdAt: archived?.createdAt || Date.now(), order: archived?.order || ++messageOrder,
@@ -1564,6 +1636,7 @@
       history.nodes.set(line, record)
       if (message.id) history.ids.set(message.id, record)
       history.dirty.add(record)
+      applySupportAuthor(record)
       saveRecord(history, record)
       return true
     }
@@ -1618,6 +1691,7 @@
       const full = rebuild || state.renderedHistory !== history || state.filterKey !== filterKey
       if (full) state.visibleCount = 0
       for (const record of history.removed) {
+        if (record.renderedView) state.authorObserver?.unobserve(record.renderedView)
         if (!full && record.renderedView?.parentElement === list && record.visible) state.visibleCount--
         record.renderedView?.remove()
         record.renderedView = null
@@ -1631,12 +1705,18 @@
         state.visibleCount += Number(show) - (full ? 0 : Number(!!wasVisible))
         if (record.view.hidden !== !show) record.view.hidden = !show
         if (oldView && oldView !== record.view) {
+          state.authorObserver?.unobserve(oldView)
           if (oldView.parentElement === list) oldView.replaceWith(record.view)
           else oldView.remove()
         }
         if (full || record.view.parentElement !== list) list.appendChild(record.view)
         record.renderedView = record.view
         record.visible = show
+        if (history.supportOnly && show) {
+          supportAuthorViews.set(record.view, { history, record })
+          if (state.authorObserver) state.authorObserver.observe(record.view)
+          else queueSupportAuthor(history, record)
+        } else state.authorObserver?.unobserve(record.view)
       }
       history.dirty.clear()
       state.renderedHistory = history
@@ -1662,6 +1742,7 @@
     }
 
     const releaseMessageViews = state => {
+      state.authorObserver?.disconnect()
       cancelMessageRender(state)
       for (const record of [...state.history.messages, ...state.history.removed]) {
         record.renderedView?.remove()
@@ -1736,6 +1817,7 @@
     }
 
     const setEnabled = (state, enabled, supportOnly = false) => {
+      state.authorObserver?.disconnect()
       cancelMessageRender(state)
       if (enabled) closeAuthorCard()
       state.history.enabled = enabled
@@ -1867,6 +1949,14 @@
       panel.appendChild(element('button', { class: 'ytcf-latest', type: 'button', hidden: '' }, ['回到最新訊息']))
       state.panel = panel
       state.list = $('.ytcf-list', panel)
+      if (typeof IntersectionObserver === 'function') {
+        state.authorObserver = new IntersectionObserver(entries => {
+          for (const entry of entries) {
+            const author = entry.isIntersecting && supportAuthorViews.get(entry.target)
+            if (author) queueSupportAuthor(author.history, author.record)
+          }
+        }, { root: state.list, rootMargin: '100px' })
+      }
       state.empty = $('.ytcf-empty', panel)
       state.count = $('.ytcf-count', panel)
       state.latest = $('.ytcf-latest', panel)

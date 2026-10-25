@@ -141,6 +141,7 @@
     countRequest('profiles')
     const id = JSON.parse(options.body).browseId
     let profile = id === 'UCAbCdEfGhIjKlMnOpQrStUv' ? ['Alice 的頻道', '@alice']
+      : id === 'UCabcdefghijklmnopqrstuv' ? ['支持者的頻道', '@donor']
       : id === 'UCZYXWVUTSRQPONMLKJIHGFE' ? ['聊天室管理員', '@mod_account'] : ['測試實況主', '@fixture_channel']
     if (fixtureParams.has('longName')) profile = ['這是一個非常長的頻道名稱 Long Channel Name With Many Characters', '@VeryLongAccountHandleForSingleLineLayout']
     return new Promise((resolve, reject) => {
@@ -233,7 +234,7 @@
     line.setAttribute('whole-message-clickable', 'fixture')
     line.addEventListener('click', () => { document.getElementById('message-action-menu').parentElement.hidden = false })
     line.data = { authorExternalChannelId: user === '@alice'
-      ? 'UCAbCdEfGhIjKlMnOpQrStUv' : user === '@mod_account'
+      ? 'UCAbCdEfGhIjKlMnOpQrStUv' : user === '@donor' ? 'UCabcdefghijklmnopqrstuv' : user === '@mod_account'
       ? 'UCZYXWVUTSRQPONMLKJIHGFE' : 'UC1234567890123456789012',
       authorName: { simpleText: user }, contextMenuEndpoint: { liveChatItemContextMenuEndpoint: { params: line.id } } }
     if (amount) {
