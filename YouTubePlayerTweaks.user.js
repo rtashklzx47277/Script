@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Player Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.2.12
+// @version     0.2.13
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubePlayerTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubePlayerTweaks.user.js
 // @description 提供 YouTube 原解析度 PNG 截圖、滾輪音量與速度調整、直播追平，並擴大直播回看範圍。
@@ -237,6 +237,13 @@
   }
 
   addStyle(`
+    /* YouTube's 576px minimum can exceed a zoomed desktop viewport. Keep
+       its native viewport/fullscreen sizing and share the cap with the
+       reel, player, overlays and comments panel through their common var. */
+    ytd-shorts {
+      --ytd-reels-min-height: min(576px, var(--ytd-shorts-player-height));
+    }
+
     #voice-search-button,
     button.ytp-autonav-toggle,
     button.ytp-subtitles-button,
