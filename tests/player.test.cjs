@@ -16,6 +16,8 @@ function boot(file, mode = 'worker', pathname = '/') {
   const workerSources = new Map()
   const selectors = new Map()
   const observers = []
+  const resizeObservers = []
+  const animationFrames = new Map()
   const listeners = new Map()
   const styles = []
   const draws = []
@@ -27,7 +29,11 @@ function boot(file, mode = 'worker', pathname = '/') {
     constructor(tagName = 'div') {
       super()
       this.tagName = tagName
-      this.style = {}
+      this.style = {
+        setProperty(name, value) { this[name] = value },
+        removeProperty(name) { delete this[name] },
+      }
+      this.attributes = new Map()
       this.dataset = {}
       this.children = []
       this.queries = new Map()
@@ -56,6 +62,9 @@ function boot(file, mode = 'worker', pathname = '/') {
     }
     querySelectorAll(selector) { return this.queries.get(selector) || [] }
     getBoundingClientRect() { return this.rect }
+    setAttribute(name, value) { this.attributes.set(name, value) }
+    removeAttribute(name) { this.attributes.delete(name) }
+    hasAttribute(name) { return this.attributes.has(name) }
     addEventListener(name, callback) {
       this.events ||= new Map()
       const callbacks = this.events.get(name) || []
@@ -112,7 +121,7 @@ function boot(file, mode = 'worker', pathname = '/') {
   const context = {
     console,
     document,
-    window: { JSON: { parse: JSON.parse } },
+    window: { JSON: { parse: JSON.parse }, addEventListener: document.addEventListener },
     location: { pathname, href: `https://${isYouTube ? 'www.youtube.com' : 'www.twitch.tv'}${pathname}`,
       origin: `https://${isYouTube ? 'www.youtube.com' : 'www.twitch.tv'}` },
     HTMLElement: ElementMock,
@@ -140,6 +149,13 @@ function boot(file, mode = 'worker', pathname = '/') {
       return nextId
     },
     clearInterval(id) { timers.delete(id) },
+    requestAnimationFrame(fn) { animationFrames.set(++nextId, fn); return nextId },
+    cancelAnimationFrame(id) { animationFrames.delete(id) },
+    ResizeObserver: class {
+      constructor(callback) { this.callback = callback; resizeObservers.push(this) }
+      observe(target) { this.target = target }
+      disconnect() { this.target = null }
+    },
     MutationObserver: class {
       constructor(callback) {
         this.callback = callback
@@ -220,7 +236,13 @@ function boot(file, mode = 'worker', pathname = '/') {
   return {
     api: context.__test, window: context.window,
     Element: ElementMock, location: context.location,
-    frames, draws, timers, selectors, observers, listeners, styles,
+    frames, draws, timers, selectors, observers, resizeObservers, animationFrames, listeners, styles,
+    render() {
+      for (const [id, callback] of [...animationFrames]) {
+        animationFrames.delete(id)
+        callback()
+      }
+    },
     emit(name, event) {
       for (const entry of eventListeners) {
         if (entry.name === name && !entry.options?.signal?.aborted) entry.callback(event)
@@ -303,6 +325,100 @@ function addShortsPlayer(env, shorts, top = 20) {
   return { player, video, area }
 }
 
+function addShortsLayout(env) {
+  const shorts = new env.Element('ytd-shorts')
+  const container = new env.Element()
+  container.rect = { left: 72, top: 64, bottom: 680, width: 1228, height: 616 }
+  const reel = new env.Element('ytd-reel-video-renderer')
+  const video = new env.Element()
+  video.rect = { left: 480, top: 64, bottom: 640, width: 315, height: 576 }
+  const overlay = new env.Element()
+  overlay.rect = { left: 480, top: 64, bottom: 640, width: 387, height: 576 }
+  overlay.queries.set('.ytReelPlayerOverlayViewModelMetadataContainer', new env.Element())
+  reel.queries.set('.overlay', overlay)
+  reel.queries.set('#short-video-container', video)
+  shorts.queries.set('#shorts-container', container)
+  shorts.queries.set('ytd-reel-video-renderer', [reel])
+  env.selectors.set('ytd-shorts', shorts)
+  return { shorts, container, reel, video, overlay }
+}
+
+test('YouTube Shorts: metadata fits entirely beside the video and responds to available space', () => {
+  const env = boot(scripts[0], 'worker', '/shorts/example')
+  const { reel, video, container, overlay } = addShortsLayout(env)
+  env.render()
+  assert.equal(reel.hasAttribute('data-yt-side-metadata'), true)
+  const left = overlay.rect.left + parseFloat(reel.style['--yt-side-metadata-left'])
+  const right = left + parseFloat(reel.style['--yt-side-metadata-width'])
+  assert.ok(left >= container.rect.left + 16)
+  assert.equal(right, video.rect.left - 16)
+  assert.equal(video.rect.height, 576, 'player height is untouched')
+
+  video.rect.left = 280
+  env.emit('resize', {})
+  env.render()
+  assert.equal(reel.hasAttribute('data-yt-side-metadata'), false, 'narrow space uses native layout')
+  assert.equal(reel.style['--yt-side-metadata-width'], undefined)
+
+  video.rect.left = 480
+  env.resizeObservers[0].callback()
+  env.render()
+  assert.equal(reel.hasAttribute('data-yt-side-metadata'), true)
+})
+
+test('YouTube Shorts: native extracted layout, fullscreen and comments release metadata positioning', () => {
+  const env = boot(scripts[0], 'worker', '/shorts/example')
+  const { shorts, reel } = addShortsLayout(env)
+  env.render()
+  for (const [element, attribute] of [
+    [reel, 'extract-overlay'], [reel, 'is-fullscreen'],
+    [shorts, 'is-fullscreen'], [shorts, 'is-watch-while-mode'],
+  ]) {
+    element.setAttribute(attribute, '')
+    env.observers[0].callback()
+    env.render()
+    assert.equal(reel.hasAttribute('data-yt-side-metadata'), false, attribute)
+    element.removeAttribute(attribute)
+    env.observers[0].callback()
+    env.render()
+    assert.equal(reel.hasAttribute('data-yt-side-metadata'), true)
+  }
+})
+
+test('YouTube Shorts: late reels, feed scroll and navigation clean up layout work', async () => {
+  const env = boot(scripts[0], 'worker', '/shorts/example')
+  env.render()
+  const { reel, video, shorts } = addShortsLayout(env)
+  env.observers[0].callback()
+  env.render()
+  assert.equal(reel.hasAttribute('data-yt-side-metadata'), true)
+  video.rect.top = 700
+  env.emit('scroll', {})
+  env.render()
+  assert.equal(reel.hasAttribute('data-yt-side-metadata'), false)
+  video.rect.top = 64
+  env.emit('scroll', {})
+  env.render()
+  assert.equal(reel.hasAttribute('data-yt-side-metadata'), true)
+
+  shorts.queries.set('ytd-reel-video-renderer', [])
+  env.observers[0].callback()
+  env.render()
+  assert.equal(reel.hasAttribute('data-yt-side-metadata'), false, 'removed reels are restored')
+  shorts.queries.set('ytd-reel-video-renderer', [reel])
+  env.observers[0].callback()
+  env.render()
+  env.emit('resize', {})
+  assert.equal(env.animationFrames.size, 1)
+  env.location.pathname = '/'
+  await env.listeners.get('yt-navigate-finish')()
+  assert.equal(env.animationFrames.size, 0)
+  assert.equal(env.observers[0].connected, false)
+  assert.equal(env.resizeObservers[0].target, null)
+  assert.equal(reel.hasAttribute('data-yt-side-metadata'), false)
+  assert.equal(env.listenerCount('scroll'), 0)
+})
+
 function wheel(target, overrides = {}) {
   return {
     target, deltaY: 1, clientX: 200, clientY: 100,
@@ -316,7 +432,7 @@ function wheel(target, overrides = {}) {
 test('YouTube Shorts: late player and extracted overlay adjust volume without switching reels', () => {
   const env = boot(scripts[0], 'worker', '/shorts/first')
   assert.equal(env.listenerCount('wheel'), 1)
-  assert.equal(env.observers.length, 0, 'Shorts must not wait for regular player controls')
+  assert.equal(env.observers.length, 1, 'Shorts observes layout without waiting for regular player controls')
   const shorts = new env.Element('ytd-shorts')
   const overlay = new env.Element()
   shorts.appendChild(overlay) // This is outside both the player and the reel.

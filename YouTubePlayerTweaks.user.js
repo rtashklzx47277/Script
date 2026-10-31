@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Player Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.2.13
+// @version     0.2.14
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubePlayerTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubePlayerTweaks.user.js
 // @description 提供 YouTube 原解析度 PNG 截圖、滾輪音量與速度調整、直播追平，並擴大直播回看範圍。
@@ -237,11 +237,35 @@
   }
 
   addStyle(`
-    /* YouTube's 576px minimum can exceed a zoomed desktop viewport. Keep
-       its native viewport/fullscreen sizing and share the cap with the
-       reel, player, overlays and comments panel through their common var. */
-    ytd-shorts {
-      --ytd-reels-min-height: min(576px, var(--ytd-shorts-player-height));
+    /* Move only metadata into measured free space. The native player size,
+       action bar and already-extracted wide-screen layout stay intact. */
+    ytd-reel-video-renderer[data-yt-side-metadata] > .overlay {
+      overflow: visible !important;
+    }
+
+    ytd-reel-video-renderer[data-yt-side-metadata]
+      .ytReelPlayerOverlayViewModelMetadataContainer {
+      position: absolute !important;
+      left: var(--yt-side-metadata-left) !important;
+      right: auto !important;
+      bottom: 0 !important;
+      width: var(--yt-side-metadata-width) !important;
+      margin: 0 !important;
+      box-sizing: border-box;
+      background: none !important;
+      filter: none !important;
+      border-radius: 0 !important;
+    }
+
+    ytd-reel-video-renderer[data-yt-side-metadata] .ytReelChannelBarViewModelHost {
+      flex-wrap: wrap;
+      row-gap: 8px;
+      max-width: 100%;
+    }
+
+    ytd-reel-video-renderer[data-yt-side-metadata]
+      .ytReelPlayerOverlayViewModelActionsContainer {
+      margin-left: auto;
     }
 
     #voice-search-button,
@@ -1058,9 +1082,89 @@
     }
   }
 
+  const startShortsMetadataLayout = (signal) => {
+    const adjusted = new Set()
+    let frame = 0
+    let observedContainer = null
+
+    const restore = (reel) => {
+      reel.removeAttribute('data-yt-side-metadata')
+      reel.style.removeProperty('--yt-side-metadata-left')
+      reel.style.removeProperty('--yt-side-metadata-width')
+      adjusted.delete(reel)
+    }
+
+    const update = () => {
+      frame = 0
+      if (signal.aborted) return
+      const shorts = $('ytd-shorts')
+      const container = shorts?.querySelector('#shorts-container')
+      if (container !== observedContainer) {
+        resizeObserver.disconnect()
+        if (container) resizeObserver.observe(container)
+        observedContainer = container
+      }
+
+      const current = new Set()
+      if (container && !document.fullscreenElement &&
+          !shorts.hasAttribute('is-fullscreen') &&
+          !shorts.hasAttribute('is-watch-while-mode')) {
+        const bounds = container.getBoundingClientRect()
+        for (const reel of shorts.querySelectorAll('ytd-reel-video-renderer')) {
+          if (reel.hasAttribute('extract-overlay') ||
+              reel.hasAttribute('is-fullscreen') ||
+              reel.hasAttribute('is-watch-while-mode')) continue
+          const video = reel.querySelector('#short-video-container')
+          const overlay = reel.querySelector('.overlay')
+          const metadata = overlay?.querySelector('.ytReelPlayerOverlayViewModelMetadataContainer')
+          if (!video || !metadata) continue
+          const rect = video.getBoundingClientRect()
+          if (rect.width <= 0 || rect.height <= 0 ||
+              rect.bottom <= bounds.top || rect.top >= bounds.bottom) continue
+          // Leave a gap next to the video and keep a usable text column. On
+          // genuinely narrow windows retain YouTube's original layout.
+          const left = Math.max(0, bounds.left) + 16
+          const width = Math.min(480, Math.floor(rect.left - left - 16))
+          if (width < 240) continue
+          const offset = rect.left - 16 - width - overlay.getBoundingClientRect().left
+          reel.style.setProperty('--yt-side-metadata-left', `${offset}px`)
+          reel.style.setProperty('--yt-side-metadata-width', `${width}px`)
+          reel.setAttribute('data-yt-side-metadata', '')
+          adjusted.add(reel)
+          current.add(reel)
+        }
+      }
+      for (const reel of adjusted) {
+        if (!current.has(reel)) restore(reel)
+      }
+    }
+    const schedule = () => {
+      if (!frame && !signal.aborted) frame = requestAnimationFrame(update)
+    }
+    const resizeObserver = new ResizeObserver(schedule)
+    const observer = new MutationObserver(schedule)
+    observer.observe(document.documentElement, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['extract-overlay', 'is-fullscreen', 'is-watch-while-mode'],
+    })
+    window.addEventListener('resize', schedule, { signal })
+    document.addEventListener('scroll', schedule, { capture: true, passive: true, signal })
+    document.addEventListener('fullscreenchange', schedule, { signal })
+    signal.addEventListener('abort', () => {
+      cancelAnimationFrame(frame)
+      observer.disconnect()
+      resizeObserver.disconnect()
+      for (const reel of adjusted) restore(reel)
+    }, { once: true })
+    schedule()
+  }
+
   const startShortsVolumeControl = () => {
     const controller = new AbortController()
     const { signal } = controller
+    startShortsMetadataLayout(signal)
 
     // Register before the Shorts player exists; it has no theater button or
     // regular progress bar, and may be replaced as the feed advances.
