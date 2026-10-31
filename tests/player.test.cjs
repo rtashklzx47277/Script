@@ -339,6 +339,7 @@ function addShortsLayout(env) {
   reel.queries.set('#short-video-container', video)
   shorts.queries.set('#shorts-container', container)
   shorts.queries.set('ytd-reel-video-renderer', [reel])
+  shorts.appendChild(reel)
   env.selectors.set('ytd-shorts', shorts)
   return { shorts, container, reel, video, overlay }
 }
@@ -417,6 +418,42 @@ test('YouTube Shorts: late reels, feed scroll and navigation clean up layout wor
   assert.equal(env.resizeObservers[0].target, null)
   assert.equal(reel.hasAttribute('data-yt-side-metadata'), false)
   assert.equal(env.listenerCount('scroll'), 0)
+  assert.equal(env.listenerCount('transitionend'), 0)
+  assert.equal(env.listenerCount('transitioncancel'), 0)
+})
+
+test('YouTube Shorts: closing comments restores metadata after the player finishes moving', () => {
+  const env = boot(scripts[0], 'worker', '/shorts/example')
+  const { shorts, reel, video, overlay } = addShortsLayout(env)
+  env.render()
+
+  for (const eventType of ['transitionend', 'transitioncancel']) {
+    shorts.setAttribute('is-watch-while-mode', '')
+    video.rect.left = overlay.rect.left = 230
+    env.observers[0].callback()
+    env.render()
+    assert.equal(reel.hasAttribute('data-yt-side-metadata'), false)
+
+    // The mode attribute is removed before the 300ms right transition.
+    // The container never resizes, so ResizeObserver cannot catch this.
+    shorts.removeAttribute('is-watch-while-mode')
+    env.observers[0].callback()
+    env.render()
+    assert.equal(reel.hasAttribute('data-yt-side-metadata'), false)
+
+    video.rect.left = overlay.rect.left = 480
+    env.emit(eventType, { target: reel, propertyName: 'right' })
+    env.render()
+    assert.equal(reel.hasAttribute('data-yt-side-metadata'), true, eventType)
+    const metadataRight = overlay.rect.left +
+      parseFloat(reel.style['--yt-side-metadata-left']) +
+      parseFloat(reel.style['--yt-side-metadata-width'])
+    assert.equal(metadataRight, video.rect.left - 16)
+  }
+
+  env.emit('transitionend', { target: new env.Element(), propertyName: 'right' })
+  env.emit('transitionend', { target: reel, propertyName: 'opacity' })
+  assert.equal(env.animationFrames.size, 0, 'unrelated transitions do not trigger layout reads')
 })
 
 function wheel(target, overrides = {}) {

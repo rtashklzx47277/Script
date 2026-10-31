@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Player Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.2.14
+// @version     0.2.15
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubePlayerTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubePlayerTweaks.user.js
 // @description 提供 YouTube 原解析度 PNG 截圖、滾輪音量與速度調整、直播追平，並擴大直播回看範圍。
@@ -1141,6 +1141,13 @@
     const schedule = () => {
       if (!frame && !signal.aborted) frame = requestAnimationFrame(update)
     }
+    const onLayoutTransition = (event) => {
+      // Closing comments clears the mode attribute before the player's
+      // right transition completes. Its position changes without resizing
+      // the container, so measure again once it reaches its final position.
+      if (['right', 'left', 'inset-inline-end', 'transform', 'width', 'margin-right'].includes(event.propertyName) &&
+          event.target?.closest?.('ytd-shorts')) schedule()
+    }
     const resizeObserver = new ResizeObserver(schedule)
     const observer = new MutationObserver(schedule)
     observer.observe(document.documentElement, {
@@ -1152,6 +1159,8 @@
     window.addEventListener('resize', schedule, { signal })
     document.addEventListener('scroll', schedule, { capture: true, passive: true, signal })
     document.addEventListener('fullscreenchange', schedule, { signal })
+    document.addEventListener('transitionend', onLayoutTransition, { capture: true, signal })
+    document.addEventListener('transitioncancel', onLayoutTransition, { capture: true, signal })
     signal.addEventListener('abort', () => {
       cancelAnimationFrame(frame)
       observer.disconnect()
