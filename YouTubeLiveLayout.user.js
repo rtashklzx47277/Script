@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Live Layout
 // @namespace   https://tampermonkey.net/
-// @version     0.2.8
+// @version     0.2.9
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveLayout.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveLayout.user.js
 // @description 調整 YouTube 劇院模式：無聊天室時填滿視窗，有聊天室時依可用寬度切換左右或上下排列。
@@ -139,6 +139,10 @@
     }
 
     #columns > #primary {
+      /* The chat is fixed outside the columns flow, but YouTube's native
+         secondary column still reserves space. Don't let it shrink the
+         video information below the custom player's width. */
+      flex: 0 0 100% !important;
       width: 100% !important;
       min-width: 0 !important;
       max-width: 100% !important;
