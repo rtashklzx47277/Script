@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.8.3
+// @version     0.8.4
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @description 提供 YouTube 聊天室用戶資訊卡、獨立 SC／會員事件紀錄、角色與帳號包含／排除篩選、表情複製、重新載入與自動跟隨。
@@ -1766,6 +1766,7 @@
       }
       for (const record of state.searchShown || []) if (!shown.has(record)) {
         if (record.renderedView) state.authorObserver?.unobserve(record.renderedView)
+        if (record.renderedView) state.messageResizeObserver?.unobserve(record.renderedView)
         record.renderedView?.remove()
         record.view.remove()
         record.renderedView = null
@@ -1778,6 +1779,7 @@
       for (const record of shown) {
         if (record.renderedView && record.renderedView !== record.view) {
           state.authorObserver?.unobserve(record.renderedView)
+          state.messageResizeObserver?.unobserve(record.renderedView)
           record.renderedView.remove()
         }
         record.view.hidden = false
@@ -1790,6 +1792,7 @@
         if (previousViews[index++] !== record.view) list.appendChild(record.view)
         record.renderedView = record.view
         record.visible = true
+        state.messageResizeObserver?.observe(record.view)
         supportAuthorViews.set(record.view, { history, record })
         if (state.authorObserver) state.authorObserver.observe(record.view)
         else queueSupportAuthor(history, record)
@@ -1816,6 +1819,7 @@
 
     const renderMessages = (state, rebuild = false) => {
       cancelMessageRender(state)
+      cancelListFollow(state)
       const { history, list, empty, count, latest } = state
       const query = history.supportOnly ? normalizeSearch(history.supportSearch) : ''
       if (query) { renderSupportSearch(state, query); return }
@@ -1827,6 +1831,7 @@
       if (full) state.visibleCount = 0
       for (const record of history.removed) {
         if (record.renderedView) state.authorObserver?.unobserve(record.renderedView)
+        if (record.renderedView) state.messageResizeObserver?.unobserve(record.renderedView)
         if (!full && record.renderedView?.parentElement === list && record.visible) state.visibleCount--
         record.renderedView?.remove()
         record.renderedView = null
@@ -1841,12 +1846,15 @@
         if (record.view.hidden !== !show) record.view.hidden = !show
         if (oldView && oldView !== record.view) {
           state.authorObserver?.unobserve(oldView)
+          state.messageResizeObserver?.unobserve(oldView)
           if (oldView.parentElement === list) oldView.replaceWith(record.view)
           else oldView.remove()
         }
         if (full || record.view.parentElement !== list) list.appendChild(record.view)
         record.renderedView = record.view
         record.visible = show
+        if (show) state.messageResizeObserver?.observe(record.view)
+        else state.messageResizeObserver?.unobserve(record.view)
         if (history.supportOnly && show) {
           supportAuthorViews.set(record.view, { history, record })
           if (state.authorObserver) state.authorObserver.observe(record.view)
@@ -1871,15 +1879,32 @@
 
     const scheduleMessageRender = state => {
       if (!state.history.enabled || document.hidden || state.renderFrame) return
+      cancelListFollow(state)
       state.renderFrame = requestAnimationFrame(() => {
         state.renderFrame = 0
         if (mounted === state && state.history.enabled && !document.hidden) renderMessages(state)
       })
     }
 
+    const cancelListFollow = state => {
+      if (state.followFrame) cancelAnimationFrame(state.followFrame)
+      state.followFrame = 0
+    }
+    const scheduleListFollow = state => {
+      if (mounted !== state || !state.history.enabled || !state.history.follow || document.hidden || state.followFrame || state.renderFrame) return
+      state.followFrame = requestAnimationFrame(() => {
+        state.followFrame = 0
+        if (mounted !== state || !state.history.enabled || !state.history.follow || document.hidden) return
+        state.list.scrollTop = state.list.scrollHeight
+        state.latest.hidden = true
+        rememberReaderPosition(state)
+      })
+    }
     const releaseMessageViews = state => {
       clearLocatedRecord(state)
       state.authorObserver?.disconnect()
+      state.messageResizeObserver?.disconnect()
+      cancelListFollow(state)
       cancelMessageRender(state)
       for (const record of new Set([...state.history.messages, ...state.history.removed, ...(state.searchShown || [])])) {
         $('.ytcf-locate', record.view)?.remove()
@@ -1954,8 +1979,11 @@
 
     const handleMessageVisibility = () => {
       if (!mounted) return
-      if (document.hidden) cancelMessageRender(mounted)
-      else if (mounted.history.dirty.size || mounted.history.removed.size || mounted.history.supportSearch) scheduleMessageRender(mounted)
+      if (document.hidden) { cancelMessageRender(mounted); cancelListFollow(mounted) }
+      else {
+        if (mounted.history.dirty.size || mounted.history.removed.size || mounted.history.supportSearch) scheduleMessageRender(mounted)
+        scheduleListFollow(mounted)
+      }
     }
 
     const setNativeChatAccessible = (state, enabled) => {
@@ -2020,6 +2048,7 @@
       const { history, list } = state
       if (!history.enabled || !state.readerReady || state.readerRestoring || state.panel.hidden || !list.isConnected) return
       const position = { top: list.scrollTop, follow: history.follow }
+      if (history.follow) state.followScrollTop = position.top
       if (!history.follow) {
         const top = list.getBoundingClientRect().top
         const anchor = [...list.children].find(view => !view.hidden && view.getBoundingClientRect().bottom > top)
@@ -2052,6 +2081,9 @@
       rememberReaderPosition(state)
       clearLocatedRecord(state)
       state.authorObserver?.disconnect()
+      state.messageResizeObserver?.disconnect()
+      cancelListFollow(state)
+      state.readerScrollIntent = false
       cancelMessageRender(state)
       if (enabled) closeAuthorCard()
       state.history.enabled = enabled
@@ -2191,6 +2223,13 @@
       panel.appendChild(element('button', { class: 'ytcf-latest', type: 'button', hidden: '' }, ['回到最新訊息']))
       state.panel = panel
       state.list = $('.ytcf-list', panel)
+      if (typeof ResizeObserver === 'function') {
+        state.messageResizeObserver = new ResizeObserver(() => scheduleListFollow(state))
+      }
+      // Image loading may change a row after the initial append and scroll.
+      // Capture load/error too, including browsers without ResizeObserver.
+      state.list.addEventListener('load', () => scheduleListFollow(state), true)
+      state.list.addEventListener('error', () => scheduleListFollow(state), true)
       if (typeof IntersectionObserver === 'function') {
         state.authorObserver = new IntersectionObserver(entries => {
           for (const entry of entries) {
@@ -2208,6 +2247,7 @@
         clearLocatedRecord(state)
         state.history.supportSearch = state.supportSearch.value
         state.history.searchLimit = MAX_MESSAGES
+        state.readerScrollIntent = false
         state.history.follow = true
         if (state.history.enabled && state.history.supportOnly) renderMessages(state, true)
       })
@@ -2305,15 +2345,28 @@
       renderTargets(state)
       state.list.addEventListener('scroll', () => {
         if (!state.history.enabled || state.panel.hidden || state.readerRestoring || state.locationPinned) return
-        state.history.follow = state.list.scrollHeight - state.list.scrollTop - state.list.clientHeight < 40
+        const nearBottom = state.list.scrollHeight - state.list.scrollTop - state.list.clientHeight < 40
+        const movedUp = Number.isFinite(state.followScrollTop) && state.list.scrollTop < state.followScrollTop - 1
+        // A delayed image can invalidate a pending programmatic scroll event.
+        // Preserve following unless the reader actually moves up or scrolls.
+        if (state.history.follow && !state.readerScrollIntent && !movedUp && !nearBottom) {
+          scheduleListFollow(state)
+          return
+        }
+        state.history.follow = nearBottom
+        if (nearBottom) state.readerScrollIntent = false
         state.latest.hidden = state.history.follow
         rememberReaderPosition(state)
       }, { passive: true })
       for (const event of ['wheel', 'touchstart', 'pointerdown', 'keydown']) {
-        state.list.addEventListener(event, () => { state.locationPinned = false }, { passive: true })
+        state.list.addEventListener(event, () => {
+          state.locationPinned = false
+          state.readerScrollIntent = true
+        }, { passive: true })
       }
       state.latest.addEventListener('click', () => {
         clearLocatedRecord(state)
+        state.readerScrollIntent = false
         state.history.follow = true
         renderMessages(state)
       })

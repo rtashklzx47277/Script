@@ -4,7 +4,7 @@ const fs = require('node:fs')
 const vm = require('node:vm')
 const path = require('node:path')
 
-function boot({ saved, blocked = false, trustedTypes = false, parentWindow, fetchProfile, nativeMenu, database, now } = {}) {
+function boot({ saved, blocked = false, trustedTypes = false, parentWindow, fetchProfile, nativeMenu, database, now, withResizeObserver = false } = {}) {
   const profileCalls = []
   const menuCalls = []
   class Element {
@@ -173,6 +173,13 @@ function boot({ saved, blocked = false, trustedTypes = false, parentWindow, fetc
     },
   }
   const source = fs.readFileSync(path.join(__dirname, '..', 'YouTubeLiveChatTweaks.user.js'), 'utf8')
+  if (withResizeObserver) context.ResizeObserver = class {
+    constructor(callback) { this.callback = callback; this.targets = new Set() }
+    observe(target) { this.targets.add(target) }
+    unobserve(target) { this.targets.delete(target) }
+    disconnect() { this.targets.clear() }
+    notify() { this.callback([...this.targets].map(target => ({ target }))) }
+  }
   vm.createContext(context)
   vm.runInContext(source.replace('    // End YouTube chat filtering.', `
     globalThis.api = { normalizeAccount, getChannel, getHistory, loadSettings, saveSettings,
@@ -945,6 +952,107 @@ test('YouTube membership events: deduplicate replays and update header-only chan
   env.api.captureLine(member.line, history)
   assert.equal(record.view.children.at(-1).textContent, '訊息已刪除')
   assert.equal(history.messages.length, 1)
+})
+
+function followingStickerPanel(env) {
+  const { document, Element, api } = env
+  const header = document.body.appendChild(new Element('yt-live-chat-header-renderer'))
+  header.appendChild(new Element('button')).id = 'live-chat-header-context-menu'
+  const scroller = document.body.appendChild(new Element('div')).appendChild(new Element('div'))
+  scroller.id = 'item-scroller'
+  scroller.appendChild(new Element('div')).id = 'items'
+  api.refresh()
+  const state = api.mounted
+  const { list, history } = state
+  api.captureLine(superStickerMessage(env).line, history)
+  list.scrollHeight = 400
+  list.clientHeight = 200
+  let top = 0
+  Object.defineProperty(list, 'scrollTop', { get: () => top,
+    set: value => { top = Math.max(0, Math.min(value, list.scrollHeight - list.clientHeight)) } })
+  api.setEnabled(state, true, true)
+  return state
+}
+
+test('YouTube following: late sticker growth keeps the live edge in SC and search, but respects manual pause and releases observers', () => {
+  const env = boot({ withResizeObserver: true })
+  const state = followingStickerPanel(env)
+  const { history, list } = state
+  const observer = state.messageResizeObserver
+  assert.equal(observer.targets.has(history.messages[0].view), true)
+  assert.equal(list.scrollTop, 200)
+  list.scrollHeight = 600
+  list.listeners.get('scroll')() // Pending programmatic scroll delivered after image expansion.
+  observer.notify()
+  observer.notify()
+  assert.equal(history.follow, true)
+  assert.equal(env.frames.size, 1, 'resize and delayed scroll notifications share one follow frame')
+  env.flushFrames()
+  assert.equal(list.scrollTop, 400)
+  assert.equal(state.latest.hidden, true)
+  state.supportSearch.value = '拍手'
+  state.supportSearch.listeners.get('input')()
+  list.scrollHeight = 760
+  observer.notify()
+  env.flushFrames()
+  assert.equal(list.scrollTop, 560, 'search results also follow late image growth')
+  env.document.hidden = true
+  list.scrollHeight = 900
+  observer.notify()
+  assert.equal(env.frames.size, 0)
+  env.document.hidden = false
+  env.api.handleMessageVisibility()
+  env.flushFrames()
+  assert.equal(list.scrollTop, 700, 'foreground recovery follows images that loaded while hidden')
+  list.listeners.get('wheel')({ deltaY: -100 })
+  list.scrollTop = 80
+  list.listeners.get('scroll')()
+  list.scrollHeight = 1100
+  observer.notify()
+  list.listeners.get('load')()
+  env.flushFrames()
+  assert.equal(history.follow, false)
+  assert.equal(list.scrollTop, 80)
+  assert.equal(state.latest.hidden, false)
+  state.latest.listeners.get('click')()
+  observer.notify()
+  assert.equal(env.frames.size, 1)
+  env.api.unmount()
+  assert.equal(env.frames.size, 0)
+  assert.equal(observer.targets.size, 0)
+  observer.notify()
+  assert.equal(env.frames.size, 0)
+})
+
+test('YouTube following: image load and error fallback keeps the bottom without ResizeObserver and coalesces with rendering', () => {
+  const env = boot()
+  const state = followingStickerPanel(env)
+  const { list, history } = state
+  assert.equal(state.messageResizeObserver, undefined)
+  list.scrollHeight = 600
+  list.listeners.get('load')()
+  list.listeners.get('error')()
+  assert.equal(env.frames.size, 1)
+  env.flushFrames()
+  assert.equal(list.scrollTop, 400)
+  list.scrollHeight = 800
+  list.listeners.get('load')()
+  env.api.scheduleMessageRender(state)
+  list.listeners.get('load')()
+  assert.equal(env.frames.size, 1, 'a pending message render also corrects the live edge')
+  env.flushFrames()
+  assert.equal(list.scrollTop, 600)
+  list.scrollTop = 80 // Scrollbar/accessibility scrolling can arrive without a wheel event.
+  list.listeners.get('scroll')()
+  list.scrollHeight = 1000
+  list.listeners.get('error')()
+  env.flushFrames()
+  assert.equal(history.follow, false)
+  assert.equal(list.scrollTop, 80)
+  state.latest.listeners.get('click')()
+  list.listeners.get('load')()
+  env.api.setEnabled(state, false, true)
+  assert.equal(env.frames.size, 0, 'closing the SC panel cancels pending corrections')
 })
 
 test('YouTube Super Stickers: collect with image, amount and palette independently of user filters, then search, locate and restore', async () => {
