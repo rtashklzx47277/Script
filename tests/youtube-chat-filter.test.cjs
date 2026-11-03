@@ -180,7 +180,7 @@ function boot({ saved, blocked = false, trustedTypes = false, parentWindow, fetc
       scheduleMessageRender, releaseMessageViews, handleMessageVisibility,
       archiveTree, restoreTree, archiveRecord, restoreRecord, flushHistory, pruneHistories, pruneArchive,
       applySupportAuthor, resolveSupportAuthor, locateSupportRecord,
-      refresh, refreshHeader, setEnabled, showTargetStatus, guardMessageMenu, guardMenuDismissal,
+      refresh, unmount, refreshHeader, setEnabled, showTargetStatus, guardMessageMenu, guardMenuDismissal,
       getProfile, showAuthorCard, authorSnapshot, dismissCard, getAuthorCard, setPanelLayer, positionFilterPanel, fitCardText,
       setMounted: state => { mounted = state },
       get mounted() { return mounted } };
@@ -512,6 +512,138 @@ test('YouTube SC locate: restore an older result and surrounding support events 
   assert.equal(env.api.locateSupportRecord(state, 'missing-id'), false)
 })
 
+test('YouTube reading positions: preserve paused SC and filtered viewports independently through native chat and incoming records', () => {
+  const env = boot()
+  const { document, Element, api } = env
+  const header = document.body.appendChild(new Element('yt-live-chat-header-renderer'))
+  header.appendChild(new Element('button')).id = 'live-chat-header-context-menu'
+  const scroller = document.body.appendChild(new Element('div')).appendChild(new Element('div'))
+  scroller.id = 'item-scroller'
+  scroller.appendChild(new Element('div')).id = 'items'
+  api.refresh()
+  const state = api.mounted
+  const { history, list } = state
+  list.scrollTop = 0
+  list.scrollHeight = 2000
+  list.clientHeight = 200
+  list.getBoundingClientRect = () => ({ top: 100, bottom: 300 })
+  const capture = (message) => {
+    api.captureLine(message.line, history)
+    const record = history.ids.get(message.line.id)
+    record.view.getBoundingClientRect = () => {
+      const index = list.children.filter(row => !row.hidden).indexOf(record.view)
+      const top = 100 + index * 40 - list.scrollTop
+      return { top, bottom: top + 40, height: 40 }
+    }
+  }
+  for (let i = 0; i < 20; i++) {
+    capture(superChatMessage(env, '@donor', 'SC content', '￥10,000', `position-sc-${i}`))
+    capture(env.message('@mod', 'ordinary content', 'moderator', `position-mod-${i}`))
+  }
+  api.setEnabled(state, true, true)
+  list.scrollTop = 340
+  list.listeners.get('scroll')()
+  assert.equal(history.follow, false)
+  const anchor = history.ids.get('position-sc-8')
+  const offset = anchor.view.getBoundingClientRect().top - 100
+  api.setEnabled(state, false, true)
+  list.scrollTop = 0
+  list.listeners.get('scroll')()
+  capture(superChatMessage(env, '@later', 'new while viewing native chat', '￥100', 'position-new'))
+  api.setEnabled(state, true, true)
+  assert.equal(list.scrollTop, 340)
+  assert.equal(anchor.view.getBoundingClientRect().top - 100, offset)
+  assert.equal(history.follow, false)
+  assert.equal(state.latest.hidden, false)
+  list.listeners.get('scroll')()
+  assert.equal(history.follow, false, 'restoration scroll events must not resume following')
+  api.setEnabled(state, true)
+  assert.equal(history.follow, true, 'the first visit to the filtered view has its own following state')
+  list.scrollTop = 80
+  list.listeners.get('scroll')()
+  api.setEnabled(state, true, true)
+  assert.equal(list.scrollTop, 340)
+  api.setEnabled(state, true)
+  assert.equal(list.scrollTop, 80)
+  state.latest.listeners.get('click')()
+  api.setEnabled(state, false)
+  list.scrollTop = 0
+  list.scrollHeight = 2400
+  api.setEnabled(state, true)
+  assert.equal(history.follow, true)
+  assert.equal(list.scrollTop, 2400)
+  const savedPositions = JSON.stringify(history.readerPositions)
+  state.host.remove()
+  list.scrollTop = 0
+  api.unmount()
+  assert.equal(JSON.stringify(history.readerPositions), savedPositions, 'detached chat elements must not overwrite saved positions with zero')
+})
+
+test('YouTube reading positions: preserve search scroll and anchor offsets when earlier content is inserted', () => {
+  const env = boot()
+  const { document, Element, api } = env
+  const header = document.body.appendChild(new Element('yt-live-chat-header-renderer'))
+  header.appendChild(new Element('button')).id = 'live-chat-header-context-menu'
+  const scroller = document.body.appendChild(new Element('div')).appendChild(new Element('div'))
+  scroller.id = 'item-scroller'
+  scroller.appendChild(new Element('div')).id = 'items'
+  api.refresh()
+  const state = api.mounted
+  const { history, list } = state
+  list.scrollTop = 0
+  list.scrollHeight = 1000
+  list.clientHeight = 200
+  list.getBoundingClientRect = () => ({ top: 100, bottom: 300 })
+  for (let i = 0; i < 12; i++) {
+    api.captureLine(superChatMessage(env, '@donor', 'needle', '￥100', `search-position-${i}`).line, history)
+    const record = history.ids.get(`search-position-${i}`)
+    record.view.getBoundingClientRect = () => {
+      const top = 100 + (i + (history.shifted ? 1 : 0)) * 40 - list.scrollTop
+      return { top, bottom: top + 40, height: 40 }
+    }
+  }
+  history.supportSearch = 'needle'
+  api.setEnabled(state, true, true)
+  list.scrollTop = 180
+  list.listeners.get('scroll')()
+  api.setEnabled(state, false, true)
+  history.shifted = true
+  list.scrollTop = 0
+  api.setEnabled(state, true, true)
+  assert.equal(state.supportSearch.value, 'needle')
+  assert.equal(history.follow, false)
+  assert.equal(list.scrollTop, 220)
+  // If the anchor no longer exists, retain the saved pixel position.
+  api.setEnabled(state, false, true)
+  history.readerPositions.support.anchor = 'expired-or-removed'
+  list.scrollTop = 0
+  api.setEnabled(state, true, true)
+  assert.equal(list.scrollTop, 220)
+})
+
+test('YouTube saved presentation: upgrade old SC prices and combine membership month and tier on one header row', () => {
+  const env = boot({ trustedTypes: true })
+  const history = env.api.getHistory('video:old-format')
+  env.api.captureLine(superChatMessage(env, '@donor', 'hello', '￥10,000').line, history)
+  const sc = history.messages[0]
+  assert.equal(sc.view.querySelector('.ytcf-amount').textContent, '￥10,000')
+  sc.view.querySelector('.ytcf-amount').textContent = 'SC ￥10,000'
+  const restored = env.api.restoreRecord(env.api.archiveRecord(history, sc))
+  assert.equal(restored.view.querySelector('.ytcf-amount').textContent, '￥10,000')
+  env.api.captureLine(membershipMessage(env, { primary: 'メンバー歴 15 か月', subtext: 'ろありー',
+    text: 'ろあちゃん誕生日おめでとう', id: 'member-format' }).line, history)
+  const member = history.ids.get('member-format')
+  const header = member.view.querySelector('.ytcf-event-header')
+  assert.equal(header.textContent, 'メンバー歴 15 か月 ろありー')
+  assert.equal(header.querySelectorAll('.ytcf-event-details').length, 2)
+  assert.equal(member.view.querySelector('.ytcf-body').parentElement, member.view)
+  // Older archives have separate block details directly under the row.
+  for (const detail of [...header.querySelectorAll('.ytcf-event-details')]) member.view.appendChild(detail)
+  header.remove()
+  const upgraded = env.api.restoreRecord(env.api.archiveRecord(history, member))
+  assert.equal(upgraded.view.querySelector('.ytcf-event-header').textContent, 'メンバー歴 15 か月 ろありー')
+})
+
 test('YouTube archive: persist SC and filtered messages across reloads with colors, emoji, headers and IDs', async () => {
   const database = fakeIndexedDB()
   const env = boot({ database, trustedTypes: true })
@@ -534,7 +666,7 @@ test('YouTube archive: persist SC and filtered messages across reloads with colo
   assert.equal(restored.ids.size, 3)
   const scRecord = restored.ids.get('sc-persist')
   assert.equal(scRecord.view.style.backgroundColor, '#1de9b6ff')
-  assert.equal(scRecord.view.querySelector('.ytcf-amount').textContent, 'SC NT$150')
+  assert.equal(scRecord.view.querySelector('.ytcf-amount').textContent, 'NT$150')
   assert.equal(scRecord.view.querySelector('img').getAttribute('src'), 'https://example.com/emoji.png')
   assert.equal(restored.ids.get('mod-persist').view.children.at(-1).textContent, 'moderator comment')
   assert.equal(restored.ids.get('member-persist').view.querySelector('.ytcf-event-details').textContent, 'Member for 12 months')
@@ -810,7 +942,7 @@ test('YouTube Super Chats: collect before opening and keep the SC list independe
   history.supportOnly = true
   env.api.renderMessages(state)
   assert.equal(state.count.textContent, '1 則')
-  assert.equal(state.list.firstChild.querySelector('.ytcf-amount').textContent, 'SC NT$150.00')
+  assert.equal(state.list.firstChild.querySelector('.ytcf-amount').textContent, 'NT$150.00')
   assert.equal(state.list.firstChild.children.at(-1).textContent, '謝謝直播')
   for (const key of ['excludedUsers', 'globalExcludedUsers']) {
     history.settings[key] = ['@donor']
@@ -834,17 +966,17 @@ test('YouTube Super Chats: retain amount-only payments, update amounts and dedup
   assert.equal(env.api.captureLine(paid.line, history), true)
   const record = history.messages[0]
   const firstTime = record.view.firstChild.textContent
-  assert.equal(record.view.querySelector('.ytcf-amount').textContent, 'SC ¥200')
+  assert.equal(record.view.querySelector('.ytcf-amount').textContent, '¥200')
   assert.equal(env.api.captureLine(superChatMessage(env, '@donor', null, '¥200').line, history), false)
   paid.purchase.textContent = '¥500'
   assert.equal(env.api.captureLine(paid.line, history), true)
   assert.equal(history.messages.length, 1)
-  assert.equal(record.view.querySelector('.ytcf-amount').textContent, 'SC ¥500')
+  assert.equal(record.view.querySelector('.ytcf-amount').textContent, '¥500')
   assert.equal(record.view.firstChild.textContent, firstTime)
   paid.purchase.remove()
   paid.line.data = { purchaseAmountText: { runs: [{ text: '$' }, { text: '5.00' }] } }
   assert.equal(env.api.captureLine(paid.line, history), true)
-  assert.equal(record.view.querySelector('.ytcf-amount').textContent, 'SC $5.00')
+  assert.equal(record.view.querySelector('.ytcf-amount').textContent, '$5.00')
   paid.line.setAttribute('is-deleted', '')
   assert.equal(env.api.captureLine(paid.line, history), true)
   assert.equal(record.view.children.at(-1).textContent, '訊息已刪除')
@@ -978,7 +1110,7 @@ test('YouTube filters: mount, toggle and remount when Trusted Types rejects HTML
   assert.equal(state.panel.querySelector('.ytcf-target-summary').hidden, true)
   assert.equal(state.panel.querySelector('.ytcf-targets').hidden, true)
   assert.equal(state.panel.className.includes('ytcf-managing'), false)
-  assert.equal(state.list.children.find(row => !row.hidden).querySelector('.ytcf-amount').textContent, 'SC NT$30')
+  assert.equal(state.list.children.find(row => !row.hidden).querySelector('.ytcf-amount').textContent, 'NT$30')
   state.button.remove()
   state.updateSettings(state.history.settings, '已移除帳號。')
   const oldTimer = state.statusTimer

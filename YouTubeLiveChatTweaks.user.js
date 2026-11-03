@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.8.1
+// @version     0.8.2
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @description 提供 YouTube 聊天室用戶資訊卡、獨立 SC／會員事件紀錄、角色與帳號包含／排除篩選、表情複製、重新載入與自動跟隨。
@@ -726,6 +726,19 @@
       }
       return node
     }
+    const formatSupportView = (view, superChat) => {
+      const amount = $('.ytcf-amount', view)
+      if (superChat && amount) amount.textContent = amount.textContent.replace(/^SC\s+/, '')
+      const details = $$('.ytcf-event-details', view).filter(node => node.parentElement === view)
+      if (details.length) {
+        const header = element('span', { class: 'ytcf-event-header' })
+        details[0].insertAdjacentElement('beforebegin', header)
+        for (const detail of details) {
+          if (header.childNodes.length) header.appendChild(document.createTextNode(' '))
+          header.appendChild(detail)
+        }
+      }
+    }
     const archiveRecord = (history, record) => ({
       scope: history.scope, storageId: record.storageId, createdAt: record.createdAt,
       order: record.order,
@@ -757,6 +770,7 @@
         profileHandle: typeof saved.profileHandle === 'string' ? saved.profileHandle : '',
         fingerprint: saved.fingerprint, view, retained: true }
       applySupportAuthor(record)
+      formatSupportView(view, record.superChat)
       return record
     }
     const updateArchiveStatus = history => {
@@ -1586,7 +1600,7 @@
         row.appendChild(copy)
       }
       if (message.supportEvent) {
-        const label = message.superChat ? message.amount ? `SC ${message.amount}` : 'SC' : EVENT_LABELS[message.supportEvent]
+        const label = message.superChat ? message.amount || 'SC' : EVENT_LABELS[message.supportEvent]
         const amount = element('span', { class: 'ytcf-amount' }, [label])
         amount.style.backgroundColor = message.colors.headerBackground
         amount.style.color = message.colors.headerText
@@ -1602,6 +1616,7 @@
       content.className = `${content.className || ''} ytcf-body`
       if (message.supportEvent) content.style.color = message.colors.bodyText
       row.appendChild(content)
+      if (message.supportEvent) formatSupportView(row, message.superChat)
       return row
     }
 
@@ -1780,6 +1795,7 @@
       if (history.follow) list.scrollTop = list.scrollHeight
       else list.scrollTop = scrollTop
       latest.hidden = history.follow
+      rememberReaderPosition(state)
     }
 
     const renderMessages = (state, rebuild = false) => {
@@ -1834,6 +1850,7 @@
       // All row writes finish before the one layout read needed for following.
       if (history.follow) list.scrollTop = list.scrollHeight
       latest.hidden = history.follow
+      rememberReaderPosition(state)
     }
 
     const scheduleMessageRender = state => {
@@ -1909,6 +1926,7 @@
       const rowBounds = record.view.getBoundingClientRect()
       const listBounds = list.getBoundingClientRect()
       list.scrollTop = Math.max(0, list.scrollTop + rowBounds.top - listBounds.top - (list.clientHeight - rowBounds.height) / 2)
+      rememberReaderPosition(state)
       state.locationTimer = setTimeout(() => {
         record.view.removeAttribute('data-ytcf-located')
         record.view.removeAttribute('tabindex')
@@ -1982,7 +2000,40 @@
       positionFilterPanel(state)
     }
 
+    const rememberReaderPosition = state => {
+      const { history, list } = state
+      if (!history.enabled || !state.readerReady || state.readerRestoring || state.panel.hidden || !list.isConnected) return
+      const position = { top: list.scrollTop, follow: history.follow }
+      if (!history.follow) {
+        const top = list.getBoundingClientRect().top
+        const anchor = [...list.children].find(view => !view.hidden && view.getBoundingClientRect().bottom > top)
+        const record = anchor && [...history.messages, ...(state.searchShown || [])].find(row => row.view === anchor)
+        position.anchor = record?.storageId
+        position.offset = anchor ? anchor.getBoundingClientRect().top - top : 0
+      }
+      history.readerPositions ||= {}
+      history.readerPositions[history.supportOnly ? 'support' : 'filtered'] = position
+    }
+    const restoreReaderPosition = (state, position) => {
+      const { history, list } = state
+      state.readerRestoring = true
+      history.follow = position?.follow ?? true
+      renderMessages(state, true)
+      if (!history.follow) {
+        const record = [...history.messages, ...(state.searchShown || [])].find(row => row.storageId === position.anchor)
+        if (record?.view.parentElement === list && !record.view.hidden) {
+          list.scrollTop += record.view.getBoundingClientRect().top - list.getBoundingClientRect().top - position.offset
+        } else list.scrollTop = position.top
+      }
+      // Ignore the scroll event generated by restoring a paused viewport.
+      // A real wheel, pointer, touch or keyboard gesture releases this guard.
+      state.locationPinned = !history.follow
+      state.readerReady = true
+      state.readerRestoring = false
+      rememberReaderPosition(state)
+    }
     const setEnabled = (state, enabled, supportOnly = false) => {
+      rememberReaderPosition(state)
       clearLocatedRecord(state)
       state.authorObserver?.disconnect()
       cancelMessageRender(state)
@@ -2019,7 +2070,7 @@
       }
       if (state.empty) state.empty.textContent = supportOnly ? '本次頁面尚未收到 SC 或會員事件。'
         : '尚無符合條件的發言。新增目標帳號後開始收集。'
-      if (enabled) renderMessages(state, true)
+      if (enabled) restoreReaderPosition(state, state.history.readerPositions?.[supportOnly ? 'support' : 'filtered'])
     }
 
     const showTargetStatus = (state, message = '') => {
@@ -2237,9 +2288,10 @@
       setTargetsOpen(false)
       renderTargets(state)
       state.list.addEventListener('scroll', () => {
-        if (state.locationPinned) return
+        if (!state.history.enabled || state.panel.hidden || state.readerRestoring || state.locationPinned) return
         state.history.follow = state.list.scrollHeight - state.list.scrollTop - state.list.clientHeight < 40
         state.latest.hidden = state.history.follow
+        rememberReaderPosition(state)
       }, { passive: true })
       for (const event of ['wheel', 'touchstart', 'pointerdown', 'keydown']) {
         state.list.addEventListener(event, () => { state.locationPinned = false }, { passive: true })
@@ -2254,6 +2306,7 @@
 
     const unmount = () => {
       if (!mounted) return
+      rememberReaderPosition(mounted)
       releaseMessageViews(mounted)
       closeAuthorCard()
       setPanelLayer(mounted, false)
@@ -2399,7 +2452,8 @@
       .ytcf-message:hover { background: var(--yt-live-chat-action-panel-background-color, #8882); }
       .ytcf-support-event { margin: 3px 6px; border-radius: 4px; }
       .ytcf-support-event .ytcf-body a, .ytcf-event-details a { color: inherit; text-decoration: underline; }
-      .ytcf-event-details { display: block; }
+      .ytcf-event-header { display: block; }
+      .ytcf-event-details { display: inline !important; }
       .ytcf-amount { display: inline-block; margin-right: 5px; padding: 0 5px; border-radius: 4px; color: var(--yt-live-chat-primary-text-color, #0f0f0f); background: var(--yt-live-chat-action-panel-background-color, #8882); font-weight: 600; }
       .ytuc-card { position: fixed; z-index: 2200; box-sizing: border-box; overflow: auto; overscroll-behavior: contain; border: 1px solid var(--yt-live-chat-message-input-border-color, #8884); border-radius: 8px; box-shadow: 0 8px 28px #0006; color: var(--yt-live-chat-primary-text-color, #0f0f0f); background: var(--yt-live-chat-background-color, #fff); font: 13px/1.5 Roboto, Arial, sans-serif; }
       .ytuc-card[hidden], .ytuc-card [hidden] { display: none !important; }
