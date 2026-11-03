@@ -179,7 +179,7 @@ function boot({ saved, blocked = false, trustedTypes = false, parentWindow, fetc
       readMessage, matchesFilter, captureLine, captureTree, captureMutations, renderMessages, changeTargetUsers,
       scheduleMessageRender, releaseMessageViews, handleMessageVisibility,
       archiveTree, restoreTree, archiveRecord, restoreRecord, flushHistory, pruneHistories, pruneArchive,
-      applySupportAuthor, resolveSupportAuthor,
+      applySupportAuthor, resolveSupportAuthor, locateSupportRecord,
       refresh, refreshHeader, setEnabled, showTargetStatus, guardMessageMenu, guardMenuDismissal,
       getProfile, showAuthorCard, authorSnapshot, dismissCard, getAuthorCard, setPanelLayer, positionFilterPanel, fitCardText,
       setMounted: state => { mounted = state },
@@ -435,6 +435,81 @@ test('YouTube SC search: incoming messages, edits and expiry update results whil
   env.api.renderMessages(state)
   assert.equal(state.count.textContent, '0 則符合')
   assert.equal(state.list.children.length, 0)
+})
+
+test('YouTube SC locate: leave search, center the selected row, pause following and keep controls out of saved content', () => {
+  const env = boot({ trustedTypes: true })
+  const history = env.api.getHistory('video:locate')
+  history.enabled = history.supportOnly = true
+  history.supportSearch = 'needle'
+  env.api.captureLine(superChatMessage(env, '@donor', 'needle', 'NT$150', 'locate-target').line, history)
+  env.api.captureLine(superChatMessage(env, '@another', 'surrounding context', 'NT$300', 'locate-next').line, history)
+  const target = history.ids.get('locate-target')
+  const state = { history, list: new env.Element(), empty: {}, count: {}, latest: {}, supportSearch: { value: 'needle' } }
+  state.list.clientHeight = 400
+  state.list.getBoundingClientRect = () => ({ top: 100 })
+  target.view.getBoundingClientRect = () => ({ top: 700, height: 40 })
+  env.api.renderMessages(state)
+  const button = target.view.querySelector('.ytcf-locate')
+  assert.ok(button)
+  const saved = env.api.archiveRecord(history, target)
+  assert.equal(JSON.stringify(saved).includes('ytcf-locate'), false)
+  history.supportSearch = '定位'
+  env.api.renderMessages(state)
+  assert.equal(state.count.textContent, '0 則符合', 'the action label must not become searchable message text')
+  history.supportSearch = 'needle'
+  env.api.renderMessages(state)
+  state.list.scrollTop = 100
+  target.view.querySelector('.ytcf-locate').listeners.get('click')()
+  assert.equal(history.supportSearch, '')
+  assert.equal(state.supportSearch.value, '')
+  assert.equal(state.count.textContent, '2 則')
+  assert.equal(state.list.scrollTop, 520)
+  assert.equal(history.follow, false)
+  assert.equal(state.locationPinned, true)
+  assert.equal(env.document.activeElement, target.view)
+  assert.equal(target.view.hasAttribute('data-ytcf-located'), true)
+  assert.equal(state.list.querySelector('.ytcf-locate'), null)
+  env.timers.get(state.locationTimer).fn()
+  assert.equal(target.view.hasAttribute('data-ytcf-located'), false)
+  assert.equal(state.locationPinned, true, 'highlight expiry must not resume following')
+})
+
+test('YouTube SC locate: restore an older result and surrounding support events without renewing expiry or losing order', async () => {
+  const database = fakeIndexedDB()
+  let now = Date.now()
+  const env = boot({ database, now: () => now })
+  const history = env.api.getHistory('video:locate-older')
+  await history.restorePromise
+  history.displayLimit = 1
+  for (let i = 0; i < 5; i++) {
+    env.api.captureLine(superChatMessage(env, '@donor', i === 1 ? 'needle' : `context ${i}`, 'NT$150', `locate-old-${i}`).line, history)
+    env.api.captureLine(env.message('@mod', `ordinary ${i}`, 'moderator', `locate-mod-${i}`).line, history)
+  }
+  await env.api.flushHistory(history)
+  const expiry = [...database.records.values()].map(row => row.expiresAt)
+  history.enabled = history.supportOnly = true
+  history.supportSearch = 'needle'
+  const state = { history, list: new env.Element(), empty: {}, count: {}, latest: {} }
+  state.list.clientHeight = 400
+  state.list.scrollTop = 0
+  env.api.renderMessages(state)
+  const oldResult = [...state.searchShown][0]
+  assert.ok(oldResult.view.querySelector('.ytcf-locate'))
+  assert.equal(env.api.locateSupportRecord(state, oldResult.storageId), true)
+  assert.equal(oldResult.retained, false, 'transient search views are released on navigation')
+  assert.equal(state.count.textContent, '5 則')
+  assert.deepEqual(Array.from(history.messages).filter(row => row.supportEvent).map(row => row.id),
+    Array.from({ length: 5 }, (_, i) => `locate-old-${i}`))
+  const target = history.ids.get('locate-old-1')
+  assert.equal(target.retained, true)
+  assert.equal(target.view.hasAttribute('data-ytcf-located'), true)
+  assert.equal(history.older.has(target.storageId), false)
+  await env.api.flushHistory(history)
+  assert.deepEqual([...database.records.values()].map(row => row.expiresAt), expiry)
+  now += 7 * 24 * 60 * 60 * 1000 + 1
+  assert.equal(env.api.locateSupportRecord(state, target.storageId), false)
+  assert.equal(env.api.locateSupportRecord(state, 'missing-id'), false)
 })
 
 test('YouTube archive: persist SC and filtered messages across reloads with colors, emoji, headers and IDs', async () => {

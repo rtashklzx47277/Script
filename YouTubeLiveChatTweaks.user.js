@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.8.0
+// @version     0.8.1
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @description 提供 YouTube 聊天室用戶資訊卡、獨立 SC／會員事件紀錄、角色與帳號包含／排除篩選、表情複製、重新載入與自動跟隨。
@@ -685,6 +685,7 @@
       if (depth > 20) return null
       if (node.nodeType === 3 || node.tagName === '#text') return { text: node.textContent }
       if (node.nodeType !== 1) return null
+      if (node.matches('.ytcf-locate')) return null
       return {
         tag: (node.localName || node.tagName).toLowerCase(), svg: node.namespaceURI === SVG_NS,
         attributes: [...node.attributes].filter(attr => ARCHIVE_ATTRIBUTES.has(attr.name)).map(attr => [attr.name, attr.value]),
@@ -1708,7 +1709,8 @@
       if (record.tree && archivedSearchText.has(record)) return archivedSearchText.get(record)
       const text = normalizeSearch([record.authorName, record.authorHandle, record.profileName,
         record.profileHandle, record.user, record.channelId,
-        record.tree ? treeSearchText(record.tree) : record.view.textContent].join(' '))
+        record.tree ? treeSearchText(record.tree) : [...record.view.childNodes]
+          .filter(node => !node.matches?.('.ytcf-locate')).map(node => node.textContent).join('')].join(' '))
       if (record.tree) archivedSearchText.set(record, text)
       return text
     }
@@ -1748,6 +1750,12 @@
           record.renderedView.remove()
         }
         record.view.hidden = false
+        if (!$('.ytcf-locate', record.view)) {
+          const locate = element('button', { type: 'button', class: 'ytcf-locate',
+            'aria-label': '在完整 SC／會員紀錄中定位這則訊息' }, ['定位'])
+          locate.addEventListener('click', () => locateSupportRecord(state, record.storageId))
+          record.view.appendChild(locate)
+        }
         if (previousViews[index++] !== record.view) list.appendChild(record.view)
         record.renderedView = record.view
         record.visible = true
@@ -1837,9 +1845,11 @@
     }
 
     const releaseMessageViews = state => {
+      clearLocatedRecord(state)
       state.authorObserver?.disconnect()
       cancelMessageRender(state)
       for (const record of new Set([...state.history.messages, ...state.history.removed, ...(state.searchShown || [])])) {
+        $('.ytcf-locate', record.view)?.remove()
         record.renderedView?.remove()
         record.renderedView = null
         record.visible = false
@@ -1849,6 +1859,63 @@
       state.searchShown = null
       state.renderedHistory = null
       state.history.removed.clear()
+    }
+
+    const clearLocatedRecord = state => {
+      clearTimeout(state.locationTimer)
+      state.locatedView?.removeAttribute('data-ytcf-located')
+      state.locatedView?.removeAttribute('tabindex')
+      state.locatedView = null
+      state.locationTimer = 0
+      state.locationPinned = false
+    }
+    const locateSupportRecord = (state, storageId) => {
+      const { history, list } = state
+      if (!history.enabled || !history.supportOnly) return false
+      let record = history.messages.find(row => row.storageId === storageId && row.retained && row.supportEvent)
+      if (record && record.createdAt + RETENTION_MS <= Date.now()) return false
+      if (!record) {
+        const saved = [...history.older.values()]
+          .filter(row => row.supportEvent && validArchiveRecord(row, history.scope))
+          .sort((a, b) => a.createdAt - b.createdAt || (a.order || 0) - (b.order || 0))
+        const index = saved.findIndex(row => row.storageId === storageId)
+        if (index < 0) return false
+        // Include preceding context and every newer support event so the
+        // full SC list stays chronological even beyond the initial viewport.
+        const restored = []
+        for (const item of saved.slice(Math.max(0, index - 20))) {
+          const row = restoreRecord(item)
+          if (!row) continue
+          history.older.delete(item.storageId)
+          if (row.id) history.ids.set(row.id, row)
+          restored.push(row)
+        }
+        history.messages.push(...restored)
+        history.messages.sort((a, b) => a.createdAt - b.createdAt || a.order - b.order)
+        history.displayLimit += restored.length
+        record = restored.find(row => row.storageId === storageId)
+        if (!record) return false
+      }
+      history.supportSearch = ''
+      if (state.supportSearch) state.supportSearch.value = ''
+      history.follow = false
+      renderMessages(state, true)
+      clearLocatedRecord(state)
+      state.locationPinned = true
+      state.locatedView = record.view
+      record.view.setAttribute('data-ytcf-located', '')
+      record.view.setAttribute('tabindex', '-1')
+      record.view.focus({ preventScroll: true })
+      const rowBounds = record.view.getBoundingClientRect()
+      const listBounds = list.getBoundingClientRect()
+      list.scrollTop = Math.max(0, list.scrollTop + rowBounds.top - listBounds.top - (list.clientHeight - rowBounds.height) / 2)
+      state.locationTimer = setTimeout(() => {
+        record.view.removeAttribute('data-ytcf-located')
+        record.view.removeAttribute('tabindex')
+        state.locatedView = null
+        state.locationTimer = 0
+      }, 3000)
+      return true
     }
 
     const handleMessageVisibility = () => {
@@ -1916,6 +1983,7 @@
     }
 
     const setEnabled = (state, enabled, supportOnly = false) => {
+      clearLocatedRecord(state)
       state.authorObserver?.disconnect()
       cancelMessageRender(state)
       if (enabled) closeAuthorCard()
@@ -2070,6 +2138,7 @@
       state.older = $('.ytcf-older', panel)
       state.supportSearch = $('[name="search-support"]', panel)
       state.supportSearch.addEventListener('input', () => {
+        clearLocatedRecord(state)
         state.history.supportSearch = state.supportSearch.value
         state.history.searchLimit = MAX_MESSAGES
         state.history.follow = true
@@ -2100,6 +2169,7 @@
         }
         history.displayLimit += restored.length
         history.messages.unshift(...restored)
+        history.messages.sort((a, b) => a.createdAt - b.createdAt || a.order - b.order)
         history.follow = false
         renderMessages(state, true)
         state.list.scrollTop = beforeTop + state.list.scrollHeight - beforeHeight
@@ -2167,10 +2237,15 @@
       setTargetsOpen(false)
       renderTargets(state)
       state.list.addEventListener('scroll', () => {
+        if (state.locationPinned) return
         state.history.follow = state.list.scrollHeight - state.list.scrollTop - state.list.clientHeight < 40
         state.latest.hidden = state.history.follow
       }, { passive: true })
+      for (const event of ['wheel', 'touchstart', 'pointerdown', 'keydown']) {
+        state.list.addEventListener(event, () => { state.locationPinned = false }, { passive: true })
+      }
       state.latest.addEventListener('click', () => {
+        clearLocatedRecord(state)
         state.history.follow = true
         renderMessages(state)
       })
@@ -2316,6 +2391,9 @@
       .ytcf-older { align-self: center; flex-shrink: 0; margin: 6px; }
       .ytcf-list { flex: 1; min-height: 0; overflow: auto; overflow-anchor: none; padding: 6px 0; }
       .ytcf-message { padding: 5px 10px; overflow-wrap: anywhere; line-height: 1.6; }
+      .ytcf-message:has(> .ytcf-locate) { position: relative; padding-right: 58px; }
+      .ytcf-panel .ytcf-locate { position: absolute; top: 5px; right: 6px; padding: 2px 6px; border: 1px solid currentColor; color: inherit; background: transparent; font: inherit; font-size: 11px; }
+      .ytcf-message[data-ytcf-located] { outline: 2px solid #ffb300; outline-offset: -2px; box-shadow: inset 0 0 0 4px #0008; }
       /* Lift the handle's @ optically without changing text flow or line height. */
       .ytcf-author .ytcf-handle-at { position: relative; top: -0.08em; }
       .ytcf-message:hover { background: var(--yt-live-chat-action-panel-background-color, #8882); }
