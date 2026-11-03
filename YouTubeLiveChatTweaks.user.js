@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.7.2
+// @version     0.8.0
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @description 提供 YouTube 聊天室用戶資訊卡、獨立 SC／會員事件紀錄、角色與帳號包含／排除篩選、表情複製、重新載入與自動跟隨。
@@ -809,7 +809,9 @@
     }
     const saveRecord = (history, record) => {
       if (history.archiveError) return
-      history.saveQueue.set(record.storageId, archiveRecord(history, record))
+      const saved = archiveRecord(history, record)
+      if (history.older.has(record.storageId)) history.older.set(record.storageId, saved)
+      history.saveQueue.set(record.storageId, saved)
       if (history.saveScheduled) return
       history.saveScheduled = true
       Promise.resolve().then(() => { history.saveScheduled = false; return flushHistory(history) })
@@ -1014,7 +1016,8 @@
       if (!history) {
         history = {
           channel, settings: loadSettings(channel), messages: [], nodes: new WeakMap(), ids: new Map(),
-          enabled: false, supportOnly: false, follow: true, dirty: new Set(), removed: new Set(),
+          enabled: false, supportOnly: false, supportSearch: '', searchLimit: MAX_MESSAGES,
+          follow: true, dirty: new Set(), removed: new Set(),
           scope, older: new Map(), saveQueue: new Map(), displayLimit: MAX_MESSAGES,
           archiveReady: false, archiveError: false,
         }
@@ -1255,6 +1258,7 @@
           record.profileResolved = true
           applySupportAuthor(record)
           saveRecord(history, record)
+          if (mounted?.history === history && history.supportOnly && history.supportSearch) scheduleMessageRender(mounted)
           return profile
         } catch (_) { record.profileRetryAt = Date.now() + 30000; return null }
         finally { record.profileRequest = null }
@@ -1691,9 +1695,93 @@
       state.renderFrame = 0
     }
 
+    const normalizeSearch = value => String(value || '').normalize('NFKC').toLowerCase().trim()
+    const archivedSearchText = new WeakMap()
+    const treeSearchText = (tree, depth = 0) => {
+      if (!tree || depth > 20) return ''
+      const alt = (Array.isArray(tree.attributes) ? tree.attributes : [])
+        .filter(attr => Array.isArray(attr) && attr[0] === 'alt').map(attr => attr[1])
+      return [typeof tree.text === 'string' ? tree.text : '', ...alt,
+        ...(Array.isArray(tree.children) ? tree.children : []).map(child => treeSearchText(child, depth + 1))].join('')
+    }
+    const supportSearchText = record => {
+      if (record.tree && archivedSearchText.has(record)) return archivedSearchText.get(record)
+      const text = normalizeSearch([record.authorName, record.authorHandle, record.profileName,
+        record.profileHandle, record.user, record.channelId,
+        record.tree ? treeSearchText(record.tree) : record.view.textContent].join(' '))
+      if (record.tree) archivedSearchText.set(record, text)
+      return text
+    }
+    const renderSupportSearch = (state, query) => {
+      const { history, list, empty, count, latest } = state
+      if (!state.searchRecords) {
+        releaseMessageViews(state)
+        state.searchRecords = new Map()
+      }
+      const words = query.split(/\s+/u)
+      const matches = record => record.supportEvent && words.every(word => supportSearchText(record).includes(word))
+      const hits = [...history.messages.filter(record => record.retained && matches(record)),
+        ...[...history.older.values()].filter(record => validArchiveRecord(record, history.scope) && matches(record))]
+        .sort((a, b) => a.createdAt - b.createdAt || (a.order || 0) - (b.order || 0))
+      const shown = new Set()
+      const archived = new Map()
+      for (const hit of hits.slice(-(history.searchLimit || MAX_MESSAGES))) {
+        const record = hit.tree ? state.searchRecords.get(hit.storageId) || restoreRecord(hit) : hit
+        if (!record) continue
+        if (hit.tree) archived.set(hit.storageId, record)
+        shown.add(record)
+      }
+      for (const record of state.searchShown || []) if (!shown.has(record)) {
+        if (record.renderedView) state.authorObserver?.unobserve(record.renderedView)
+        record.renderedView?.remove()
+        record.view.remove()
+        record.renderedView = null
+        record.visible = false
+      }
+      for (const [key, record] of state.searchRecords) if (!archived.has(key)) record.retained = false
+      const previousViews = [...list.children]
+      let index = 0
+      const scrollTop = list.scrollTop
+      for (const record of shown) {
+        if (record.renderedView && record.renderedView !== record.view) {
+          state.authorObserver?.unobserve(record.renderedView)
+          record.renderedView.remove()
+        }
+        record.view.hidden = false
+        if (previousViews[index++] !== record.view) list.appendChild(record.view)
+        record.renderedView = record.view
+        record.visible = true
+        supportAuthorViews.set(record.view, { history, record })
+        if (state.authorObserver) state.authorObserver.observe(record.view)
+        else queueSupportAuthor(history, record)
+      }
+      state.searchRecords = archived
+      state.searchShown = shown
+      state.visibleCount = shown.size
+      history.dirty.clear()
+      history.removed.clear()
+      state.renderedHistory = null
+      empty.hidden = shown.size > 0
+      empty.textContent = '找不到符合搜尋的 SC 或會員紀錄。'
+      count.textContent = `${hits.length} 則符合`
+      if (state.older) {
+        const remaining = Math.max(0, hits.length - shown.size)
+        state.older.hidden = !remaining
+        state.older.textContent = `載入較早結果（${remaining}）`
+      }
+      if (history.follow) list.scrollTop = list.scrollHeight
+      else list.scrollTop = scrollTop
+      latest.hidden = history.follow
+    }
+
     const renderMessages = (state, rebuild = false) => {
       cancelMessageRender(state)
       const { history, list, empty, count, latest } = state
+      const query = history.supportOnly ? normalizeSearch(history.supportSearch) : ''
+      if (query) { renderSupportSearch(state, query); return }
+      if (state.searchRecords) releaseMessageViews(state)
+      empty.textContent = history.supportOnly ? '尚未收到 SC 或會員事件。'
+        : '尚無符合條件的發言。新增目標帳號後開始收集。'
       const filterKey = JSON.stringify([history.settings, history.supportOnly])
       const full = rebuild || state.renderedHistory !== history || state.filterKey !== filterKey
       if (full) state.visibleCount = 0
@@ -1751,18 +1839,22 @@
     const releaseMessageViews = state => {
       state.authorObserver?.disconnect()
       cancelMessageRender(state)
-      for (const record of [...state.history.messages, ...state.history.removed]) {
+      for (const record of new Set([...state.history.messages, ...state.history.removed, ...(state.searchShown || [])])) {
         record.renderedView?.remove()
         record.renderedView = null
         record.visible = false
       }
+      for (const record of state.searchRecords?.values() || []) record.retained = false
+      state.searchRecords = null
+      state.searchShown = null
+      state.renderedHistory = null
       state.history.removed.clear()
     }
 
     const handleMessageVisibility = () => {
       if (!mounted) return
       if (document.hidden) cancelMessageRender(mounted)
-      else if (mounted.history.dirty.size || mounted.history.removed.size) scheduleMessageRender(mounted)
+      else if (mounted.history.dirty.size || mounted.history.removed.size || mounted.history.supportSearch) scheduleMessageRender(mounted)
     }
 
     const setNativeChatAccessible = (state, enabled) => {
@@ -1847,6 +1939,10 @@
       const title = $('.ytcf-sc-title', state.panel)
       if (summary) summary.hidden = supportOnly
       if (title) title.hidden = !supportOnly
+      if (state.supportSearch) {
+        state.supportSearch.parentElement.hidden = !supportOnly
+        state.supportSearch.value = state.history.supportSearch || ''
+      }
       if (supportOnly) {
         const targets = $('.ytcf-targets', state.panel)
         if (targets) targets.hidden = true
@@ -1921,6 +2017,10 @@
           element('span', { class: 'ytcf-sc-title', hidden: '' }, ['SC／會員紀錄']),
           element('span', { class: 'ytcf-count' }),
         ]),
+        element('label', { class: 'ytcf-sc-search', hidden: '' }, [
+          element('input', { type: 'search', name: 'search-support', 'aria-label': '搜尋 SC／會員紀錄',
+            placeholder: '搜尋頻道名稱、@帳號或留言', autocomplete: 'off', spellcheck: 'false' }),
+        ]),
         element('div', { class: 'ytcf-targets', id: 'ytcf-target-settings', hidden: '' }, [
           element('div', { class: 'ytcf-roles' }, [
             element('label', {}, [element('input', { type: 'checkbox', name: 'broadcaster' }), ' Broadcaster']),
@@ -1968,8 +2068,24 @@
       state.count = $('.ytcf-count', panel)
       state.latest = $('.ytcf-latest', panel)
       state.older = $('.ytcf-older', panel)
+      state.supportSearch = $('[name="search-support"]', panel)
+      state.supportSearch.addEventListener('input', () => {
+        state.history.supportSearch = state.supportSearch.value
+        state.history.searchLimit = MAX_MESSAGES
+        state.history.follow = true
+        if (state.history.enabled && state.history.supportOnly) renderMessages(state, true)
+      })
       state.older.addEventListener('click', () => {
         const history = state.history
+        if (history.supportOnly && normalizeSearch(history.supportSearch)) {
+          const beforeHeight = state.list.scrollHeight
+          const beforeTop = state.list.scrollTop
+          history.searchLimit += OLDER_BATCH
+          history.follow = false
+          renderMessages(state)
+          state.list.scrollTop = beforeTop + state.list.scrollHeight - beforeHeight
+          return
+        }
         const saved = [...history.older.values()].slice(-OLDER_BATCH)
         const restored = []
         const beforeHeight = state.list.scrollHeight
@@ -2186,6 +2302,8 @@
       .ytcf-roles label { display: flex; align-items: center; gap: 3px; white-space: nowrap; }
       .ytcf-roles input { width: 13px; height: 13px; margin: 0; accent-color: var(--yt-live-chat-button-default-text-color, #065fd4); }
       .ytcf-count { margin-left: auto; flex-shrink: 0; white-space: nowrap; color: var(--yt-live-chat-secondary-text-color, #606060); }
+      .ytcf-sc-search { display: block; margin-top: 8px; }
+      .ytcf-sc-search input { box-sizing: border-box; width: 100%; min-width: 0; height: 30px; padding: 5px 8px; border: 1px solid var(--yt-live-chat-message-input-border-color, #8886); border-radius: 4px; color: inherit; background: var(--yt-live-chat-background-color, #fff); font: inherit; }
       .ytcf-users { display: flex; align-items: center; gap: 6px; }
       .ytcf-users label { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; white-space: nowrap; }
       .ytcf-users input { display: block; box-sizing: border-box; flex: 1; min-width: 0; width: 100%; padding: 5px 8px; border: 1px solid var(--yt-live-chat-message-input-border-color, #8886); border-radius: 4px; color: inherit; background: var(--yt-live-chat-background-color, #fff); font-size: 12px; }

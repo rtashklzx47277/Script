@@ -329,6 +329,114 @@ test('YouTube SC author names: fall back to native handles on failures and never
   assert.equal(h.messages[0].view.querySelector('strong').textContent, '真正的頻道名稱 @Sender')
 })
 
+test('YouTube SC search: match names, Unicode handles, amounts and membership text without including ordinary messages', () => {
+  const env = boot({ trustedTypes: true })
+  const history = env.api.getHistory('video:search')
+  history.supportOnly = true
+  const sc = superChatMessage(env, '@FORPAL', '生日快樂 Café', 'NT$150', 'search-sc')
+  env.api.captureLine(sc.line, history)
+  const record = history.ids.get('search-sc')
+  record.profileName = 'フォーパル'
+  record.profileHandle = '@ふぉーぱる.forpal'
+  env.api.applySupportAuthor(record)
+  env.api.captureLine(membershipMessage(env, { primary: 'Member for 12 months', text: '生日快樂', id: 'search-member' }).line, history)
+  env.api.captureLine(env.message('@FORPAL', '生日快樂 Café', 'moderator', 'ordinary').line, history)
+  const state = { history, list: new env.Element(), empty: {}, count: {}, latest: {}, older: {} }
+  const search = query => { history.supportSearch = query; env.api.renderMessages(state) }
+  for (const query of ['フォーパル', '@ふぉーぱる', '＠ＦＯＲＰＡＬ cafe\u0301', '生日 150']) {
+    search(query)
+    assert.equal(state.count.textContent, '1 則符合', query)
+    assert.equal(state.list.children[0], record.view)
+  }
+  search('12 months')
+  assert.equal(state.list.children[0], history.ids.get('search-member').view)
+  search('<img onerror=alert(1)>')
+  assert.equal(state.count.textContent, '0 則符合')
+  assert.equal(state.empty.hidden, false)
+  search('  ')
+  assert.equal(state.count.textContent, '2 則')
+  history.supportOnly = false
+  search('no match')
+  assert.equal(state.count.textContent, '1 則', 'SC search must not filter the ordinary user list')
+})
+
+test('YouTube SC search: search all archived rows, page matching results and clear without changing retained history', async () => {
+  const database = fakeIndexedDB()
+  const first = boot({ database })
+  const history = first.api.getHistory('video:sample_video')
+  await history.restorePromise
+  for (let i = 0; i < 3; i++) first.api.captureLine(superChatMessage(first, '@donor',
+    i < 2 ? 'older needle' : 'other comment', 'NT$150', `search-old-${i}`).line, history)
+  first.api.captureLine(first.message('@mod', 'needle', 'moderator', 'search-mod').line, history)
+  await first.api.flushHistory(history)
+  const expiry = [...database.records.values()].map(row => row.expiresAt)
+  const fresh = boot({ database, trustedTypes: true })
+  const { document, Element, api } = fresh
+  const header = document.body.appendChild(new Element('yt-live-chat-header-renderer'))
+  header.appendChild(new Element('button')).id = 'live-chat-header-context-menu'
+  const scroller = document.body.appendChild(new Element('div')).appendChild(new Element('div'))
+  scroller.id = 'item-scroller'
+  scroller.appendChild(new Element('div')).id = 'items'
+  api.refresh()
+  const state = api.mounted
+  state.history.displayLimit = 1
+  await state.history.restorePromise
+  api.setEnabled(state, true, true)
+  assert.equal(state.supportSearch.parentElement.hidden, false)
+  state.supportSearch.value = 'needle'
+  state.supportSearch.listeners.get('input')()
+  state.history.searchLimit = 1
+  api.renderMessages(state)
+  assert.equal(state.count.textContent, '2 則符合')
+  assert.equal(state.list.children.length, 1)
+  assert.equal(state.older.hidden, false)
+  state.older.listeners.get('click')()
+  assert.equal(state.list.children.length, 2)
+  assert.equal(state.older.hidden, true)
+  assert.equal(state.history.messages.length, 1, 'archived search results do not expand the ordinary viewport')
+  assert.equal(state.history.older.size, 3)
+  state.supportSearch.value = ''
+  state.supportSearch.listeners.get('input')()
+  assert.equal(state.count.textContent, '0 則')
+  assert.equal(state.list.children.length, 1)
+  assert.equal(state.older.hidden, false)
+  api.setEnabled(state, true)
+  assert.equal(state.supportSearch.parentElement.hidden, true)
+  assert.equal(state.count.textContent, '1 則')
+  await api.flushHistory(state.history)
+  assert.deepEqual([...database.records.values()].map(row => row.expiresAt), expiry)
+})
+
+test('YouTube SC search: incoming messages, edits and expiry update results while paused readers keep their position', () => {
+  let now = Date.now()
+  const env = boot({ now: () => now })
+  const history = env.api.getHistory('video:search-live')
+  history.supportOnly = true
+  history.supportSearch = 'needle'
+  history.follow = false
+  const state = { history, list: new env.Element(), empty: {}, count: {}, latest: {} }
+  state.list.scrollTop = 23
+  env.api.renderMessages(state)
+  const sc = superChatMessage(env, '@donor', 'a needle', 'NT$150', 'live-search')
+  env.api.captureLine(sc.line, history)
+  env.api.renderMessages(state)
+  assert.equal(state.count.textContent, '1 則符合')
+  assert.equal(state.list.scrollTop, 23)
+  sc.body.textContent = sc.body._innerHTML = 'edited away'
+  env.api.captureLine(sc.line, history)
+  env.api.renderMessages(state)
+  assert.equal(state.count.textContent, '0 則符合')
+  sc.body.textContent = sc.body._innerHTML = 'needle again'
+  env.api.captureLine(sc.line, history)
+  env.api.renderMessages(state)
+  assert.equal(state.count.textContent, '1 則符合')
+  now += 7 * 24 * 60 * 60 * 1000 + 1
+  env.api.pruneHistories()
+  env.api.renderMessages(state)
+  assert.equal(state.count.textContent, '0 則符合')
+  assert.equal(state.list.children.length, 0)
+})
+
 test('YouTube archive: persist SC and filtered messages across reloads with colors, emoji, headers and IDs', async () => {
   const database = fakeIndexedDB()
   const env = boot({ database, trustedTypes: true })
