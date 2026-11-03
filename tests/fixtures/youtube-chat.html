@@ -84,6 +84,7 @@
   <button id="add-user">新增 @alice 訊息</button>
   <button id="add-verified">新增已驗證用戶訊息</button>
   <button id="add-sc">新增 SC</button>
+  <button id="add-sticker">新增超級貼圖</button>
   <button id="add-empty-sc">新增無留言 SC</button>
   <button id="add-sc-colors">新增七色 SC</button>
   <button id="add-membership">新增會員加入</button>
@@ -351,6 +352,25 @@
   document.getElementById('add-user').onclick = () => addMessage('@alice')
   document.getElementById('add-verified').onclick = () => addMessage('@verified_creator', 'verified')
   document.getElementById('add-sc').onclick = () => addMessage('@donor', '', 'NT$150.00')
+  document.getElementById('add-sticker').onclick = () => {
+    const original = addMessage('@donor', '', '￥1,000', true)
+    const line = document.createElement('yt-live-chat-paid-sticker-renderer')
+    line.id = original.id
+    line.data = { authorName: original.data.authorName, authorExternalChannelId: original.data.authorExternalChannelId,
+      authorPhoto: original.data.authorPhoto, contextMenuEndpoint: original.data.contextMenuEndpoint, backgroundColor: 0xff00bfa5,
+      moneyChipBackgroundColor: 0xff00897b, moneyChipTextColor: 0xffffffff,
+      authorNameTextColor: 0xffffffff, sticker: {
+        thumbnails: [{ url: 'https://fonts.gstatic.com/s/e/notoemoji/15.1/1f44f/72.png', width: 72, height: 72 }],
+        accessibility: { accessibilityData: { label: '拍手加油' } },
+      } }
+    while (original.firstChild) line.appendChild(original.firstChild)
+    const image = document.createElement('img')
+    image.id = 'sticker'
+    image.src = line.data.sticker.thumbnails[0].url
+    image.alt = '拍手加油'
+    line.querySelector('#content').appendChild(image)
+    original.replaceWith(line)
+  }
   document.getElementById('add-empty-sc').onclick = () => addMessage('@donor', '', '¥200', true, scPalettes[0])
   document.getElementById('add-sc-colors').onclick = () => {
     for (const palette of scPalettes) addMessage('@donor', '', palette[3], false, palette)

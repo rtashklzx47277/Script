@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.8.2
+// @version     0.8.3
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @description 提供 YouTube 聊天室用戶資訊卡、獨立 SC／會員事件紀錄、角色與帳號包含／排除篩選、表情複製、重新載入與自動跟隨。
@@ -763,7 +763,7 @@
         user: saved.user, channelId: typeof saved.channelId === 'string' ? saved.channelId : '',
         moderator: saved.moderator === true, broadcaster: saved.broadcaster === true, verified: saved.verified === true,
         superChat: saved.superChat === true,
-        supportEvent: ['superChat', 'membership', 'milestone', 'membershipGift'].includes(saved.supportEvent) ? saved.supportEvent : '',
+        supportEvent: ['superChat', 'superSticker', 'membership', 'milestone', 'membershipGift'].includes(saved.supportEvent) ? saved.supportEvent : '',
         authorName: typeof saved.authorName === 'string' ? saved.authorName : '',
         authorHandle: typeof saved.authorHandle === 'string' ? saved.authorHandle : '',
         profileName: typeof saved.profileName === 'string' ? saved.profileName : '',
@@ -1059,11 +1059,11 @@
         const value = paint(node, 'backgroundColor')
         return value === 'transparent' || /^rgba\(\s*0,\s*0,\s*0,\s*0\s*\)$/.test(value) ? '' : value
       }
-      const headerBackground = argbColor(data.headerBackgroundColor) || background(header)
+      const headerBackground = argbColor(data.headerBackgroundColor) || argbColor(data.moneyChipBackgroundColor) || background(header)
       return {
         headerBackground,
-        bodyBackground: argbColor(data.bodyBackgroundColor) || background(content) || headerBackground,
-        headerText: argbColor(data.headerTextColor) || paint($('#purchase-amount', line) || header, 'color'),
+        bodyBackground: argbColor(data.bodyBackgroundColor) || argbColor(data.backgroundColor) || background(content) || headerBackground,
+        headerText: argbColor(data.headerTextColor) || argbColor(data.moneyChipTextColor) || paint($('#purchase-amount', line) || header, 'color'),
         bodyText: argbColor(data.bodyTextColor) || paint($('#message', line) || content, 'color'),
         author: argbColor(data.authorNameTextColor) || paint($('#author-name', line), 'color'),
         timestamp: argbColor(data.timestampColor) || argbColor(data.bodyTextColor) || paint(content, 'color'),
@@ -1071,14 +1071,16 @@
     }
 
     const textValue = value => value?.simpleText || value?.runs?.map(run => run.text || '').join('') || ''
-    const EVENT_LABELS = { membership: '會員加入', milestone: '會員里程碑', membershipGift: '會員贈禮' }
+    const EVENT_LABELS = { superSticker: '超級貼圖', membership: '會員加入', milestone: '會員里程碑', membershipGift: '會員贈禮' }
 
     const readMessage = (line) => {
       let author = $('#author-name', line)
       const data = rendererData(line)
       const identity = data.header?.sponsorshipsLiveChatHeaderRenderer || data
       const superChat = line.matches('yt-live-chat-paid-message-renderer')
-      let supportEvent = superChat ? 'superChat' : Object.entries(MEMBERSHIP_EVENT_SELECTORS)
+      const superSticker = line.matches('yt-live-chat-paid-sticker-renderer')
+      const paid = superChat || superSticker
+      let supportEvent = superSticker ? 'superSticker' : superChat ? 'superChat' : Object.entries(MEMBERSHIP_EVENT_SELECTORS)
         .find(([, selector]) => line.matches(selector))?.[0] || ''
       if (supportEvent === 'membership' && (textValue(data.headerPrimaryText) || $('#header-primary-text', line)?.textContent?.trim())) {
         supportEvent = 'milestone'
@@ -1091,13 +1093,25 @@
       // The renderer retains the sender's stable ID even when its DOM shows a handle.
       const rawId = identity.authorExternalChannelId || data.authorExternalChannelId || line.getAttribute('author-external-channel-id')
       const channelId = typeof rawId === 'string' && /^UC[\w-]{22}$/.test(rawId) ? rawId : ''
-      const amount = superChat ? ($('#purchase-amount', line)?.textContent?.trim() ||
+      const amount = paid ? ($('#purchase-amount', line)?.textContent?.trim() ||
         textValue(data.purchaseAmountText)) : ''
       // Membership headers and the optional milestone comment are separate
       // fields. Preserve both instead of taking the first node in DOM order.
       let message = $('#message', line) || $('#sticker', line)
+      let sticker = null
+      if (superSticker) {
+        const source = $('#sticker', line)
+        const image = source?.matches('img') ? source : source && $('img', source)
+        const thumbnails = Array.isArray(data.sticker?.thumbnails) ? data.sticker.thumbnails : []
+        const url = safeArchiveUrl(image?.getAttribute('src') || thumbnails.at(-1)?.url || '')
+        const alt = image?.getAttribute('alt') || source?.getAttribute('aria-label') ||
+          data.sticker?.accessibility?.accessibilityData?.label || '超級貼圖'
+        sticker = { url, alt: typeof alt === 'string' ? alt : '超級貼圖' }
+        message = element('span', { class: 'ytcf-sticker' }, [url
+          ? element('img', { src: url, alt: sticker.alt }) : sticker.alt])
+      }
       let details = []
-      if (supportEvent && !superChat) {
+      if (supportEvent && !paid) {
         const headers = $$('#header-primary-text, #header-subtext, #primary-text', line)
         details = headers.filter(node => node !== message && !node.contains(message) &&
           !headers.some(other => other !== node && other.contains(node)))
@@ -1124,7 +1138,7 @@
         message = document.createElement('span')
         message.textContent = $('#deleted-state', line)?.textContent?.trim() || '訊息已刪除'
       }
-      return { user, channelId, moderator, broadcaster, verified, superChat, supportEvent, amount, author, body: message, details, badges, deleted,
+      return { user, channelId, moderator, broadcaster, verified, superChat, supportEvent, amount, sticker, author, body: message, details, badges, deleted,
         authorHandle: [originalName, author.textContent].find(name => typeof name === 'string' && name.trim().startsWith('@') && normalizeAccount(name))?.trim() || '',
         colors: supportEvent ? readEventColors(line, data) : null,
         id: line.id || data.id || '', time: $('#timestamp', line)?.textContent?.trim() || textValue(data.timestampText),
@@ -1600,7 +1614,8 @@
         row.appendChild(copy)
       }
       if (message.supportEvent) {
-        const label = message.superChat ? message.amount || 'SC' : EVENT_LABELS[message.supportEvent]
+        const label = message.superChat || message.supportEvent === 'superSticker'
+          ? message.amount || EVENT_LABELS[message.supportEvent] || 'SC' : EVENT_LABELS[message.supportEvent]
         const amount = element('span', { class: 'ytcf-amount' }, [label])
         amount.style.backgroundColor = message.colors.headerBackground
         amount.style.color = message.colors.headerText
@@ -1633,7 +1648,7 @@
       const archived = message.id ? history.older.get(message.id) : null
       if (!previous?.retained && (!message.supportEvent && !message.moderator && !message.broadcaster && !message.verified && !includesAuthor(history.settings.users, message) &&
         !includesAuthor(history.settings.globalUsers || [], message))) return false
-      const fingerprint = `${message.user}\n${message.channelId}\n${message.deleted}\n${message.moderator}\n${message.broadcaster}\n${message.verified}\n${message.supportEvent}\n${message.amount}\n${JSON.stringify(message.colors)}\n${message.details.map(node => node.innerHTML || node.textContent).join('\n')}\n${message.author.textContent}\n${message.body.innerHTML}`
+      const fingerprint = `${message.user}\n${message.channelId}\n${message.deleted}\n${message.moderator}\n${message.broadcaster}\n${message.verified}\n${message.supportEvent}\n${message.amount}\n${JSON.stringify(message.sticker)}\n${JSON.stringify(message.colors)}\n${message.details.map(node => node.innerHTML || node.textContent).join('\n')}\n${message.author.textContent}\n${message.body.innerHTML}`
       if (previous?.fingerprint === fingerprint) {
         history.nodes.set(line, previous)
         return false
@@ -1722,10 +1737,11 @@
     }
     const supportSearchText = record => {
       if (record.tree && archivedSearchText.has(record)) return archivedSearchText.get(record)
-      const text = normalizeSearch([record.authorName, record.authorHandle, record.profileName,
+      const text = normalizeSearch([EVENT_LABELS[record.supportEvent], record.authorName, record.authorHandle, record.profileName,
         record.profileHandle, record.user, record.channelId,
         record.tree ? treeSearchText(record.tree) : [...record.view.childNodes]
-          .filter(node => !node.matches?.('.ytcf-locate')).map(node => node.textContent).join('')].join(' '))
+          .filter(node => !node.matches?.('.ytcf-locate')).map(node => node.textContent).join(''),
+        ...(!record.tree ? $$('img', record.view).map(image => image.getAttribute('alt') || '') : [])].join(' '))
       if (record.tree) archivedSearchText.set(record, text)
       return text
     }
@@ -2384,7 +2400,7 @@
         if (captureMutations(mutations, state.history)) scheduleMessageRender(state)
       })
       state.observer.observe(sourceItems, { childList: true, subtree: true, characterData: true,
-        attributes: true, attributeFilter: ['author-type', 'type', 'is-deleted', 'author-external-channel-id', 'style'] })
+        attributes: true, attributeFilter: ['author-type', 'type', 'is-deleted', 'author-external-channel-id', 'style', 'src', 'alt'] })
       mounted = state
       setEnabled(state, state.history.enabled, state.history.supportOnly)
       updateArchiveStatus(state.history)
@@ -2493,6 +2509,8 @@
       .ytcf-time { margin-right: 6px; color: var(--yt-live-chat-secondary-text-color, #606060); font-size: 10px; }
       .ytcf-avatar { display: inline-block; width: 1.4em; height: 1.4em; margin-right: 4px; border-radius: 50%; vertical-align: middle; }
       .ytcf-body { display: inline !important; }
+      .ytcf-message .ytcf-sticker { display: block !important; margin-top: 4px; }
+      .ytcf-sticker img { display: block; max-width: min(100%, 144px); max-height: 96px; width: auto; height: auto; object-fit: contain; }
       .ytcf-message .emoji { max-height: 24px; vertical-align: middle; }
       .ytcf-badge { display: inline-flex; align-items: center; margin-right: 3px; vertical-align: middle; pointer-events: none; }
       .ytcf-badge img, .ytcf-badge svg { width: 18px; height: 18px; }

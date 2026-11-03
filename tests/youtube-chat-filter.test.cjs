@@ -231,6 +231,26 @@ function membershipMessage(env, { tag = 'yt-live-chat-membership-item-renderer',
   return { ...result, headers }
 }
 
+function superStickerMessage(env, { id = 'sticker-1', imageInDOM = true } = {}) {
+  const result = superChatMessage(env, '@donor', null, '￥1,000', id)
+  result.line.tagName = 'yt-live-chat-paid-sticker-renderer'
+  result.line.data = { authorName: { simpleText: '@donor' },
+    purchaseAmountText: { simpleText: '￥1,000' },
+    backgroundColor: 0xff00bfa5, moneyChipBackgroundColor: 0xff00897b,
+    moneyChipTextColor: 0xffffffff, authorNameTextColor: 0xffffffff,
+    sticker: { thumbnails: [{ url: 'https://example.com/sticker.gif', width: 144, height: 144 }],
+      accessibility: { accessibilityData: { label: '拍手加油' } } } }
+  let image
+  if (imageInDOM) {
+    const sticker = result.line.appendChild(new env.Element('yt-img-shadow'))
+    sticker.id = 'sticker'
+    image = sticker.appendChild(new env.Element('img'))
+    image.setAttribute('src', 'https://example.com/sticker.gif')
+    image.setAttribute('alt', '拍手加油')
+  }
+  return { ...result, image }
+}
+
 const fakeIndexedDB = require('./helpers/indexeddb.cjs')
 
 test('YouTube SC author names: share channel lookups, keep handles and persist resolved names without changing filters or expiry', async () => {
@@ -925,6 +945,81 @@ test('YouTube membership events: deduplicate replays and update header-only chan
   env.api.captureLine(member.line, history)
   assert.equal(record.view.children.at(-1).textContent, '訊息已刪除')
   assert.equal(history.messages.length, 1)
+})
+
+test('YouTube Super Stickers: collect with image, amount and palette independently of user filters, then search, locate and restore', async () => {
+  const database = fakeIndexedDB()
+  const env = boot({ database, trustedTypes: true })
+  const history = env.api.getHistory('video:sticker-history')
+  await history.restorePromise
+  history.settings.excludedUsers = ['@donor']
+  const sticker = superStickerMessage(env)
+  assert.equal(env.api.captureLine(sticker.line, history), true)
+  assert.equal(env.api.captureLine(superStickerMessage(env).line, history), false)
+  const record = history.messages[0]
+  assert.equal(record.supportEvent, 'superSticker')
+  assert.equal(record.view.style.backgroundColor, '#00bfa5ff')
+  const amount = record.view.querySelector('.ytcf-amount')
+  assert.equal(amount.textContent, '￥1,000')
+  assert.equal(amount.style.backgroundColor, '#00897bff')
+  assert.equal(amount.style.color, '#ffffffff')
+  assert.equal(record.view.querySelector('.ytcf-sticker').querySelector('img').getAttribute('src'), 'https://example.com/sticker.gif')
+  const state = { history, list: new env.Element(), empty: {}, count: {}, latest: {} }
+  state.list.clientHeight = 200
+  state.list.scrollTop = 0
+  env.api.renderMessages(state)
+  assert.equal(state.count.textContent, '0 則')
+  history.enabled = history.supportOnly = true
+  history.supportSearch = '超級貼圖 拍手'
+  env.api.renderMessages(state)
+  assert.equal(state.count.textContent, '1 則符合')
+  assert.equal(env.api.locateSupportRecord(state, record.storageId), true)
+  assert.equal(record.view.hasAttribute('data-ytcf-located'), true)
+  await env.api.flushHistory(history)
+  const expiry = [...database.records.values()][0].expiresAt
+  const fresh = boot({ database, trustedTypes: true })
+  const restored = fresh.api.getHistory('video:sticker-history')
+  await restored.restorePromise
+  assert.equal(restored.messages.length, 1)
+  const saved = restored.messages[0]
+  assert.equal(saved.supportEvent, 'superSticker')
+  assert.equal(saved.view.querySelector('.ytcf-sticker').querySelector('img').getAttribute('alt'), '拍手加油')
+  assert.equal(saved.view.style.backgroundColor, '#00bfa5ff')
+  assert.equal(saved.view.querySelector('.ytcf-amount').textContent, '￥1,000')
+  assert.equal(saved.createdAt + 7 * 24 * 60 * 60 * 1000, expiry)
+  restored.supportOnly = true
+  restored.supportSearch = '拍手'
+  const reloadedState = { history: restored, list: new fresh.Element(), empty: {}, count: {}, latest: {} }
+  fresh.api.renderMessages(reloadedState)
+  assert.equal(reloadedState.count.textContent, '1 則符合')
+})
+
+test('YouTube Super Stickers: metadata fallback and late image updates deduplicate by ID and deleted images stay removed', () => {
+  const env = boot({ trustedTypes: true })
+  const history = env.api.getHistory('video:sticker-late')
+  const sticker = superStickerMessage(env, { imageInDOM: false })
+  sticker.purchase.remove()
+  env.api.captureLine(sticker.line, history)
+  const record = history.messages[0]
+  const createdAt = record.createdAt
+  assert.equal(record.view.querySelector('.ytcf-amount').textContent, '￥1,000')
+  assert.equal(record.view.querySelector('.ytcf-sticker').querySelector('img').getAttribute('src'), 'https://example.com/sticker.gif')
+  const image = sticker.line.appendChild(new env.Element('img'))
+  image.id = 'sticker'
+  image.setAttribute('src', 'https://example.com/loaded-sticker.webp')
+  image.setAttribute('alt', '新貼圖描述')
+  assert.equal(env.api.captureMutations([{ type: 'attributes', attributeName: 'src', target: image }], history), true)
+  assert.equal(record.view.querySelector('.ytcf-sticker').querySelector('img').getAttribute('src'), 'https://example.com/loaded-sticker.webp')
+  assert.equal(record.view.querySelector('.ytcf-sticker').querySelector('img').getAttribute('alt'), '新貼圖描述')
+  image.setAttribute('src', 'javascript:alert(1)')
+  env.api.captureLine(sticker.line, history)
+  assert.equal(record.view.querySelector('.ytcf-sticker').querySelector('img'), null)
+  assert.equal(record.view.querySelector('.ytcf-sticker').textContent, '新貼圖描述')
+  sticker.line.setAttribute('is-deleted', '')
+  env.api.captureLine(sticker.line, history)
+  assert.equal(record.view.querySelector('.ytcf-sticker'), null)
+  assert.equal(history.messages.length, 1)
+  assert.equal(record.createdAt, createdAt)
 })
 
 test('YouTube Super Chats: collect before opening and keep the SC list independent of user filters', () => {
