@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        Twitch Player Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.3.1
+// @version     0.3.2
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchPlayerTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchPlayerTweaks.user.js
 // @description 提供 Twitch 原解析度 PNG 截圖、滾輪音量與音量增益，隱藏剪輯按鈕及互動擴充。
@@ -77,12 +77,12 @@
       left: 0;
       z-index: 20;
       width: 100%;
-      height: 20px;
+      height: 28px;
       color: #fff;
       background: rgba(0, 0, 0, 0.5);
       text-align: center;
-      font-size: 13px;
-      line-height: 20px;
+      font-size: 18px;
+      line-height: 28px;
       opacity: 0;
       pointer-events: none;
       transition: opacity 0.12s ease;

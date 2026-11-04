@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Player Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.2.15
+// @version     0.2.16
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubePlayerTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubePlayerTweaks.user.js
 // @description 提供 YouTube 原解析度 PNG 截圖、滾輪音量與速度調整、直播追平，並擴大直播回看範圍。
@@ -286,12 +286,12 @@
       z-index: 70;
       display: none;
       width: 100%;
-      height: 20px;
+      height: 28px;
       color: #fff;
       background-color: rgba(0, 0, 0, 0.5);
       text-align: center;
-      font-size: initial;
-      line-height: 20px;
+      font-size: 18px;
+      line-height: 28px;
       opacity: 0.9;
       pointer-events: none;
     }
