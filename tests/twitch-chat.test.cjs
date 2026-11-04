@@ -4,7 +4,7 @@ const fs = require('node:fs')
 const vm = require('node:vm')
 const path = require('node:path')
 
-function boot({ saved, blocked = false } = {}) {
+function boot({ saved, blocked = false, database, now } = {}) {
   class Element {
     constructor(tag = 'div') {
       this.tagName = tag
@@ -17,10 +17,17 @@ function boot({ saved, blocked = false } = {}) {
       this.hidden = false
       this.value = ''
     }
-    get attributes() { return [...this.attrs].map(([name, value]) => ({ name, value })) }
+    get attributes() {
+      const attrs = new Map(this.attrs)
+      if (this.className) attrs.set('class', this.className)
+      return [...attrs].map(([name, value]) => ({ name, value }))
+    }
+    get textContent() { return (this._textContent || '') + this.children.map(child => child.textContent).join('') }
+    set textContent(value) { this._textContent = String(value); this.replaceChildren() }
+    get childNodes() { return [...(this._textContent ? [{ nodeType: 3, textContent: this._textContent }] : []), ...this.children] }
     get firstChild() { return this.children[0] }
     addEventListener() {}
-    setAttribute(name, value) { this.attrs.set(name, value) }
+    setAttribute(name, value) { this.attrs.set(name, value); if (name === 'class') this.className = value }
     getAttribute(name) { return this.attrs.get(name) || null }
     removeAttribute(name) { this.attrs.delete(name) }
     matches(selector) {
@@ -72,7 +79,7 @@ function boot({ saved, blocked = false } = {}) {
       copy.className = this.className
       copy.style = { ...this.style }
       copy.innerHTML = this.innerHTML
-      copy.textContent = this.textContent
+      copy.textContent = this._textContent || ''
       if (deep) for (const child of this.children) copy.appendChild(child.cloneNode(true))
       return copy
     }
@@ -88,7 +95,9 @@ function boot({ saved, blocked = false } = {}) {
   const frames = new Map()
   let nextTimer = 0
   const context = {
-    document, location: { pathname: '/sample_channel' }, console,
+    document, location: { pathname: '/sample_channel', href: 'https://www.twitch.tv/sample_channel' }, console, URL,
+    indexedDB: database,
+    Date: now ? class extends Date { static now() { return now() } } : Date,
     window: { addEventListener(name, fn) { listeners.set(name, fn) } },
     setTimeout(fn, delay) { const id = ++nextTimer; timers.set(id, { fn, delay }); return id },
     clearTimeout(id) { timers.delete(id) }, setInterval() {},
@@ -106,12 +115,14 @@ function boot({ saved, blocked = false } = {}) {
     normalizeUsers, getChannel, getHistory, loadSettings, saveSettings, readMessage,
     matchesFilter, captureLine, captureTree, captureMutations, renderMessages, changeTargetUsers, showTargetStatus,
     scheduleMessageRender, releaseMessageViews, handleMessageVisibility,
+    archiveTree, restoreTree, archiveRecord, restoreRecord, flushHistory, pruneHistories, pruneArchive, loadOlderRecords,
     setPanelLayer, positionFilterPanel,
     setMounted: state => { mounted = state }
   }; })()`), context)
-  const message = (user, text, role = '') => {
+  const message = (user, text, role = '', id = '') => {
     const line = new Element()
     line.setAttribute('data-a-target', 'chat-line-message')
+    if (id) line.setAttribute('data-id', id)
     const authorContainer = line.appendChild(new Element())
     authorContainer.className = 'chat-line__username-container'
     if (role) {
@@ -137,6 +148,141 @@ function boot({ saved, blocked = false } = {}) {
 }
 
 require('./helpers/chat-update-cases.cjs')({ test, assert, boot, site: 'Twitch' })
+const fakeIndexedDB = require('./helpers/indexeddb.cjs')
+
+test('Twitch archive: persist emotes, badges, links and colors for seven days and merge live startup messages by ID', async () => {
+  const database = fakeIndexedDB()
+  let now = Date.now()
+  const first = boot({ database, now: () => now })
+  const history = first.api.getHistory('sample_channel')
+  await history.restorePromise
+  const mod = first.message('mod_account', 'hello', 'moderator', 'uuid-1')
+  const button = mod.body.appendChild(new first.Element('button'))
+  button.className = 'native-emote'
+  button.setAttribute('data-react-hook', 'unused')
+  const picture = button.appendChild(new first.Element('picture'))
+  picture.style.position = 'relative'
+  const source = picture.appendChild(new first.Element('source'))
+  source.setAttribute('type', 'image/avif')
+  source.setAttribute('srcset', 'https://cdn.7tv.app/emote/demo/1x.avif 1x, https://cdn.7tv.app/emote/demo/2x.avif 2x')
+  const emote = picture.appendChild(new first.Element('img'))
+  emote.className = 'chat-image'
+  emote.setAttribute('src', 'https://example.com/emote.webp')
+  emote.setAttribute('alt', 'Kappa')
+  emote.style.width = '28px'
+  const link = mod.body.appendChild(new first.Element('a'))
+  link.setAttribute('href', 'https://example.com/page')
+  link.textContent = '連結'
+  first.api.captureLine(mod.line, history)
+  first.api.captureLine(first.message('other_mod', 'retained on reload', 'moderator', 'uuid-2').line, history)
+  await first.api.flushHistory(history)
+  assert.equal(database.records.size, 2)
+  const expiry = [...database.records.values()][0].expiresAt
+  now += 1000
+  const fresh = boot({ database, now: () => now })
+  const restored = fresh.api.getHistory('sample_channel')
+  fresh.api.captureLine(fresh.message('other_mod', 'new startup body', 'moderator', 'uuid-2').line, restored)
+  await restored.restorePromise
+  assert.equal(restored.messages.length, 2)
+  assert.equal(restored.ids.get('uuid-2').view.children.at(-1).textContent, 'new startup body')
+  const row = restored.ids.get('uuid-1').view
+  assert.equal(row.querySelector('button'), null, 'restored presentation must contain no native controls')
+  assert.equal(row.querySelector('img.chat-badge').getAttribute('alt'), 'moderator')
+  assert.equal(row.querySelector('strong').style.color, 'red')
+  assert.equal(row.querySelector('picture').style.position, 'relative')
+  assert.equal(row.querySelector('source').getAttribute('srcset'), source.getAttribute('srcset'))
+  const image = row.querySelector('.chat-image')
+  assert.equal(image.getAttribute('src'), 'https://example.com/emote.webp')
+  assert.equal(image.getAttribute('alt'), 'Kappa')
+  assert.equal(image.style.width, '28px')
+  assert.equal(row.querySelector('a').rel, 'noopener noreferrer')
+  assert.equal(JSON.stringify([...database.records.values()]).includes('data-react-hook'), false)
+  assert.equal(restored.ids.get('uuid-1').createdAt + 7 * 86400000, expiry)
+  await fresh.api.flushHistory(restored)
+  const restoredAgain = boot({ database, now: () => now }).api.getHistory('sample_channel')
+  await restoredAgain.restorePromise
+  assert.equal(restoredAgain.messages.length, 2)
+})
+
+test('Twitch archive: edits and DOM rebuilds do not renew expiry, and records expire at seven days', async () => {
+  const database = fakeIndexedDB()
+  let now = Date.now()
+  const start = now
+  const env = boot({ database, now: () => now })
+  const history = env.api.getHistory('sample_channel')
+  await history.restorePromise
+  env.api.captureLine(env.message('mod', 'hello', 'moderator', 'uuid-edit').line, history)
+  await env.api.flushHistory(history)
+  now += 86400000
+  assert.equal(env.api.captureLine(env.message('mod', 'hello', 'moderator', 'uuid-edit').line, history), false)
+  env.api.captureLine(env.message('mod', 'edited', 'moderator', 'uuid-edit').line, history)
+  await env.api.flushHistory(history)
+  assert.equal(history.messages.length, 1)
+  assert.equal([...database.records.values()][0].expiresAt, start + 7 * 86400000)
+  now = start + 7 * 86400000
+  env.api.pruneHistories()
+  await env.api.pruneArchive()
+  assert.equal(history.messages.length, 0)
+  assert.equal(history.ids.size, 0)
+  assert.equal(database.records.size, 0)
+})
+
+test('Twitch archive: isolate channels, merge concurrent writers and retain earlier rows beyond the display limit', async () => {
+  const database = fakeIndexedDB()
+  const a = boot({ database })
+  const b = boot({ database })
+  const h1 = a.api.getHistory('sample_channel')
+  const h2 = b.api.getHistory('sample_channel')
+  const other = a.api.getHistory('another_channel')
+  await Promise.all([h1.restorePromise, h2.restorePromise, other.restorePromise])
+  h1.displayLimit = 1
+  for (let i = 0; i < 3; i++) a.api.captureLine(a.message('mod', `old ${i}`, 'moderator', `older-${i}`).line, h1)
+  b.api.captureLine(b.message('mod', 'another tab', 'moderator', 'another-tab').line, h2)
+  a.api.captureLine(a.message('mod', 'another channel', 'moderator', 'another-channel').line, other)
+  await Promise.all([a.api.flushHistory(h1), b.api.flushHistory(h2), a.api.flushHistory(other)])
+  assert.equal(database.records.size, 5)
+  const fresh = boot({ database })
+  const restored = fresh.api.getHistory('sample_channel')
+  restored.displayLimit = 1
+  await restored.restorePromise
+  assert.equal(restored.messages.length, 1)
+  assert.equal(restored.older.size, 3)
+  const state = { history: restored, list: new fresh.Element(), empty: {}, count: {}, latest: {}, older: {} }
+  state.list.scrollTop = 0
+  state.list.scrollHeight = 100
+  fresh.api.renderMessages(state)
+  assert.equal(state.older.hidden, false)
+  fresh.api.loadOlderRecords(state)
+  assert.equal(state.count.textContent, '4 則')
+  assert.equal(state.older.hidden, true)
+  assert.equal(state.list.children[0].children.at(-1).textContent, 'old 0')
+  assert.equal(restored.ids.has('another-channel'), false)
+})
+
+test('Twitch archive: unsafe saved markup stays inert and a disk failure preserves the live page', async () => {
+  const database = fakeIndexedDB()
+  const env = boot({ database })
+  const history = env.api.getHistory('sample_channel')
+  await history.restorePromise
+  const tree = { tag: 'div', children: [{ tag: 'button', attributes: [['onclick', 'bad()'], ['tabindex', '0']], children: [
+    { tag: 'img', attributes: [['src', 'javascript:bad()'], ['onerror', 'bad()']] },
+    { tag: 'source', attributes: [['srcset', 'javascript:bad() 1x, https://example.com/safe.avif 2x']] },
+  ] }, { tag: 'a', attributes: [['href', 'javascript:bad()']], styles: [['position', 'fixed']] }] }
+  const restored = env.api.restoreTree(tree)
+  assert.equal(restored.querySelector('button'), null)
+  assert.equal(restored.querySelector('img').getAttribute('src'), null)
+  assert.equal(restored.querySelector('source').getAttribute('srcset'), 'https://example.com/safe.avif 2x')
+  assert.equal(restored.querySelector('a').getAttribute('href'), null)
+  assert.equal(restored.querySelector('a').style.position, undefined)
+  database.failWrites = true
+  env.api.captureLine(env.message('mod', 'keep this in the page', 'moderator', 'write-fails').line, history)
+  await env.api.flushHistory(history)
+  assert.equal(history.archiveError, true)
+  assert.equal(history.messages.length, 1)
+  const state = { history, list: new env.Element(), empty: {}, count: {}, latest: {} }
+  env.api.renderMessages(state)
+  assert.equal(state.count.textContent, '1 則')
+})
 
 test('Twitch target status: replacing a notice restarts its three-second lifetime', () => {
   const { api, Element, timers } = boot()
@@ -253,7 +399,7 @@ test('Twitch chat: clone emotes, remove inactive hooks and preserve safe link be
   assert.equal(copiedBody.getAttribute('data-a-target'), null)
 })
 
-test('Twitch chat: channel-specific settings survive reload, message history does not', () => {
+test('Twitch chat: channel-specific settings survive reload when archive storage is unavailable', () => {
   const env = boot()
   const history = env.api.getHistory('sample_channel')
   history.settings.users = ['chosen']

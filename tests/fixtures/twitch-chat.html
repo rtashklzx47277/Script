@@ -14,6 +14,7 @@
   .chat-line__message { padding: 8px 10px; }
   .chat-badge { width: 18px; vertical-align: middle; }
   .chat-image { width: 28px; vertical-align: middle; }
+  .fixture-emote { padding: 0; border: 0; background: transparent; color: inherit; }
   .input-area { padding: 14px; border-top: 1px solid #45454a; }
   .input-area input { box-sizing: border-box; width: 100%; padding: 8px; color: inherit; background: #303034; border: 0; }
   .fixture-tools { margin-top: 20px; display: flex; gap: 8px; flex-wrap: wrap; }
@@ -54,7 +55,8 @@
     line.dataset.aTarget = 'chat-line-message'
     line.dataset.aUser = user
     const badge = role ? `<button data-a-target="chat-badge"><img class="chat-badge" alt="管理員" src="https://static-cdn.jtvnw.net/badges/v1/3267646d-33f0-4b17-b3df-f923a41db1d0/1"></button>` : ''
-    line.innerHTML = `<span class="chat-line__username-container">${badge}<span data-a-target="chat-message-username" data-a-user="${user}" style="color:#ffb86c">${user}</span></span>: <span data-a-target="chat-line-message-body">測試訊息 ${++serial} <img class="chat-image" alt="Kappa" src="https://static-cdn.jtvnw.net/emoticons/v2/25/default/dark/1.0"></span>`
+    line.innerHTML = `<span class="chat-line__username-container">${badge}<span data-a-target="chat-message-username" data-a-user="${user}" style="color:#ffb86c">${user}</span></span>: <span data-a-target="chat-line-message-body">測試訊息 ${++serial} <button class="fixture-emote" aria-label="Kappa"><img class="chat-image" alt="Kappa" src="https://static-cdn.jtvnw.net/emoticons/v2/25/default/dark/1.0"></button></span>`
+    line.dataset.id = serial <= 3 ? `fixture-${serial}` : `fixture-${Date.now()}-${serial}`
     scroller().appendChild(line)
   }
   addMessage('mod_account', 'moderator')
