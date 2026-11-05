@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.8.4
+// @version     0.8.5
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @description 提供 YouTube 聊天室用戶資訊卡、獨立 SC／會員事件紀錄、角色與帳號包含／排除篩選、表情複製、重新載入與自動跟隨。
@@ -2524,7 +2524,17 @@
       .ytcf-event-header { display: block; }
       .ytcf-event-details { display: inline !important; }
       .ytcf-amount { display: inline-block; margin-right: 5px; padding: 0 5px; border-radius: 4px; color: var(--yt-live-chat-primary-text-color, #0f0f0f); background: var(--yt-live-chat-action-panel-background-color, #8882); font-weight: 600; }
-      .ytuc-card { position: fixed; z-index: 2200; box-sizing: border-box; overflow: auto; overscroll-behavior: contain; border: 1px solid var(--yt-live-chat-message-input-border-color, #8884); border-radius: 8px; box-shadow: 0 8px 28px #0006; color: var(--yt-live-chat-primary-text-color, #0f0f0f); background: var(--yt-live-chat-background-color, #fff); font: 13px/1.5 Roboto, Arial, sans-serif; }
+      .ytuc-card {
+        position: fixed; z-index: 2200; box-sizing: border-box; overflow: auto; overscroll-behavior: contain;
+        border: 2px solid var(--yt-live-chat-secondary-text-color, #606060);
+        border-color: color-mix(in srgb, var(--yt-live-chat-primary-text-color, #0f0f0f) 35%, var(--yt-live-chat-background-color, #fff));
+        border-top: 3px solid var(--yt-live-chat-link-text-color, #3ea6ff);
+        border-radius: 8px; box-shadow: 0 12px 40px #0009, 0 2px 8px #0006;
+        color: var(--yt-live-chat-primary-text-color, #0f0f0f);
+        background: var(--yt-live-chat-background-color, #fff);
+        background: color-mix(in srgb, var(--yt-live-chat-background-color, #fff) 90%, var(--yt-live-chat-primary-text-color, #0f0f0f));
+        font: 13px/1.5 Roboto, Arial, sans-serif;
+      }
       .ytuc-card[hidden], .ytuc-card [hidden] { display: none !important; }
       .ytuc-header { display: flex; align-items: flex-start; gap: 12px; padding: 16px 12px; }
       .ytuc-photo { display: flex; align-items: center; justify-content: center; flex: 0 0 56px; width: 56px; height: 56px; overflow: hidden; border-radius: 50%; background: var(--yt-live-chat-button-default-background-color, #8883); font-size: 24px; }
@@ -2542,7 +2552,7 @@
       .ytuc-badge { display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box; min-width: 36px; min-height: 36px; padding: 4px; border: 1px solid var(--yt-live-chat-message-input-border-color, #8884); border-radius: 4px; font-size: 11px; }
       .ytuc-badge img, .ytuc-badge svg { display: block; width: 26px !important; height: 26px !important; object-fit: contain; }
       .ytuc-badge svg { fill: currentColor; }
-      .ytuc-actions { padding: 12px; border-top: 1px solid var(--yt-live-chat-message-input-border-color, #8883); background: var(--yt-live-chat-action-panel-background-color, #8881); }
+      .ytuc-actions { padding: 12px; border-top: 1px solid var(--yt-live-chat-message-input-border-color, #8883); border-top-color: color-mix(in srgb, var(--yt-live-chat-primary-text-color, #0f0f0f) 24%, var(--yt-live-chat-background-color, #fff)); background: var(--yt-live-chat-action-panel-background-color, #8881); background: color-mix(in srgb, var(--yt-live-chat-background-color, #fff) 84%, var(--yt-live-chat-primary-text-color, #0f0f0f)); }
       .ytuc-status { margin: 0; color: var(--yt-live-chat-secondary-text-color, #606060); font-size: 12px; }
       .ytuc-identity .ytuc-status { margin-top: 8px; }
       .ytuc-card .ytuc-retry { margin-top: 8px; padding: 4px 10px; border: 0; border-radius: 16px; color: inherit; background: var(--yt-live-chat-button-default-background-color, #8882); cursor: pointer; font: inherit; }
