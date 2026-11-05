@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.8.5
+// @version     0.8.6
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @description 提供 YouTube 聊天室用戶資訊卡、獨立 SC／會員事件紀錄、角色與帳號包含／排除篩選、表情複製、重新載入與自動跟隨。
@@ -2528,7 +2528,6 @@
         position: fixed; z-index: 2200; box-sizing: border-box; overflow: auto; overscroll-behavior: contain;
         border: 2px solid var(--yt-live-chat-secondary-text-color, #606060);
         border-color: color-mix(in srgb, var(--yt-live-chat-primary-text-color, #0f0f0f) 35%, var(--yt-live-chat-background-color, #fff));
-        border-top: 3px solid var(--yt-live-chat-link-text-color, #3ea6ff);
         border-radius: 8px; box-shadow: 0 12px 40px #0009, 0 2px 8px #0006;
         color: var(--yt-live-chat-primary-text-color, #0f0f0f);
         background: var(--yt-live-chat-background-color, #fff);
