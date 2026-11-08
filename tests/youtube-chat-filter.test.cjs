@@ -1666,8 +1666,8 @@ test('YouTube author snapshots: preserve the clicked message and badge visuals w
   message.line.data.contextMenuEndpoint.liveChatItemContextMenuEndpoint.params = 'different-message'
   const author = view.querySelector('strong')
   assert.equal(view.querySelector('button'), null)
-  assert.equal(author.listeners?.get('click'), undefined)
-  env.api.showAuthorCard(snapshot, author)
+  assert.equal(author.getAttribute('role'), 'button')
+  author.listeners.get('click')({ preventDefault() {}, stopPropagation() {} })
   await settle()
   assert.equal(env.menuCalls[0].liveChatItemContextMenuEndpoint.params, 'first-message')
   assert.equal(env.api.getAuthorCard().querySelector('.ytuc-id').textContent, channelA)
@@ -1758,7 +1758,7 @@ test('YouTube filtered messages: highlighted names use role colors without copyi
   assert.equal(history.messages[0].view.querySelector('strong').style.color, 'rgb(62, 166, 255)')
 })
 
-test('YouTube filter mode: close existing cards and never open cards or native menu guards over the filter', () => {
+test('YouTube filter mode: close existing cards and ignore underlying native authors and menus', () => {
   const env = boot()
   const app = env.document.body.appendChild(new env.Element('yt-live-chat-app'))
   const opener = app.appendChild(new env.Element('button'))
@@ -1778,6 +1778,81 @@ test('YouTube filter mode: close existing cards and never open cards or native m
   assert.equal(blocked, false)
   assert.equal(popup.hidden, false)
   env.api.setMounted(null)
+})
+
+test('YouTube filter and SC names: open above the panel, dismiss without click-through and close on mode changes', () => {
+  for (const supportOnly of [false, true]) {
+    const env = boot()
+    const app = env.document.body.appendChild(new env.Element('yt-live-chat-app'))
+    const history = env.api.getHistory('channel:@host')
+    const state = { history, panel: app.appendChild(new env.Element()), host: new env.Element(),
+      button: new env.Element(), scroller: new env.Element(), sourceAriaHidden: null,
+      list: new env.Element(), empty: {}, count: {}, latest: {} }
+    state.panel.showPopover = () => {}
+    state.panel.hidePopover = () => {}
+    const entry = supportOnly ? superChatMessage(env, '@donor', 'thanks', 'NT$30')
+      : env.message('@moderator', 'hello', 'moderator', 'filtered')
+    entry.line.data = { authorExternalChannelId: channelA }
+    if (supportOnly) entry.author.style.color = 'rgb(0, 0, 0)'
+    env.api.captureLine(entry.line, history)
+    env.api.setMounted(state)
+    env.api.setEnabled(state, true, supportOnly)
+    state.panel.appendChild(history.messages[0].view)
+    const author = history.messages[0].view.querySelector('.ytcf-author')
+    let opened = 0, closed = 0
+    env.Element.prototype.showPopover = function () { opened++; assert.equal(this.parentElement, app) }
+    env.Element.prototype.hidePopover = () => { closed++ }
+    author.listeners.get('click')({ preventDefault() {}, stopPropagation() {} })
+    assert.equal(opened, 1)
+    const card = env.api.getAuthorCard()
+    assert.equal(card.getAttribute('popover'), 'manual')
+    assert.equal(card.querySelector('.ytuc-id').textContent, channelA)
+    if (supportOnly) assert.notEqual(card.querySelector('.ytuc-name').style.color, 'rgb(0, 0, 0)')
+    let blocked = false
+    env.api.guardMenuDismissal({ type: 'click', target: card.querySelector('.ytuc-name'),
+      preventDefault() {}, stopImmediatePropagation() { blocked = true } })
+    assert.equal(blocked, false)
+    env.api.guardMenuDismissal({ type: 'click', target: author,
+      preventDefault() {}, stopImmediatePropagation() { blocked = true } })
+    assert.equal(blocked, true)
+    assert.equal(closed, 1)
+    assert.equal(env.api.getAuthorCard(), null)
+    for (const key of ['Enter', ' ']) {
+      author.listeners.get('keydown')({ key, preventDefault() {}, stopPropagation() {} })
+      assert.ok(env.api.getAuthorCard())
+      env.document.listeners.get('keydown')({ key: 'Escape', preventDefault() {}, stopImmediatePropagation() {} })
+      assert.equal(env.document.activeElement, author)
+    }
+    author.listeners.get('click')({ preventDefault() {}, stopPropagation() {} })
+    env.api.setEnabled(state, false)
+    assert.equal(env.api.getAuthorCard(), null)
+  }
+})
+
+test('YouTube archived names: restored filter and SC records open cards without stale native commands', () => {
+  for (const supportOnly of [false, true]) {
+    const env = boot()
+    const app = env.document.body.appendChild(new env.Element('yt-live-chat-app'))
+    const history = env.api.getHistory('channel:@host')
+    const entry = supportOnly ? superChatMessage(env, '@donor', 'thanks', 'NT$30')
+      : env.message('@moderator', 'hello', 'moderator', 'filtered')
+    entry.line.data = { authorExternalChannelId: channelA,
+      contextMenuEndpoint: { liveChatItemContextMenuEndpoint: { params: 'old-message' } } }
+    if (supportOnly) entry.author.style.color = 'rgb(0, 0, 0)'
+    env.api.captureLine(entry.line, history)
+    const saved = JSON.parse(JSON.stringify(env.api.archiveRecord(history, history.messages[0])))
+    const record = env.api.restoreRecord(saved)
+    app.appendChild(record.view)
+    const author = record.view.querySelector('.ytcf-author')
+    assert.equal(author.getAttribute('tabindex'), '0')
+    author.listeners.get('click')({ preventDefault() {}, stopPropagation() {} })
+    assert.equal(env.api.getAuthorCard().querySelector('.ytuc-id').textContent, channelA)
+    assert.equal(env.api.getAuthorCard().querySelector('.ytuc-name').textContent, entry.author.textContent)
+    if (supportOnly) assert.notEqual(env.api.getAuthorCard().querySelector('.ytuc-name').style.color, 'rgb(0, 0, 0)')
+    assert.equal(env.profileCalls.length, 1)
+    assert.equal(env.menuCalls.length, 0)
+    assert.equal(env.api.getAuthorCard().querySelector('.ytuc-actions').textContent.includes('此訊息沒有可用的操作。'), true)
+  }
 })
 
 test('YouTube filter layer: use the browser top layer, track the chat bounds and release it on disable', () => {

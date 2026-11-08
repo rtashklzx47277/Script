@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.8.6
+// @version     0.8.7
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @description 提供 YouTube 聊天室用戶資訊卡、獨立 SC／會員事件紀錄、角色與帳號包含／排除篩選、表情複製、重新載入與自動跟隨。
@@ -200,9 +200,9 @@
   }
   document.addEventListener('click', guardMessageMenu, true)
 
-  const getOpenChatMenu = () => isFilteredChat() ? null : [...document.querySelectorAll('tp-yt-iron-dropdown')]
+  const getOpenChatMenu = () => getAuthorCard() || (isFilteredChat() ? null : [...document.querySelectorAll('tp-yt-iron-dropdown')]
     .find(menu => !menu.id && menu.parentElement?.matches('yt-live-chat-app') &&
-      !menu.hidden && menu.getAttribute('aria-hidden') !== 'true' && menu.getClientRects().length > 0) || getAuthorCard()
+      !menu.hidden && menu.getAttribute('aria-hidden') !== 'true' && menu.getClientRects().length > 0))
 
   const guardMenuDismissal = event => {
     const menu = getOpenChatMenu()
@@ -771,6 +771,7 @@
         fingerprint: saved.fingerprint, view, retained: true }
       applySupportAuthor(record)
       formatSupportView(view, record.superChat)
+      bindRecordAuthor(record)
       return record
     }
     const updateArchiveStatus = history => {
@@ -1180,12 +1181,14 @@
       return CARD_ROLE_COLORS[role] || ''
     }
     const authorSnapshot = message => {
-      const highlighted = message.author.closest('yt-live-chat-author-chip')?.hasAttribute('is-highlighted')
+      const highlighted = message.supportEvent || message.author.closest('yt-live-chat-author-chip')?.hasAttribute('is-highlighted')
+      const role = message.broadcaster ? 'owner' : message.moderator ? 'moderator'
+        : message.badges.some(badge => badge.getAttribute('type') === 'member') ? 'member' : ''
       return {
         user: message.user, channelId: message.channelId, name: message.author.textContent,
         // Highlighted native chips use dark ink on a light background. The card
         // has its own background, so use role colors and its own neutral ink.
-        color: authorNameColor(message),
+        color: highlighted ? CARD_ROLE_COLORS[role] || '' : authorNameColor(message),
         avatar: message.avatar, broadcaster: message.broadcaster, moderator: message.moderator,
         badges: message.badges.map(badge => {
           const visual = $('img, svg', badge)
@@ -1346,6 +1349,7 @@
     const dismissCard = (state = activeCard, restoreFocus = false) => {
       if (!state || state.closed) return
       state.closed = true
+      if (state.inTopLayer) { try { state.card.hidePopover() } catch (_) {} }
       state.card.hidden = true
       state.resizeObserver?.disconnect()
       clearTimeout(state.menuTimer)
@@ -1418,7 +1422,7 @@
     }
 
     const showAuthorCard = (author, opener) => {
-      if (mounted?.history.enabled) return
+      if (mounted?.history.enabled && !mounted.panel.contains(opener)) return
       dismissCard()
       const app = $('yt-live-chat-app')
       if (!app) return
@@ -1504,6 +1508,13 @@
         loadCardMenu(state)
       })
       app.appendChild(card)
+      // The filtered list is itself a popover; a later top-layer entry keeps
+      // the card above it while preserving YouTube's native event ancestry.
+      if (mounted?.inTopLayer && typeof card.showPopover === 'function') {
+        card.setAttribute('popover', 'manual')
+        try { card.showPopover(); state.inTopLayer = true }
+        catch (_) { card.removeAttribute('popover') }
+      }
       positionCard(state)
       const chat = $('yt-live-chat-renderer')
       if (chat && typeof ResizeObserver === 'function') {
@@ -1635,6 +1646,37 @@
       return row
     }
 
+    const bindRecordAuthor = record => {
+      const author = $('.ytcf-author', record.view) || $('strong', record.view)
+      if (!author) return
+      author.classList.add('ytcf-author')
+      author.setAttribute('role', 'button')
+      author.setAttribute('tabindex', '0')
+      author.setAttribute('aria-label', '查看用戶資訊')
+      const open = event => {
+        event.preventDefault()
+        event.stopPropagation()
+        // Older archives predate author snapshots. Their inert presentation
+        // still contains identity and badge visuals, but no native commands.
+        const snapshot = record.authorInfo || {
+          user: record.user, channelId: record.channelId,
+          name: record.authorName || author.textContent,
+          color: record.supportEvent ? CARD_ROLE_COLORS[record.broadcaster ? 'owner' : record.moderator ? 'moderator' : ''] || '' : author.style.color,
+          avatar: $('.ytcf-avatar', record.view)?.getAttribute('src') || '',
+          broadcaster: record.broadcaster, moderator: record.moderator,
+          badges: $$('.ytcf-badge', record.view).map(badge => ({
+            label: badge.getAttribute('aria-label') || badge.textContent || '徽章',
+            visual: $('img, svg', badge), color: record.supportEvent ? '' : badge.style.color,
+          })),
+        }
+        showAuthorCard({ ...snapshot, name: record.profileName || snapshot.name }, author)
+      }
+      author.addEventListener('click', open)
+      author.addEventListener('keydown', event => {
+        if (['Enter', ' '].includes(event.key)) open(event)
+      })
+    }
+
     const captureLine = (line, history) => {
       const author = $('#author-name', line)
       if (author) {
@@ -1678,7 +1720,9 @@
       history.nodes.set(line, record)
       if (message.id) history.ids.set(message.id, record)
       history.dirty.add(record)
+      record.authorInfo = authorSnapshot(message)
       applySupportAuthor(record)
+      bindRecordAuthor(record)
       saveRecord(history, record)
       return true
     }
@@ -2085,7 +2129,7 @@
       cancelListFollow(state)
       state.readerScrollIntent = false
       cancelMessageRender(state)
-      if (enabled) closeAuthorCard()
+      closeAuthorCard()
       state.history.enabled = enabled
       state.history.supportOnly = supportOnly
       state.host.classList.toggle('ytcf-active', enabled)
@@ -2518,6 +2562,9 @@
       .ytcf-message[data-ytcf-located] { outline: 2px solid #ffb300; outline-offset: -2px; box-shadow: inset 0 0 0 4px #0008; }
       /* Lift the handle's @ optically without changing text flow or line height. */
       .ytcf-author .ytcf-handle-at { position: relative; top: -0.08em; }
+      .ytcf-author { cursor: pointer; }
+      .ytcf-author:hover { text-decoration: underline; }
+      .ytcf-author:focus-visible { outline: 2px solid var(--yt-live-chat-link-text-color, #3ea6ff); outline-offset: 2px; }
       .ytcf-message:hover { background: var(--yt-live-chat-action-panel-background-color, #8882); }
       .ytcf-support-event { margin: 3px 6px; border-radius: 4px; }
       .ytcf-support-event .ytcf-body a, .ytcf-event-details a { color: inherit; text-decoration: underline; }
@@ -2525,7 +2572,7 @@
       .ytcf-event-details { display: inline !important; }
       .ytcf-amount { display: inline-block; margin-right: 5px; padding: 0 5px; border-radius: 4px; color: var(--yt-live-chat-primary-text-color, #0f0f0f); background: var(--yt-live-chat-action-panel-background-color, #8882); font-weight: 600; }
       .ytuc-card {
-        position: fixed; z-index: 2200; box-sizing: border-box; overflow: auto; overscroll-behavior: contain;
+        position: fixed; inset: auto; margin: 0; padding: 0; z-index: 2200; box-sizing: border-box; overflow: auto; overscroll-behavior: contain;
         border: 2px solid var(--yt-live-chat-secondary-text-color, #606060);
         border-color: color-mix(in srgb, var(--yt-live-chat-primary-text-color, #0f0f0f) 35%, var(--yt-live-chat-background-color, #fff));
         border-radius: 8px; box-shadow: 0 12px 40px #0009, 0 2px 8px #0006;
