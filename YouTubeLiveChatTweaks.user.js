@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.8.11
+// @version     0.8.12
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @description 提供 YouTube 聊天室用戶資訊卡、獨立 SC／會員事件紀錄與類型顏色篩選、全域角色與帳號包含／排除篩選、表情複製、重新載入與自動跟隨。
@@ -173,7 +173,6 @@
   const MEMBERSHIP_EVENT_SELECTORS = {
     membership: 'yt-live-chat-membership-item-renderer',
     membershipGift: 'ytd-sponsorships-live-chat-gift-purchase-announcement-renderer, yt-live-chat-sponsorships-gift-purchase-announcement-renderer',
-    giftRecipients: 'ytd-sponsorships-live-chat-gift-redemption-announcement-renderer, yt-live-chat-sponsorships-gift-redemption-announcement-renderer',
   }
   const NATIVE_MESSAGE_SELECTOR = [
     'yt-live-chat-text-message-renderer', 'yt-live-chat-paid-message-renderer',
@@ -593,7 +592,7 @@
     const RETENTION_MS = 7 * 24 * 60 * 60 * 1000
     const STREAMS_KEY = 'youtube-live-chat-tweaks-streams-v1'
     const DEFAULT_SETTINGS = { moderators: true, broadcaster: true, verified: true, users: [], excludedUsers: [] }
-    const SUPPORT_EVENTS = ['superChat', 'superSticker', 'membership', 'milestone', 'membershipGift', 'giftRecipients']
+    const SUPPORT_EVENTS = ['superChat', 'superSticker', 'membership', 'milestone', 'membershipGift']
     const SC_COLOR_TIERS = [
       { key: 'blue', label: '藍色', color: '#2962ff' },
       { key: 'cyan', label: '淺藍', color: '#00e5ff' },
@@ -617,7 +616,6 @@
       membership: true,
       milestone: true,
       membershipGift: true,
-      giftRecipients: true,
       colors: Object.fromEntries(SC_COLOR_TIERS.map(tier => [tier.key, true])),
     })
     const histories = new Map()
@@ -1030,40 +1028,6 @@
       if (tier) record.scColor = tier
       return tier
     }
-    const escapeRegExp = value => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-    const parseGiftCount = (texts = [], author = '') => {
-      const raw = texts.filter(Boolean).join(' ').trim()
-      if (!raw) return 1
-      let cleaned = raw
-      for (const name of [author, String(author || '').replace(/^@/, '')].filter(Boolean)) {
-        cleaned = cleaned.replace(new RegExp(`^\\s*@?${escapeRegExp(name)}\\b\\s*`, 'i'), '')
-      }
-      for (const source of [cleaned, raw]) {
-        const contextual = source.match(/(\d{1,4})\s*(?:memberships?|gift memberships?|sponsorships?|個|份|人|件|개)/i) ||
-          source.match(/(?:gifted|sent|送出了?|贈送了?|赠送了?|贈りました)\D{0,6}?(\d{1,4})(?!\d)/i)
-        if (contextual) {
-          const count = parseInt(contextual[1], 10)
-          if (Number.isSafeInteger(count) && count >= 1) return count
-        }
-      }
-      const fallback = cleaned.match(/(?:^|\s)(\d{1,4})(?:\s|$)/)
-      if (fallback) {
-        const count = parseInt(fallback[1], 10)
-        if (Number.isSafeInteger(count) && count >= 1) return count
-      }
-      return 1
-    }
-    const getRecordGiftCount = record => {
-      if (!record || record.supportEvent !== 'membershipGift') return 0
-      if (Number.isSafeInteger(record.giftCount) && record.giftCount >= 1) return record.giftCount
-      let detailText = ''
-      if (!record._hasView && record._savedTree) detailText = treeSearchText(record._savedTree)
-      else {
-        const view = record._hydratedView || (!('_hasView' in record) ? record.view : null)
-        if (view) detailText = $$('.ytcf-event-details', view).map(node => node.textContent).join(' ')
-      }
-      return (record.giftCount = parseGiftCount([detailText], record.authorName || record.user))
-    }
     const matchesSupportFilter = (record, filter = null) => {
       if (!record?.supportEvent) return false
       if (!filter) return true
@@ -1074,32 +1038,6 @@
       }
       return filter[record.supportEvent] !== false
     }
-    const summarizeSupportEvents = history => {
-      const summary = {
-        membership: 0,
-        milestone: 0,
-        membershipGiftFrom: 0,
-        membershipGiftTo: 0,
-        giftRecipients: 0,
-        superchat: 0,
-        colors: Object.fromEntries(SC_COLOR_TIERS.map(tier => [tier.key, 0])),
-      }
-      for (const record of history?.messages || []) {
-        if (!record.retained || !record.supportEvent) continue
-        if (record.supportEvent === 'membership') summary.membership++
-        else if (record.supportEvent === 'milestone') summary.milestone++
-        else if (record.supportEvent === 'membershipGift') {
-          summary.membershipGiftFrom++
-          summary.membershipGiftTo += getRecordGiftCount(record)
-        } else if (record.supportEvent === 'giftRecipients') summary.giftRecipients++
-        else if (record.supportEvent === 'superChat' || record.supportEvent === 'superSticker') {
-          summary.superchat++
-          const tier = getRecordColorTier(record)
-          if (tier && tier in summary.colors) summary.colors[tier]++
-        }
-      }
-      return summary
-    }
     const archiveRecord = (history, record) => ({
       scope: history.scope, storageId: record.storageId, createdAt: record.createdAt,
       order: record.order,
@@ -1107,7 +1045,6 @@
       moderator: record.moderator, broadcaster: record.broadcaster, verified: record.verified,
       superChat: record.superChat, supportEvent: record.supportEvent,
       scColor: getRecordColorTier(record),
-      giftCount: record.supportEvent === 'membershipGift' ? getRecordGiftCount(record) : 0,
       fingerprint: record.fingerprint,
       authorName: record.authorName, authorHandle: record.authorHandle,
       profileName: record.profileName, profileHandle: record.profileHandle,
@@ -1118,7 +1055,8 @@
       Number.isFinite(saved.createdAt) && saved.createdAt <= Date.now() && saved.createdAt + RETENTION_MS > Date.now() &&
       saved.tree && typeof saved.tree === 'object'
     const restoreRecord = saved => {
-      if (saved.tree?.tag !== 'div' || saved.tree.children?.[0]?.tag?.toLowerCase() !== 'time') return null
+      if (saved.tree?.tag !== 'div' || saved.tree.children?.[0]?.tag?.toLowerCase() !== 'time' ||
+        saved.supportEvent === 'giftRecipients') return null
       const record = { id: saved.id, storageId: saved.storageId, createdAt: saved.createdAt,
         order: Number.isSafeInteger(saved.order) ? saved.order : 0,
         user: saved.user, channelId: typeof saved.channelId === 'string' ? saved.channelId : '',
@@ -1126,7 +1064,6 @@
         superChat: saved.superChat === true,
         supportEvent: SUPPORT_EVENTS.includes(saved.supportEvent) ? saved.supportEvent : '',
         scColor: SC_COLOR_KEYS.has(saved.scColor) ? saved.scColor : '',
-        giftCount: Number.isSafeInteger(saved.giftCount) && saved.giftCount >= 1 ? saved.giftCount : 0,
         authorName: typeof saved.authorName === 'string' ? saved.authorName : '',
         authorHandle: typeof saved.authorHandle === 'string' ? saved.authorHandle : '',
         profileName: typeof saved.profileName === 'string' ? saved.profileName : '',
@@ -1495,7 +1432,6 @@
       membership: '會員加入',
       milestone: '會員里程碑',
       membershipGift: '會員贈禮',
-      giftRecipients: '獲贈會員',
     }
 
     const readMessage = (line, shouldKeep = null) => {
@@ -1557,10 +1493,6 @@
             .map(textValue).filter(Boolean).map(text => element('span', {}, [text]))
         }
       }
-      if (!message && supportEvent === 'giftRecipients' && !details.length && data.message) {
-        const text = textValue(data.message)
-        if (text) message = element('span', {}, [text])
-      }
       // Low-tier SC, welcome announcements and gifts may have no comment.
       if (!message && supportEvent) message = document.createElement('span')
       if (!message) message = $('#header-subtext', line)
@@ -1570,10 +1502,7 @@
         message = document.createElement('span')
         message.textContent = $('#deleted-state', line)?.textContent?.trim() || '訊息已刪除'
       }
-      const giftCount = supportEvent === 'membershipGift'
-        ? parseGiftCount(details.map(node => node.textContent), originalName || author.textContent)
-        : 0
-      return { user, channelId, moderator, broadcaster, verified, superChat, supportEvent, giftCount, amount, sticker, author, body: message, details, badges, deleted,
+      return { user, channelId, moderator, broadcaster, verified, superChat, supportEvent, amount, sticker, author, body: message, details, badges, deleted,
         authorHandle: [originalName, author.textContent].find(name => typeof name === 'string' && name.trim().startsWith('@') && normalizeAccount(name))?.trim() || '',
         colors: supportEvent ? readEventColors(line, data) : null,
         id, time: $('#timestamp', line)?.textContent?.trim() || textValue(data.timestampText),
@@ -2205,14 +2134,14 @@
         record = Object.assign(previous, { user: message.user, channelId: message.channelId, moderator: message.moderator,
           authorName: message.author.textContent.trim(), authorHandle: message.authorHandle,
           broadcaster: message.broadcaster, verified: message.verified, superChat: message.superChat, supportEvent: message.supportEvent,
-          scColor, giftCount: message.giftCount,
+          scColor,
           _searchText: '', view, fingerprint })
       } else {
         record = { id: message.id, user: message.user, channelId: message.channelId, moderator: message.moderator,
           authorName: message.author.textContent.trim(), authorHandle: message.authorHandle,
           profileName: '', profileHandle: '',
           broadcaster: message.broadcaster, verified: message.verified, superChat: message.superChat, supportEvent: message.supportEvent,
-          scColor, giftCount: message.giftCount,
+          scColor,
           storageId: message.id || `${pageKey}-${++anonymousMessage}`,
           createdAt: Date.now(), order: ++messageOrder,
           _searchText: '', view, fingerprint, retained: true }
@@ -2310,15 +2239,10 @@
     const updateSupportFilterUI = state => {
       if (!state?.panel || !state.supportFilterUI) return
       const filter = state.history.supportFilter || (state.history.supportFilter = createDefaultSupportFilter())
-      const summary = summarizeSupportEvents(state.history)
       const ui = state.supportFilterUI
-      for (const key of ['membership', 'milestone', 'membershipGift', 'giftRecipients']) {
+      for (const key of ['membership', 'milestone', 'membershipGift']) {
         const item = ui.types[key]
-        if (!item) continue
-        item.input.checked = filter[key] !== false
-        item.count.textContent = key === 'membershipGift'
-          ? `(from：${summary.membershipGiftFrom}、to：${summary.membershipGiftTo})`
-          : `(${summary[key]})`
+        if (item) item.input.checked = filter[key] !== false
       }
       let checkedColors = 0
       for (const tier of SC_COLOR_TIERS) {
@@ -2327,10 +2251,8 @@
         const active = filter.colors?.[tier.key] !== false
         if (active) checkedColors++
         item.input.checked = active
-        item.count.textContent = `(${summary.colors[tier.key]})`
       }
       if (ui.superchat) {
-        ui.superchat.count.textContent = `(${summary.superchat})`
         ui.superchat.input.checked = checkedColors === SC_COLOR_TIERS.length
         ui.superchat.input.indeterminate = checkedColors > 0 && checkedColors < SC_COLOR_TIERS.length
       }
@@ -2852,24 +2774,21 @@
       const panel = document.createElement('section')
       panel.className = 'ytcf-panel'
       panel.setAttribute('aria-label', '指定用戶聊天室')
-      const makeScCheckbox = ({ id, attrName, attrValue, text = '', initialCount = '(0)', swatch = null }) => {
+      const makeScCheckbox = ({ id, attrName, attrValue, text = '', swatch = null }) => {
         const input = element('input', { type: 'checkbox', id, [attrName]: attrValue })
-        const count = element('span', { class: 'ytcf-sc-count' }, [initialCount])
         const label = element('label', { for: id, ...(swatch ? { title: `Super Chat ${swatch.label}` } : {}) }, swatch
           ? [
               element('span', { class: `ytcf-sc-swatch ytcf-sc-swatch--${swatch.key}`, 'aria-hidden': 'true' }),
-              element('span', { class: 'ytcf-visually-hidden' }, [`${swatch.label} `]),
-              count,
+              element('span', { class: 'ytcf-visually-hidden' }, [swatch.label]),
             ]
-          : [text, count])
+          : [text])
         const option = element('span', { class: 'ytcf-sc-option' }, [input, label])
-        return { option, input, count }
+        return { option, input }
       }
       const supportTypes = {
         membership: makeScCheckbox({ id: 'ytcf-sc-filter-membership', attrName: 'data-sc-type', attrValue: 'membership', text: 'membership' }),
         milestone: makeScCheckbox({ id: 'ytcf-sc-filter-milestone', attrName: 'data-sc-type', attrValue: 'milestone', text: 'milestone' }),
-        membershipGift: makeScCheckbox({ id: 'ytcf-sc-filter-membership-gift', attrName: 'data-sc-type', attrValue: 'membershipGift', text: 'membershipGift', initialCount: '(from：0、to：0)' }),
-        giftRecipients: makeScCheckbox({ id: 'ytcf-sc-filter-gift-recipients', attrName: 'data-sc-type', attrValue: 'giftRecipients', text: 'giftRecipients' }),
+        membershipGift: makeScCheckbox({ id: 'ytcf-sc-filter-membership-gift', attrName: 'data-sc-type', attrValue: 'membershipGift', text: 'membershipGift' }),
       }
       const superchatToggle = makeScCheckbox({ id: 'ytcf-sc-filter-superchat', attrName: 'data-sc-type', attrValue: 'superchat', text: 'superchat' })
       const supportColors = Object.fromEntries(SC_COLOR_TIERS.map(tier => [tier.key, makeScCheckbox({
@@ -2877,8 +2796,9 @@
       })]))
       const supportFilterFieldset = element('fieldset', { class: 'ytcf-sc-filters' }, [
         element('legend', { class: 'ytcf-visually-hidden' }, ['篩選事件類型與金額顏色']),
-        element('div', { class: 'ytcf-sc-filter-row' }, [supportTypes.membership.option, supportTypes.milestone.option]),
-        element('div', { class: 'ytcf-sc-filter-row' }, [supportTypes.membershipGift.option, supportTypes.giftRecipients.option]),
+        element('div', { class: 'ytcf-sc-filter-row' }, [
+          supportTypes.membership.option, supportTypes.milestone.option, supportTypes.membershipGift.option,
+        ]),
         element('div', { class: 'ytcf-sc-filter-row ytcf-sc-filter-row--colors' }, [
           superchatToggle.option,
           ...SC_COLOR_TIERS.map(tier => supportColors[tier.key].option),
