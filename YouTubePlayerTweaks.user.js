@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Player Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.2.20
+// @version     0.2.21
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubePlayerTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubePlayerTweaks.user.js
 // @description 提供 YouTube 原解析度 PNG 截圖、滾輪音量與速度調整、直播追平，並擴大直播回看範圍。
@@ -207,7 +207,7 @@
   const LIVE_CATCHUP_TARGET_BUFFER = 0.5
   const LIVE_CATCHUP_RATE = 1.5
   const LIVE_CATCHUP_INTERVAL = 250
-  const MAX_VOLUME_GAIN = 2
+  const MAX_VOLUME_GAIN = 3
 
   let container
   let sizeBtn
@@ -876,8 +876,8 @@
   const syncVolumeGain = () => {
     if (!volumeGain || !moviePlayer) return
 
-    // The native media volume is already 0–1. Scaling its output by 2x
-    // that value makes quiet settings quieter and full volume up to 200%.
+    // The native media volume is already 0–1. Scaling its output by 3x
+    // that value makes quiet settings quieter and full volume up to 300%.
     const volume = Math.max(0, Math.min(100, moviePlayer.getVolume()))
     volumeGain.gain.value = MAX_VOLUME_GAIN * volume / 100
   }

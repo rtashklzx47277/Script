@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        Twitch Player Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.3.6
+// @version     0.3.7
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchPlayerTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchPlayerTweaks.user.js
 // @description 提供 Twitch 原解析度 PNG 截圖、滾輪音量與音量增益，隱藏剪輯按鈕及互動擴充。
@@ -28,7 +28,7 @@
     'input[data-a-target="player-volume-slider"]'
 
   const VOLUME_STEP = 0.05
-  const MAX_VOLUME_GAIN = 2
+  const MAX_VOLUME_GAIN = 3
   const VOLUME_BAR_DURATION = 3000
   const TOOLTIP_VERTICAL_GAP = 10
   const SCREENSHOT_WORKER_TIMEOUT = 15000
@@ -311,7 +311,7 @@
         graph.source.connect(graph.gain || volumeAudioContext.destination)
         graph.connected = true
       }
-      // Match YouTube: native volume v multiplied by a gain of 2v.
+      // Match YouTube: native volume v multiplied by a gain of 3v.
       if (graph.gain) graph.gain.gain.value = MAX_VOLUME_GAIN * clamp(video.volume, 0, 1)
       activeVolumeVideos.add(video)
     } catch (_) {

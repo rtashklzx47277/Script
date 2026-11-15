@@ -5,6 +5,7 @@ const path = require('node:path')
 const vm = require('node:vm')
 
 const scripts = ['YouTubePlayerTweaks.user.js', 'TwitchPlayerTweaks.user.js']
+const assertClose = (actual, expected) => assert.ok(Math.abs(actual - expected) < 1e-12, `expected ${actual} ≈ ${expected}`)
 
 // Run the real userscript and expose its closed-over functions at the end of
 // its IIFE. Only browser primitives are mocked; production functions are intact.
@@ -345,18 +346,18 @@ test('YouTube: volume wheel quiets low settings and boosts full volume', () => {
   env.api.setPlayers({}, player)
   env.api.changeVolume({ deltaY: 1, preventDefault() {} })
   assert.equal(volume, 15)
-  assert.equal(gain.gain.value, 0.3)
-  assert.equal(volume / 100 * gain.gain.value, 0.045)
+  assertClose(gain.gain.value, 0.45)
+  assertClose(volume / 100 * gain.gain.value, 0.0675)
 
   volume = 75
   env.api.syncVolumeGain() // YouTube's native volume slider changed.
-  assert.equal(gain.gain.value, 1.5)
-  assert.equal(volume / 100 * gain.gain.value, 1.125)
+  assertClose(gain.gain.value, 2.25)
+  assertClose(volume / 100 * gain.gain.value, 1.6875)
 
   volume = 95
   env.api.changeVolume({ deltaY: -1, preventDefault() {} })
   assert.equal(volume, 100)
-  assert.equal(gain.gain.value, 2)
+  assert.equal(gain.gain.value, 3)
   assert.equal(sourceCount, 1)
 })
 
@@ -641,20 +642,20 @@ test('YouTube Shorts: gain follows the current video and reuses audio sources wh
   shorts.appendChild(overlay)
   const first = addShortsPlayer(env, shorts)
   env.emit('wheel', wheel(overlay))
-  assert.equal(gain.gain.value, 0.9)
+  assertClose(gain.gain.value, 1.35)
   first.player.volume = 75
   env.emit('volumechange', { target: first.video })
-  assert.equal(gain.gain.value, 1.5)
+  assertClose(gain.gain.value, 2.25)
 
   first.area.rect.top = -600
   first.area.rect.bottom = -100
   const next = addShortsPlayer(env, shorts)
   env.emit('wheel', wheel(overlay))
-  assert.equal(gain.gain.value, 0.9)
+  assertClose(gain.gain.value, 1.35)
   assert.equal(sources.length, 2)
   assert.ok(sources[0].disconnected > 0)
   env.emit('volumechange', { target: first.video })
-  assert.equal(gain.gain.value, 0.9, 'An inactive reel must not change the current gain')
+  assertClose(gain.gain.value, 1.35)
 
   next.area.rect.top = 600
   next.area.rect.bottom = 1100
@@ -663,7 +664,7 @@ test('YouTube Shorts: gain follows the current video and reuses audio sources wh
   env.emit('wheel', wheel(overlay))
   assert.equal(first.player.volume, 70)
   assert.equal(sources.length, 2, 'Revisiting a video must reuse its MediaElementSource')
-  assert.equal(gain.gain.value, 1.4)
+  assertClose(gain.gain.value, 2.1)
 })
 
 test('YouTube: regular video wheel still changes volume only inside its video container', () => {
@@ -879,14 +880,14 @@ test('Twitch volume: activate on adjustment and match YouTube gain at 25, 50 and
   env.api.changeVolume(wheel(video), player)
   assert.equal(video.volume, 0.25)
   assert.equal(video.muted, false)
-  assert.equal(audio.gains[0].gain.value, 0.5)
-  assert.equal(video.volume * audio.gains[0].gain.value, 0.125)
+  assertClose(audio.gains[0].gain.value, 0.75)
+  assertClose(video.volume * audio.gains[0].gain.value, 0.1875)
   video.volume = 0.5
   video.dispatchEvent({ type: 'volumechange' })
-  assert.equal(audio.gains[0].gain.value, 1)
+  assertClose(audio.gains[0].gain.value, 1.5)
   video.volume = 1
   video.dispatchEvent({ type: 'volumechange' })
-  assert.equal(audio.gains[0].gain.value, 2)
+  assert.equal(audio.gains[0].gain.value, 3)
   env.api.ensurePlayerState(player)
   assert.equal(audio.sources.length, 1)
   assert.equal(audio.contexts[0].resumes, 1)
@@ -902,7 +903,7 @@ test('Twitch volume: channel/video replacement stays enabled and revisiting reus
   video.volume = 0.75
   video.dispatchEvent({ type: 'loadedmetadata' })
   assert.equal(audio.sources.length, 1)
-  assert.equal(audio.gains[0].gain.value, 1.5)
+  assertClose(audio.gains[0].gain.value, 2.25)
   const next = new env.Element('video')
   Object.assign(next, { volume: 0.5, currentSrc: 'blob:https://www.twitch.tv/next-video', isConnected: true })
   next.closest = () => player
@@ -910,17 +911,17 @@ test('Twitch volume: channel/video replacement stays enabled and revisiting reus
   player.queries.set('video', next)
   env.api.refresh()
   assert.equal(audio.sources.length, 2)
-  assert.equal(audio.gains[1].gain.value, 1)
+  assertClose(audio.gains[1].gain.value, 1.5)
   assert.ok(audio.sources[0].disconnected > 0)
   video.volume = 0.2
   video.dispatchEvent({ type: 'volumechange' })
-  assert.equal(audio.gains[0].gain.value, 1.5, 'Detached videos must not reactivate old audio graphs')
+  assertClose(audio.gains[0].gain.value, 2.25)
   video.isConnected = true
   next.isConnected = false
   player.queries.set('video', video)
   env.api.refresh()
   assert.equal(audio.sources.length, 2)
-  assert.equal(audio.gains[0].gain.value, 0.4)
+  assertClose(audio.gains[0].gain.value, 0.6)
   assert.ok(audio.sources[1].disconnected > 0)
 })
 
@@ -932,11 +933,11 @@ test('Twitch volume: multiple players share one context while keeping independen
   const second = addTwitchPlayer(env, 0.25)
   assert.equal(audio.contexts.length, 1)
   assert.equal(audio.sources.length, 2)
-  assert.equal(audio.gains[1].gain.value, 0.5)
+  assertClose(audio.gains[1].gain.value, 0.75)
   first.video.volume = 1
   first.video.dispatchEvent({ type: 'volumechange' })
-  assert.equal(audio.gains[0].gain.value, 2)
-  assert.equal(audio.gains[1].gain.value, 0.5)
+  assert.equal(audio.gains[0].gain.value, 3)
+  assertClose(audio.gains[1].gain.value, 0.75)
   env.selectors.set('[data-a-target="video-player"]', [])
   env.api.refresh()
   assert.ok(audio.sources.every(source => source.disconnected > 0))
@@ -952,10 +953,10 @@ test('Twitch volume: native controls enable gain and media readiness finishes de
   video.currentSrc = 'blob:https://www.twitch.tv/ready'
   video.dispatchEvent({ type: 'loadedmetadata' })
   assert.equal(audio.sources.length, 1)
-  assert.equal(audio.gains[0].gain.value, 1)
+  assertClose(audio.gains[0].gain.value, 1.5)
   video.volume = 0.7
   video.dispatchEvent({ type: 'volumechange' })
-  assert.equal(audio.gains[0].gain.value, 1.4)
+  assertClose(audio.gains[0].gain.value, 2.1)
 })
 
 test('Twitch volume: unsupported, remote and protected media retain native volume controls', () => {
@@ -1029,7 +1030,7 @@ test('Twitch volume: wheel without user activation keeps native playback unmuted
   await Promise.resolve()
   await Promise.resolve()
   assert.equal(sources.length, 1, 'User activation resumes AudioContext and attaches gain')
-  assert.equal(gains[0].gain.value, 0.9)
+  assertClose(gains[0].gain.value, 1.35)
 
   env.api.ensureVolumeGain(badVideo)
   env.api.ensureVolumeGain(badVideo)
@@ -1107,7 +1108,7 @@ test('YouTube volume, Shorts transitions & tooltips: defer suspended capture, fo
   await Promise.resolve()
   await Promise.resolve()
   assert.equal(sourceCount, 1)
-  assert.equal(gain.gain.value, 0.9)
+  assertClose(gain.gain.value, 1.35)
 
   // Switch reels without wheeling the second reel.
   first.area.rect.top = -600
@@ -1124,7 +1125,7 @@ test('YouTube volume, Shorts transitions & tooltips: defer suspended capture, fo
   env.emit('playing', { target: next.video })
   assert.equal(sourceCount, 2)
   assert.ok(sources[0].disconnected > 0)
-  assert.equal(gain.gain.value, 1.6)
+  assertClose(gain.gain.value, 2.4)
 
   // Editable target inside shadow DOM (exposed via composedPath) blocks screenshot key.
   const shadowHost = new env.Element('custom-host')
