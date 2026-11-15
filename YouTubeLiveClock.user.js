@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Live Clock
 // @namespace   https://tampermonkey.net/
-// @version     0.2.4
+// @version     0.2.5
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveClock.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveClock.user.js
 // @description 直播顯示經過時間，直播存檔顯示對應日期與時刻，支援多種日期格式。
@@ -33,12 +33,9 @@
     ;(document.head || document.documentElement).appendChild(styleElement)
   }
 
-  const WEEK_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
-  const WEEK_FULL = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
-  const MONTH_FULL = [
-    'January', 'February', 'March', 'April', 'May', 'June',
-    'July', 'August', 'September', 'October', 'November', 'December',
-  ]
+  const WEEK_SHORT_FORMAT = new Intl.DateTimeFormat('en-US', { weekday: 'short' })
+  const WEEK_FULL_FORMAT = new Intl.DateTimeFormat('en-US', { weekday: 'long' })
+  const MONTH_FULL_FORMAT = new Intl.DateTimeFormat('en-US', { month: 'long' })
 
   let currentVideoId = null
   let timeContent
@@ -82,19 +79,23 @@
     const year = date.getFullYear()
     const month = twoDigit(date.getMonth() + 1)
     const day = twoDigit(date.getDate())
-    const weekShort = WEEK_SHORT[date.getDay()]
-    const weekFull = WEEK_FULL[date.getDay()]
-    const monthFull = MONTH_FULL[date.getMonth()]
     const time = `${twoDigit(date.getHours())}:${twoDigit(date.getMinutes())}:${twoDigit(date.getSeconds())}`
 
-    return {
-      1: `(${year}/${month}/${day} ${time})`,
-      2: `(${month}/${day}/${year} ${time})`,
-      3: `(${day}/${month}/${year} ${time})`,
-      4: `(${weekShort} ${day}/${month}/${year} ${time})`,
-      5: `(${weekFull} ${day}/${month}/${year} ${time})`,
-      6: `(${weekFull} ${day} ${monthFull} ${year} ${time})`,
-    }[FORMAT] ?? `(${year}/${month}/${day} ${time})`
+    switch (FORMAT) {
+      case 2:
+        return `(${month}/${day}/${year} ${time})`
+      case 3:
+        return `(${day}/${month}/${year} ${time})`
+      case 4:
+        return `(${WEEK_SHORT_FORMAT.format(date)} ${day}/${month}/${year} ${time})`
+      case 5:
+        return `(${WEEK_FULL_FORMAT.format(date)} ${day}/${month}/${year} ${time})`
+      case 6:
+        return `(${WEEK_FULL_FORMAT.format(date)} ${day} ${MONTH_FULL_FORMAT.format(date)} ${year} ${time})`
+      case 1:
+      default:
+        return `(${year}/${month}/${day} ${time})`
+    }
   }
 
   const removeClocks = () => {

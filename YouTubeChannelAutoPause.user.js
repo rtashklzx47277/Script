@@ -108,7 +108,7 @@
       }
     }
 
-    // ponytail: the 5s window is what separates autoplay from the user's own
+    // The 5s window is what separates autoplay from the user's own
     // play clicks; a trailer that starts later than that is deliberately left
     // alone rather than fighting the user.
     video.addEventListener('play', handlePlay)

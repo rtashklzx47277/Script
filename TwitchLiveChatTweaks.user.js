@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        Twitch Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.7.3
+// @version     0.7.4
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
 // @description 依頻道主、管理員、VIP 與全域帳號包含／排除名單篩選 Twitch 聊天，保留最近 100 則／7 天紀錄並支援自動跟隨。
@@ -23,6 +23,10 @@
   const RETENTION_MS = 7 * 24 * 60 * 60 * 1000
   const ARCHIVE_DB = 'twitch-live-chat-tweaks-history-v1'
   const pageKey = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`
+  const nowMs = () => typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now()
+  const yieldToMain = () => (typeof scheduler !== 'undefined' && typeof scheduler?.yield === 'function'
+    ? scheduler.yield()
+    : new Promise(resolve => setTimeout(resolve, 0)))
   let archiveDatabase = null
   let messageOrder = 0
   let anonymousMessage = 0
@@ -283,6 +287,8 @@
     if (mounted?.history !== history || !mounted.panel) return
     const status = $('.ttc-history-status', mounted.panel)
     if (!status) return
+    if (history.archiveError) status.setAttribute('role', 'status')
+    else status.removeAttribute('role')
     status.hidden = history.archiveReady && !history.archiveError
     status.textContent = history.archiveError ? '此瀏覽器無法保存紀錄；目前僅暫存於本次頁面。'
       : history.archiveReady ? '' : '正在載入已保存的紀錄…'
@@ -368,6 +374,7 @@
       const records = saved.filter(item => validArchiveRecord(item, history.scope))
         .sort((a, b) => a.createdAt - b.createdAt || (a.order || 0) - (b.order || 0))
       const restored = []
+      let deadline = nowMs() + 50
       for (const item of records) {
         const current = item.id ? history.ids.get(item.id) : null
         if (current) {
@@ -381,6 +388,10 @@
           restored.push(record)
           if (record.id) history.ids.set(record.id, record)
           history.dirty.add(record)
+        }
+        if (nowMs() >= deadline) {
+          await yieldToMain()
+          deadline = nowMs() + 50
         }
       }
       history.messages.unshift(...restored)
@@ -787,7 +798,6 @@
           element('button', {
             type: 'button',
             class: 'ttc-target-summary',
-            'aria-label': '目標用戶',
             'aria-controls': 'ttc-target-settings',
             'aria-expanded': 'false',
           }, ['目標用戶']),
@@ -795,37 +805,56 @@
         ]),
         element('div', { class: 'ttc-targets', id: 'ttc-target-settings', hidden: '' }, [
           element('div', { class: 'ttc-roles' }, [
-            element('label', {}, [element('input', { type: 'checkbox', name: 'broadcaster' }), ' Broadcaster']),
-            element('label', {}, [element('input', { type: 'checkbox', name: 'moderators' }), ' Moderator']),
-            element('label', {}, [element('input', { type: 'checkbox', name: 'vip' }), ' VIP']),
+            element('span', { class: 'ttc-role' }, [
+              element('input', { type: 'checkbox', id: 'ttc-role-broadcaster', name: 'broadcaster' }),
+              element('label', { for: 'ttc-role-broadcaster' }, ['Broadcaster']),
+            ]),
+            element('span', { class: 'ttc-role' }, [
+              element('input', { type: 'checkbox', id: 'ttc-role-moderators', name: 'moderators' }),
+              element('label', { for: 'ttc-role-moderators' }, ['Moderator']),
+            ]),
+            element('span', { class: 'ttc-role' }, [
+              element('input', { type: 'checkbox', id: 'ttc-role-vip', name: 'vip' }),
+              element('label', { for: 'ttc-role-vip' }, ['VIP']),
+            ]),
           ]),
           element('div', { class: 'ttc-target-modes', role: 'group', 'aria-label': '帳號篩選方式' }, [
-            element('button', { type: 'button', class: 'ttc-mode-include', 'aria-label': '＋ 包含' }, ['＋ 包含']),
-            element('button', { type: 'button', class: 'ttc-mode-exclude', 'aria-label': '－ 排除' }, ['－ 排除']),
+            element('button', { type: 'button', class: 'ttc-mode-include' }, ['＋ 包含']),
+            element('button', { type: 'button', class: 'ttc-mode-exclude' }, ['－ 排除']),
           ]),
           element('form', { class: 'ttc-users' }, [
-            element('label', {}, [
-              '新增帳號',
-              element('input', {
-                type: 'text',
-                name: 'users',
-                placeholder: '英文帳號',
-                autocomplete: 'off',
-                spellcheck: 'false',
-              }),
-            ]),
+            element('label', { for: 'ttc-input-users' }, ['新增帳號']),
+            element('input', {
+              id: 'ttc-input-users',
+              type: 'text',
+              name: 'users',
+              placeholder: '英文帳號',
+              autocomplete: 'off',
+              autocorrect: 'off',
+              autocapitalize: 'none',
+              spellcheck: 'false',
+            }),
             element('button', { type: 'submit' }, ['新增']),
           ]),
-          element('label', { class: 'ttc-target-search' }, [
-            '搜尋帳號',
-            element('input', { type: 'search', name: 'search-users', placeholder: '搜尋目標帳號', autocomplete: 'off' }),
+          element('search', { class: 'ttc-target-search' }, [
+            element('label', { for: 'ttc-input-search-users' }, ['搜尋帳號']),
+            element('input', {
+              id: 'ttc-input-search-users',
+              type: 'search',
+              name: 'search-users',
+              placeholder: '搜尋目標帳號',
+              autocomplete: 'off',
+              autocorrect: 'off',
+              autocapitalize: 'none',
+              spellcheck: 'false',
+            }),
           ]),
           element('ul', { class: 'ttc-target-list', 'aria-label': '目標用戶清單' }),
           element('p', { class: 'ttc-target-empty' }),
-          element('p', { class: 'ttc-target-status', role: 'status', 'aria-live': 'polite' }),
+          element('p', { class: 'ttc-target-status', role: 'status' }),
         ]),
       ]),
-      element('p', { class: 'ttc-history-status', role: 'status' }),
+      element('p', { class: 'ttc-history-status' }),
       element('p', { class: 'ttc-empty' }, ['尚無符合條件的發言。新增目標帳號後開始收集。']),
       element('div', { class: 'ttc-list', role: 'log', 'aria-label': '篩選後的聊天訊息', 'aria-live': 'off' }),
       element('button', { class: 'ttc-latest', type: 'button', hidden: '' }, ['回到最新訊息']),
@@ -861,9 +890,7 @@
     }
     const applyRoles = () => state.updateSettings({ ...state.history.settings,
       moderators: moderators.checked, broadcaster: broadcaster.checked, vip: vip.checked })
-    moderators.addEventListener('change', applyRoles)
-    broadcaster.addEventListener('change', applyRoles)
-    vip.addEventListener('change', applyRoles)
+    for (const input of [moderators, broadcaster, vip]) input.addEventListener('change', applyRoles)
     $('.ttc-users', panel).addEventListener('submit', event => {
       event.preventDefault()
       const exclude = state.targetMode === 'exclude'
@@ -1003,7 +1030,7 @@
     .ttc-toggle { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 32px; width: 32px; height: 32px; padding: 4px; border: 0; border-radius: 4px; color: inherit; background: transparent; cursor: pointer; }
     .ttc-toggle:hover { background: var(--color-background-button-text-hover, #ffffff22); }
     .ttc-toggle[aria-pressed="true"] { color: var(--color-text-link, #bf94ff); background: var(--color-background-button-text-hover, #ffffff22); }
-    .ttc-toggle:focus-visible, .ttc-panel button:focus-visible { outline: 2px solid #9147ff; outline-offset: -2px; }
+    .ttc-toggle:focus-visible, .ttc-panel button:focus-visible, .ttc-panel input:focus-visible { outline: 2px solid #9147ff; outline-offset: -2px; }
     .ttc-host { position: relative; }
     .ttc-active > .ttc-source { visibility: hidden; pointer-events: none; }
     .ttc-panel { position: absolute; inset: 0; z-index: 2147483647; display: flex; flex-direction: column; box-sizing: border-box; min-height: 0; max-width: none; max-height: none; margin: 0; padding: 0; border: 0; color: var(--color-text-base, #efeff1); background: var(--color-background-base, #18181b); font-size: 13px; }
@@ -1011,19 +1038,24 @@
     .ttc-toolbar { flex: 0 0 auto; padding: 10px; border-bottom: 1px solid var(--color-border-base, #ffffff22); }
     .ttc-options { display: flex; align-items: center; gap: 6px; flex-wrap: nowrap; font-size: 12px; }
     .ttc-roles { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; flex-shrink: 0; margin-bottom: 12px; }
-    .ttc-roles label { display: flex; align-items: center; gap: 3px; white-space: nowrap; }
+    .ttc-role { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
     .ttc-roles input { width: 13px; height: 13px; margin: 0; accent-color: #9147ff; }
     .ttc-count { margin-left: auto; flex-shrink: 0; white-space: nowrap; color: var(--color-text-alt-2, #adadb8); }
     .ttc-users { display: flex; align-items: center; gap: 6px; }
-    .ttc-users label { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; white-space: nowrap; }
+    .ttc-users label { white-space: nowrap; }
     .ttc-users input { display: block; box-sizing: border-box; flex: 1; min-width: 0; width: 100%; padding: 5px 8px; border: 1px solid var(--color-border-base, #ffffff44); border-radius: 4px; color: inherit; background: var(--color-background-input, #ffffff11); font-size: 12px; }
     .ttc-toolbar button, .ttc-latest { padding: 6px 10px; border: 0; border-radius: 4px; color: #fff; background: #9147ff; cursor: pointer; }
     .ttc-users input, .ttc-users button[type="submit"] { box-sizing: border-box; height: 30px; font: inherit; }
     .ttc-users button[type="submit"] { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; padding: 0 10px; border: 1px solid transparent; border-radius: 4px; font-weight: 600; line-height: 1; }
     .ttc-empty { padding: 16px 12px; color: var(--color-text-alt-2, #adadb8); }
     .ttc-history-status { margin: 0; padding: 8px 12px; color: var(--color-text-alt-2, #adadb8); font-size: 12px; }
+    .ttc-list, .ttc-target-list, .ttc-managing > .ttc-toolbar { --ttc-scrollbar-thumb: rgba(255, 255, 255, 0.45); --ttc-scrollbar-track: transparent; scrollbar-color: var(--ttc-scrollbar-thumb) var(--ttc-scrollbar-track); scrollbar-width: auto; overscroll-behavior: contain; }
+    @media (prefers-contrast: more) {
+      .ttc-list, .ttc-target-list, .ttc-managing > .ttc-toolbar { --ttc-scrollbar-thumb: #ffffff; --ttc-scrollbar-track: #000000; }
+      .ttc-toggle:focus-visible, .ttc-panel button:focus-visible, .ttc-panel input:focus-visible { outline: 2px solid currentColor; }
+    }
     .ttc-list { flex: 1; min-height: 0; overflow: auto; overflow-anchor: none; padding: 6px 0; }
-    .ttc-message { padding: 5px 10px; overflow-wrap: anywhere; line-height: 1.6; content-visibility: auto; contain-intrinsic-size: auto 30px; }
+    .ttc-message { padding: 5px 10px; overflow-wrap: anywhere; line-height: 1.6; content-visibility: auto; contain-intrinsic-size: auto none auto 30px; }
     .ttc-message:hover { background: var(--color-background-button-text-hover, #ffffff11); }
     .ttc-time { margin-right: 6px; color: var(--color-text-alt-2, #adadb8); font-size: 10px; }
     .ttc-message > img { width: 18px; height: 18px; margin-right: 3px; vertical-align: middle; }
@@ -1033,8 +1065,8 @@
     .ttc-managing > .ttc-empty, .ttc-managing > .ttc-list, .ttc-managing > .ttc-latest { display: none !important; }
     .ttc-options { flex-shrink: 0; }
     .ttc-panel .ttc-target-summary { display: inline-flex; align-items: center; gap: 3px; flex-shrink: 0; padding: 0; color: var(--color-text-link, #bf94ff); background: transparent; white-space: nowrap; font: inherit; cursor: pointer; }
-    .ttc-target-summary::before { content: '▸'; }
-    .ttc-target-summary[aria-expanded="true"]::before { content: '▾'; }
+    .ttc-target-summary::before { content: '▸'; content: '▸' / ''; }
+    .ttc-target-summary[aria-expanded="true"]::before { content: '▾'; content: '▾' / ''; }
     .ttc-targets { margin-top: 12px; flex: 1; min-height: 0; display: flex; flex-direction: column; }
     .ttc-targets > :not(.ttc-target-list) { flex-shrink: 0; }
     .ttc-target-modes { display: flex; gap: 6px; margin-bottom: 8px; }
@@ -1065,8 +1097,10 @@
   })
   observer.observe(document.body, { childList: true, subtree: true })
   window.addEventListener('popstate', scheduleRefresh)
-  document.addEventListener('visibilitychange', handleMessageVisibility)
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) pruneHistories() })
+  document.addEventListener('visibilitychange', () => {
+    handleMessageVisibility()
+    if (!document.hidden) pruneHistories()
+  })
   window.addEventListener('pagehide', () => { for (const history of histories.values()) flushHistory(history).catch(() => {}) })
   setInterval(pruneHistories, 60000)
   // Twitch's SPA can reuse the same chat nodes on pushState without adding DOM.

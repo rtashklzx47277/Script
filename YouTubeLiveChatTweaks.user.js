@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.8.9
+// @version     0.8.10
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @description 提供 YouTube 聊天室用戶資訊卡、獨立 SC／會員事件紀錄、全域角色與帳號包含／排除篩選、表情複製、重新載入與自動跟隨。
@@ -586,13 +586,28 @@
 
     const MESSAGE_SELECTOR = NATIVE_MESSAGE_SELECTOR
     const STORAGE_KEY = 'youtube-live-chat-tweaks-settings-v1'
+    const TARGET_PROFILES_KEY = 'youtube-live-chat-tweaks-target-profiles-v1'
     const MAX_CHANNELS = 5
     const ARCHIVE_DB = 'youtube-live-chat-tweaks-history-v1'
     const RETENTION_MS = 7 * 24 * 60 * 60 * 1000
     const STREAMS_KEY = 'youtube-live-chat-tweaks-streams-v1'
     const DEFAULT_SETTINGS = { moderators: true, broadcaster: true, verified: true, users: [], excludedUsers: [] }
     const histories = new Map()
+    const profiles = new Map()
+    const profileRequests = new Map()
+    const handleCache = new Map()
+    const handleRequests = new Map()
+    const targetProfiles = new Map()
+    const targetResolveRequests = new Map()
+    const targetResolveRetryAt = new Map()
+    let targetProfilesLoaded = false
+    const TARGET_PROFILE_FAIL_TTL = 30000
+    const MAX_TARGET_PROFILES = 200
     const viewRecords = new WeakMap()
+    const nowMs = () => typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now()
+    const yieldToMain = () => (typeof scheduler !== 'undefined' && typeof scheduler?.yield === 'function'
+      ? scheduler.yield()
+      : new Promise(resolve => setTimeout(resolve, 0)))
     let pageSettings = null
     let unresolvedScope = ''
     let mounted = null
@@ -619,8 +634,11 @@
       if (/^https?:\/\//i.test(raw)) {
         try {
           const url = new URL(raw)
-          const id = url.pathname.match(/^\/channel\/(UC[\w-]{22})\/?$/)?.[1]
-          return /^(www\.)?youtube\.com$/i.test(url.hostname) && id ? id : ''
+          if (!/^(www\.)?youtube\.com$/i.test(url.hostname)) return ''
+          const id = url.pathname.match(/^\/channel\/(UC[\w-]{22})(?:\/|$)/)?.[1]
+          if (id) return id
+          const handleMatch = url.pathname.match(/^\/(@[^/]+)(?:\/|$)/)?.[1]
+          return handleMatch ? normalizeAccount(decodeURIComponent(handleMatch)) : ''
         } catch (_) { return '' }
       }
       const handle = raw.replace(/^@/, '').toLowerCase()
@@ -646,6 +664,152 @@
       } catch (_) { return Object.create(null) }
     }
     const readSavedSettings = () => readStorageObject(STORAGE_KEY)
+    const displayHandle = value => typeof value === 'string' && value.trim().startsWith('@') && normalizeAccount(value) ? value.trim() : ''
+
+    const loadTargetProfiles = () => {
+      if (targetProfilesLoaded) return
+      targetProfilesLoaded = true
+      const saved = readStorageObject(TARGET_PROFILES_KEY)
+      for (const [rawKey, entry] of Object.entries(saved)) {
+        const key = normalizeAccount(rawKey)
+        if (!key || !entry || typeof entry !== 'object') continue
+        const channelId = typeof entry.channelId === 'string' && /^UC[\w-]{22}$/.test(entry.channelId) ? entry.channelId : ''
+        const handle = displayHandle(entry.handle) || ''
+        const name = typeof entry.name === 'string' ? entry.name.trim() : ''
+        if (channelId || handle || name) targetProfiles.set(key, { channelId, handle, name })
+      }
+    }
+
+    const saveTargetProfiles = () => {
+      loadTargetProfiles()
+      const saved = readSavedSettings()
+      const activeKeys = new Set([
+        ...(Array.isArray(saved.users) ? saved.users : []),
+        ...(Array.isArray(saved.excludedUsers) ? saved.excludedUsers : []),
+      ])
+      for (const history of histories.values()) {
+        for (const u of history.settings?.users || []) activeKeys.add(u)
+        for (const u of history.settings?.excludedUsers || []) activeKeys.add(u)
+      }
+      if (targetProfiles.size > MAX_TARGET_PROFILES) {
+        for (const key of [...targetProfiles.keys()]) {
+          if (targetProfiles.size <= MAX_TARGET_PROFILES) break
+          if (!activeKeys.has(key)) targetProfiles.delete(key)
+        }
+      }
+      const data = Object.create(null)
+      for (const [key, entry] of targetProfiles) {
+        if (entry.channelId || entry.handle || entry.name) data[key] = entry
+      }
+      try { localStorage.setItem(TARGET_PROFILES_KEY, JSON.stringify(data)) } catch (_) {}
+    }
+
+    const mergeTargetEntry = (existing, incoming) => {
+      const channelId = incoming.channelId || existing?.channelId || ''
+      const handle = incoming.handle && (!existing?.handle || incoming.handle.toLowerCase() !== existing.handle.toLowerCase() || existing.handle === existing.handle.toLowerCase())
+        ? incoming.handle : (existing?.handle || incoming.handle || '')
+      const name = incoming.name || existing?.name || ''
+      if (existing && existing.channelId === channelId && existing.handle === handle && existing.name === name) return null
+      return { channelId, handle, name }
+    }
+
+    const recordTargetProfile = ({ channelId = '', handle = '', name = '', alias = '' } = {}, persist = false) => {
+      loadTargetProfiles()
+      const id = typeof channelId === 'string' && /^UC[\w-]{22}$/.test(channelId) ? channelId : ''
+      const cleanHandle = displayHandle(handle) || ''
+      const handleKey = cleanHandle ? normalizeAccount(cleanHandle) : ''
+      const cleanAlias = normalizeAccount(alias)
+      const cleanName = typeof name === 'string' ? name.trim() : ''
+      const keys = [...new Set([id, handleKey, cleanAlias].filter(Boolean))]
+      if (!keys.length || (!id && !cleanHandle && !cleanName)) return false
+      let seed = null
+      for (const key of keys) {
+        const existing = targetProfiles.get(key)
+        if (!existing) continue
+        seed = seed ? mergeTargetEntry(seed, existing) || seed : existing
+      }
+      const merged = mergeTargetEntry(seed, { channelId: id, handle: cleanHandle, name: cleanName })
+      let changed = Boolean(!seed || merged)
+      const value = merged || seed
+      if (!value) return false
+      for (const key of keys) {
+        const prev = targetProfiles.get(key)
+        if (!prev || prev.channelId !== value.channelId || prev.handle !== value.handle || prev.name !== value.name) {
+          targetProfiles.delete(key)
+          targetProfiles.set(key, { ...value })
+          changed = true
+        }
+      }
+      if (changed && persist) saveTargetProfiles()
+      return changed
+    }
+
+    const noteTargetRecord = (record, settings = null, persist = false) => {
+      if (!record) return false
+      const activeSettings = settings || readSavedSettings()
+      const targets = [...(activeSettings.users || []), ...(activeSettings.excludedUsers || [])]
+      if (!targets.length) return false
+      const matches = targets.includes(record.user) || (record.channelId && targets.includes(record.channelId))
+      if (!matches) return false
+      const rawName = String(record.profileName || record.authorName || '').trim()
+      const name = record.profileName ? record.profileName.trim() : (rawName && !rawName.startsWith('@') ? rawName : '')
+      const handle = displayHandle(record.profileHandle) || displayHandle(record.authorHandle) || displayHandle(record.authorName) || ''
+      return recordTargetProfile({ channelId: record.channelId || '', handle, name }, persist)
+    }
+
+    const getTargetMetadata = (user, history = null) => {
+      loadTargetProfiles()
+      const isId = /^UC[\w-]{22}$/.test(user)
+      let channelId = isId ? user : ''
+      let handle = ''
+      let name = ''
+      const cachedTarget = targetProfiles.get(user)
+      if (cachedTarget) {
+        if (!channelId && cachedTarget.channelId) channelId = cachedTarget.channelId
+        handle = cachedTarget.handle || ''
+        name = cachedTarget.name || ''
+      }
+      if (channelId) {
+        const memProfile = profiles.get(channelId)?.profile
+        if (memProfile) {
+          if (!name && memProfile.title) name = memProfile.title
+          if (!handle && memProfile.handle) handle = memProfile.handle
+        }
+        const byId = targetProfiles.get(channelId)
+        if (byId) {
+          if (!handle && byId.handle) handle = byId.handle
+          if (!name && byId.name) name = byId.name
+        }
+      }
+      if (handle && !channelId) {
+        const byHandle = targetProfiles.get(normalizeAccount(handle))
+        if (byHandle?.channelId) channelId = byHandle.channelId
+        if (!name && byHandle?.name) name = byHandle.name
+      }
+      if (!channelId || !handle || !name) {
+        const scan = history ? [history, ...histories.values()] : [...histories.values()]
+        const seenHistories = new Set()
+        for (const item of scan) {
+          if (!item || seenHistories.has(item)) continue
+          seenHistories.add(item)
+          for (let i = item.messages.length - 1; i >= 0; i--) {
+            const record = item.messages[i]
+            const hit = (isId && record.channelId === user) || (!isId && (record.user === user || (channelId && record.channelId === channelId)))
+            if (!hit) continue
+            if (!channelId && /^UC[\w-]{22}$/.test(record.channelId)) channelId = record.channelId
+            const recordHandle = displayHandle(record.profileHandle) || displayHandle(record.authorHandle) || displayHandle(record.authorName)
+            if (recordHandle && (!handle || handle === handle.toLowerCase())) handle = recordHandle
+            const recordName = record.profileName || (!String(record.authorName || '').startsWith('@') ? record.authorName : '')
+            if (!name && recordName) name = String(recordName).trim()
+            if (channelId && handle && name) break
+          }
+          if (channelId && handle && name) break
+        }
+      }
+      if (!handle && user.startsWith('@')) handle = user
+      const pending = targetResolveRequests.has(user) || (Boolean(channelId) && profileRequests.has(channelId))
+      return { channelId, handle, name, pending }
+    }
 
     const openArchive = () => {
       if (!archiveDatabase) archiveDatabase = new Promise((resolve, reject) => {
@@ -809,6 +973,8 @@
       if (mounted?.history !== history) return
       const status = $('.ytcf-history-status', mounted.panel)
       if (!status) return
+      if (history.archiveError) status.setAttribute('role', 'status')
+      else status.removeAttribute('role')
       status.hidden = history.archiveReady && !history.archiveError
       status.textContent = history.archiveError ? '此瀏覽器無法保存紀錄；目前僅暫存於本次頁面。'
         : history.archiveReady ? '' : '正在載入已保存的紀錄…'
@@ -880,6 +1046,8 @@
         const records = saved.filter(item => validArchiveRecord(item, history.scope))
           .sort((a, b) => a.createdAt - b.createdAt || (a.order || 0) - (b.order || 0))
         const restored = []
+        let targetChanged = false
+        let deadline = nowMs() + 50
         for (const item of records) {
           const current = item.id ? history.ids.get(item.id) : null
           if (current) {
@@ -892,16 +1060,23 @@
               applySupportAuthor(current)
             }
             current.view.firstChild.textContent = restoreTree(item.tree)?.firstChild?.textContent || current.view.firstChild.textContent
+            targetChanged = noteTargetRecord(current, history.settings) || targetChanged
             saveRecord(history, current)
-            continue
+          } else {
+            const record = restoreRecord(item)
+            if (!record) continue
+            restored.push(record)
+            if (record.id) history.ids.set(record.id, record)
+            history.byStorageId.set(record.storageId, record)
+            history.dirty.add(record)
+            targetChanged = noteTargetRecord(record, history.settings) || targetChanged
           }
-          const record = restoreRecord(item)
-          if (!record) continue
-          restored.push(record)
-          if (record.id) history.ids.set(record.id, record)
-          history.byStorageId.set(record.storageId, record)
-          history.dirty.add(record)
+          if (nowMs() >= deadline) {
+            await yieldToMain()
+            deadline = nowMs() + 50
+          }
         }
+        if (targetChanged) saveTargetProfiles()
         history.messages.unshift(...restored)
         history.messages.sort((a, b) => a.createdAt - b.createdAt || a.order - b.order)
         history.archiveReady = true
@@ -1205,8 +1380,6 @@
 
     // Profile lookups are public and shared by channel ID, for cards and
     // visible SC/membership authors. No network interception is needed.
-    const profiles = new Map()
-    const profileRequests = new Map()
     const cardStates = new WeakMap()
     const retiredCards = new Set()
     let activeCard = null
@@ -1260,44 +1433,56 @@
       }
     }
 
+    const postInnerTube = async (endpoint, payload) => {
+      const controller = new AbortController()
+      const timeout = setTimeout(() => controller.abort(), 8000)
+      try {
+        const client = window.ytcfg?.get?.('INNERTUBE_CONTEXT')?.client || {}
+        const response = await fetch(`/youtubei/v1/${endpoint}?prettyPrint=false`, {
+          method: 'POST', credentials: 'omit', signal: controller.signal,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ context: { client: {
+            clientName: 'WEB',
+            clientVersion: client.clientVersion || window.ytcfg?.get?.('INNERTUBE_CLIENT_VERSION') || '2.20261012.01.00',
+            hl: client.hl || document.documentElement?.lang || 'zh-TW', gl: client.gl || 'TW',
+          } }, ...payload }),
+        })
+        return response.ok ? await response.json() : null
+      } catch (_) {
+        return null
+      } finally {
+        clearTimeout(timeout)
+      }
+    }
+
+    const extractHandleFromUrl = value => {
+      try {
+        const url = new URL(value, 'https://www.youtube.com')
+        if (/^(www\.)?youtube\.com$/.test(url.hostname) && url.pathname.startsWith('/@')) {
+          return displayHandle(decodeURIComponent(url.pathname.slice(1).split('/')[0]))
+        }
+      } catch (_) {}
+      return ''
+    }
+
     const getProfile = channelId => {
       if (!/^UC[\w-]{22}$/.test(channelId)) return Promise.resolve(null)
       const cached = profiles.get(channelId)
       if (cached && cached.expires > Date.now()) return Promise.resolve(cached.profile)
       if (profileRequests.has(channelId)) return profileRequests.get(channelId)
       const request = (async () => {
-        const controller = new AbortController()
-        const timeout = setTimeout(() => controller.abort(), 8000)
         let profile = null
         try {
-          const client = window.ytcfg?.get?.('INNERTUBE_CONTEXT')?.client || {}
-          const response = await fetch('/youtubei/v1/browse?prettyPrint=false', {
-            method: 'POST', credentials: 'omit', signal: controller.signal,
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ context: { client: {
-              clientName: 'WEB',
-              clientVersion: client.clientVersion || window.ytcfg?.get?.('INNERTUBE_CLIENT_VERSION') || '2.20261012.01.00',
-              hl: client.hl || document.documentElement?.lang || 'zh-TW', gl: client.gl || 'TW',
-            } }, browseId: channelId }),
-          })
-          if (!response.ok) throw new Error('Profile lookup failed')
-          const data = await response.json()
+          const data = await postInnerTube('browse', { browseId: channelId })
+          if (!data) throw new Error('Profile lookup failed')
           const metadata = data.metadata?.channelMetadataRenderer
           if (metadata?.externalId && metadata.externalId !== channelId) throw new Error('Channel ID mismatch')
           const title = metadata?.title || data.header?.pageHeaderRenderer?.pageTitle
           if (typeof title !== 'string' || !title.trim()) throw new Error('Missing channel name')
-          let handle = ''
-          try {
-            const url = new URL(metadata?.vanityChannelUrl || metadata?.ownerUrls?.[0])
-            if (/^(www\.)?youtube\.com$/.test(url.hostname) && url.pathname.startsWith('/@')) {
-              handle = decodeURIComponent(url.pathname.slice(1).split('/')[0])
-            }
-          } catch (_) {}
-          profile = { title: title.trim(), handle }
+          const handle = extractHandleFromUrl(metadata?.vanityChannelUrl || metadata?.ownerUrls?.[0] || metadata?.channelUrl)
+          profile = { channelId, title: title.trim(), handle }
         } catch (_) {
           // Briefly cache failures too, so reopening a card cannot flood requests.
-        } finally {
-          clearTimeout(timeout)
         }
         profiles.delete(channelId)
         profiles.set(channelId, { profile, expires: profile ? Infinity : Date.now() + 30000 })
@@ -1309,10 +1494,43 @@
       return request
     }
 
+    const resolveHandle = account => {
+      const handleKey = normalizeAccount(account)
+      if (!handleKey.startsWith('@')) return Promise.resolve(null)
+      const cached = handleCache.get(handleKey)
+      if (cached && cached.expires > Date.now()) return Promise.resolve(cached.result)
+      if (handleRequests.has(handleKey)) return handleRequests.get(handleKey)
+      const request = (async () => {
+        let result = null
+        try {
+          const data = await postInnerTube('navigation/resolve_url', {
+            url: `https://www.youtube.com/@${encodeURIComponent(handleKey.slice(1))}`,
+          })
+          const browse = data?.endpoint?.browseEndpoint
+          const channelId = typeof browse?.browseId === 'string' && /^UC[\w-]{22}$/.test(browse.browseId) ? browse.browseId : ''
+          const canonicalHandle = extractHandleFromUrl(browse?.canonicalBaseUrl)
+          if (channelId) {
+            const profile = await getProfile(channelId)
+            result = {
+              channelId,
+              handle: profile?.handle || canonicalHandle || displayHandle(account) || handleKey,
+              name: profile?.title || '',
+            }
+          }
+        } catch (_) {}
+        handleCache.delete(handleKey)
+        handleCache.set(handleKey, { result, expires: result ? Infinity : Date.now() + TARGET_PROFILE_FAIL_TTL })
+        if (handleCache.size > 200) handleCache.delete(handleCache.keys().next().value)
+        return result
+      })()
+      handleRequests.set(handleKey, request)
+      request.finally(() => handleRequests.delete(handleKey))
+      return request
+    }
+
     const supportAuthorViews = new WeakMap()
     const supportAuthorQueue = []
     let activeAuthorLookups = 0
-    const displayHandle = value => typeof value === 'string' && value.trim().startsWith('@') && normalizeAccount(value) ? value.trim() : ''
     const applySupportAuthor = record => {
       if (!record.supportEvent) return
       record._searchText = ''
@@ -1348,6 +1566,7 @@
           record.profileHandle = displayHandle(profile.handle)
           record.profileResolved = true
           applySupportAuthor(record)
+          noteTargetRecord(record, history.settings, true)
           saveRecord(history, record)
           if (mounted?.history === history && history.supportOnly && history.supportSearch) scheduleMessageRender(mounted)
           return profile
@@ -1557,6 +1776,12 @@
         if (profile) {
           title.textContent = profile.title
           if (profile.handle) handle.textContent = profile.handle
+          noteTargetRecord({
+            channelId: author.channelId,
+            user: normalizeAccount(profile.handle || author.user),
+            profileName: profile.title,
+            profileHandle: profile.handle,
+          }, null, true)
           profileStatus.hidden = true
           profileRetry.hidden = true
         } else {
@@ -1795,6 +2020,7 @@
       record.authorInfo = authorSnapshot(message)
       applySupportAuthor(record)
       bindRecordAuthor(record)
+      noteTargetRecord(record, history.settings, true)
       saveRecord(history, record)
       return true
     }
@@ -2265,6 +2491,65 @@
       }, 3000) : 0
     }
 
+    const resolveTargetIdentity = (user, state = mounted) => {
+      const target = normalizeAccount(user)
+      if (!target) return Promise.resolve(null)
+      if (targetResolveRequests.has(target)) return targetResolveRequests.get(target)
+      const retryAt = targetResolveRetryAt.get(target) || 0
+      if (retryAt > Date.now()) return Promise.resolve(null)
+      const info = getTargetMetadata(target, state?.history)
+      const isId = /^UC[\w-]{22}$/.test(target)
+      if (info.channelId && info.handle && info.name && !(isId && info.handle === info.handle.toLowerCase())) {
+        return Promise.resolve(info)
+      }
+      const request = (async () => {
+        let resolved = null
+        try {
+          if (isId) {
+            const profile = await getProfile(target)
+            if (profile) resolved = { channelId: target, handle: profile.handle, name: profile.title }
+          } else if (info.channelId) {
+            const profile = await getProfile(info.channelId)
+            if (profile) resolved = { channelId: info.channelId, handle: profile.handle || info.handle, name: profile.title }
+          } else {
+            resolved = await resolveHandle(target)
+          }
+          if (resolved && (resolved.channelId || resolved.name || resolved.handle)) {
+            targetResolveRetryAt.delete(target)
+            recordTargetProfile({ ...resolved, alias: target }, true)
+          } else {
+            targetResolveRetryAt.set(target, Date.now() + TARGET_PROFILE_FAIL_TTL)
+          }
+        } catch (_) {
+          targetResolveRetryAt.set(target, Date.now() + TARGET_PROFILE_FAIL_TTL)
+        }
+        return resolved
+      })()
+      targetResolveRequests.set(target, request)
+      request.finally(() => {
+        targetResolveRequests.delete(target)
+        if (mounted?.panel?.isConnected) renderTargets(mounted)
+      })
+      return request
+    }
+
+    const resolveMissingTargets = (state = mounted) => {
+      if (!state?.history?.settings) return []
+      const { users = [], excludedUsers = [] } = state.history.settings
+      const tasks = []
+      let started = false
+      for (const user of new Set([...users, ...excludedUsers])) {
+        const info = getTargetMetadata(user, state.history)
+        if (info.channelId && info.handle && info.name) continue
+        if ((targetResolveRetryAt.get(user) || 0) > Date.now()) continue
+        const before = targetResolveRequests.has(user)
+        tasks.push(resolveTargetIdentity(user, state))
+        if (!before && targetResolveRequests.has(user)) started = true
+      }
+      if (started && state.panel?.isConnected) renderTargets(state)
+      return tasks
+    }
+
     const renderTargets = (state) => {
       const { panel, history } = state
       const exclude = state.targetMode === 'exclude'
@@ -2276,29 +2561,43 @@
       excludeButton.textContent = `－ 排除（${(settings.excludedUsers || []).length}）`
       includeButton.setAttribute('aria-pressed', String(!exclude))
       excludeButton.setAttribute('aria-pressed', String(exclude))
-      const query = $('[name="search-users"]', panel).value.trim().toLowerCase().replace(/^@/, '')
-      const users = targets.filter(user => user.toLowerCase().includes(query)).sort()
+      const rawQuery = $('[name="search-users"]', panel).value.trim().toLowerCase()
+      const rows = targets.map(user => {
+        const info = getTargetMetadata(user, history)
+        const nameText = info.name || (info.pending ? '載入頻道名稱…' : '名稱未取得')
+        const handleText = info.handle || (user.startsWith('@') ? user : (info.pending ? '查詢 @帳號中…' : '@帳號未取得'))
+        const idText = info.channelId || (/^UC[\w-]{22}$/.test(user) ? user : (info.pending ? '查詢 UCID 中…' : 'UCID 未取得'))
+        return { user, info, nameText, handleText, idText }
+      }).filter(({ user, info }) => {
+        if (!rawQuery) return true
+        return [info.name, info.handle, info.channelId, user]
+          .some(field => typeof field === 'string' && field.toLowerCase().includes(rawQuery))
+      }).sort((a, b) => a.user.localeCompare(b.user))
       const list = $('.ytcf-target-list', panel)
       list.setAttribute('aria-label', exclude ? '排除帳號清單' : '包含帳號清單')
       list.replaceChildren()
-      for (const user of users) {
+      for (const { user, info, nameText, handleText, idText } of rows) {
         const row = document.createElement('li')
-        const name = document.createElement('span')
-        name.textContent = user
+        row.dataset.targetUser = user
+        const details = element('div', { class: 'ytcf-target-info' }, [
+          element('span', { class: 'ytcf-target-name' }, [nameText]),
+          element('span', { class: 'ytcf-target-handle' }, [handleText]),
+          element('span', { class: 'ytcf-target-id' }, [idText]),
+        ])
         const remove = document.createElement('button')
         remove.type = 'button'
         remove.textContent = '移除'
-        remove.setAttribute('aria-label', `移除 ${user}`)
+        remove.setAttribute('aria-label', `移除 ${info.name || info.handle || user}`)
         remove.addEventListener('click', () => {
           state.updateSettings(changeTargetUsers(history.settings, user, true, exclude),
             exclude ? `已取消排除 ${user}。` : `已移除 ${user}。`)
         })
-        row.appendChild(name)
+        row.appendChild(details)
         row.appendChild(remove)
         list.appendChild(row)
       }
       const empty = $('.ytcf-target-empty', panel)
-      empty.hidden = users.length > 0
+      empty.hidden = rows.length > 0
       empty.textContent = targets.length ? '找不到符合搜尋的帳號。'
         : exclude ? '尚未排除任何帳號。' : '尚未新增目標帳號。'
     }
@@ -2309,40 +2608,56 @@
       panel.setAttribute('aria-label', '指定用戶聊天室')
       panel.appendChild(element('div', { class: 'ytcf-toolbar' }, [
         element('div', { class: 'ytcf-options' }, [
-          element('button', { type: 'button', class: 'ytcf-target-summary', 'aria-label': '目標用戶',
+          element('button', { type: 'button', class: 'ytcf-target-summary',
             'aria-controls': 'ytcf-target-settings', 'aria-expanded': 'false' }, ['目標用戶']),
           element('span', { class: 'ytcf-sc-title', hidden: '' }, ['SC／會員紀錄']),
           element('span', { class: 'ytcf-count' }),
         ]),
-        element('label', { class: 'ytcf-sc-search', hidden: '' }, [
-          element('input', { type: 'search', name: 'search-support', 'aria-label': '搜尋 SC／會員紀錄',
-            placeholder: '搜尋頻道名稱、@帳號或留言', autocomplete: 'off', spellcheck: 'false' }),
+        element('search', { class: 'ytcf-sc-search', hidden: '' }, [
+          element('label', { class: 'ytcf-visually-hidden', for: 'ytcf-input-search-support' }, ['搜尋 SC／會員紀錄']),
+          element('input', { id: 'ytcf-input-search-support', type: 'search', name: 'search-support',
+            placeholder: '搜尋頻道名稱、@帳號或留言', autocomplete: 'off', autocorrect: 'off',
+            autocapitalize: 'none', spellcheck: 'false' }),
         ]),
         element('div', { class: 'ytcf-targets', id: 'ytcf-target-settings', hidden: '' }, [
           element('div', { class: 'ytcf-roles' }, [
-            element('label', {}, [element('input', { type: 'checkbox', name: 'broadcaster' }), ' Broadcaster']),
-            element('label', {}, [element('input', { type: 'checkbox', name: 'moderators' }), ' Moderator']),
-            element('label', {}, [element('input', { type: 'checkbox', name: 'verified' }), ' Verified']),
+            element('span', { class: 'ytcf-role' }, [
+              element('input', { type: 'checkbox', id: 'ytcf-role-broadcaster', name: 'broadcaster' }),
+              element('label', { for: 'ytcf-role-broadcaster' }, ['Broadcaster']),
+            ]),
+            element('span', { class: 'ytcf-role' }, [
+              element('input', { type: 'checkbox', id: 'ytcf-role-moderators', name: 'moderators' }),
+              element('label', { for: 'ytcf-role-moderators' }, ['Moderator']),
+            ]),
+            element('span', { class: 'ytcf-role' }, [
+              element('input', { type: 'checkbox', id: 'ytcf-role-verified', name: 'verified' }),
+              element('label', { for: 'ytcf-role-verified' }, ['Verified']),
+            ]),
           ]),
           element('div', { class: 'ytcf-target-modes', role: 'group', 'aria-label': '帳號篩選方式' }, [
-            element('button', { type: 'button', class: 'ytcf-mode-include', 'aria-label': '＋ 包含' }, ['＋ 包含']),
-            element('button', { type: 'button', class: 'ytcf-mode-exclude', 'aria-label': '－ 排除' }, ['－ 排除']),
+            element('button', { type: 'button', class: 'ytcf-mode-include' }, ['＋ 包含']),
+            element('button', { type: 'button', class: 'ytcf-mode-exclude' }, ['－ 排除']),
           ]),
           element('form', { class: 'ytcf-users' }, [
-            element('label', {}, ['新增帳號', element('input', { type: 'text', name: 'users',
-              placeholder: '頻道 ID 或 @帳號', autocomplete: 'off', spellcheck: 'false' })]),
+            element('label', { for: 'ytcf-input-users' }, ['新增帳號']),
+            element('input', { id: 'ytcf-input-users', type: 'text', name: 'users',
+              placeholder: '頻道 ID、網址或 @帳號', autocomplete: 'off', autocorrect: 'off',
+              autocapitalize: 'none', spellcheck: 'false' }),
             element('button', { type: 'submit' }, ['新增']),
           ]),
-          element('label', { class: 'ytcf-target-search' }, ['搜尋帳號', element('input', {
-            type: 'search', name: 'search-users', placeholder: '搜尋目標帳號', autocomplete: 'off',
-          })]),
+          element('search', { class: 'ytcf-target-search' }, [
+            element('label', { for: 'ytcf-input-search-users' }, ['搜尋帳號']),
+            element('input', { id: 'ytcf-input-search-users', type: 'search', name: 'search-users',
+              placeholder: '搜尋名稱、@帳號或 UCID', autocomplete: 'off', autocorrect: 'off',
+              autocapitalize: 'none', spellcheck: 'false' }),
+          ]),
           element('ul', { class: 'ytcf-target-list', 'aria-label': '目標用戶清單' }),
           element('p', { class: 'ytcf-target-empty' }),
-          element('p', { class: 'ytcf-target-status', role: 'status', 'aria-live': 'polite' }),
+          element('p', { class: 'ytcf-target-status', role: 'status' }),
         ]),
       ]))
       panel.appendChild(element('p', { class: 'ytcf-empty' }, ['尚無符合條件的發言。新增目標帳號後開始收集。']))
-      panel.appendChild(element('p', { class: 'ytcf-history-status', role: 'status', hidden: '' }))
+      panel.appendChild(element('p', { class: 'ytcf-history-status', hidden: '' }))
       panel.appendChild(element('div', { class: 'ytcf-list', role: 'log',
         'aria-label': '篩選後的聊天訊息', 'aria-live': 'off' }))
       panel.appendChild(element('button', { class: 'ytcf-latest', type: 'button', hidden: '' }, ['回到最新訊息']))
@@ -2393,23 +2708,26 @@
       }
       const applyRoles = () => state.updateSettings({ ...state.history.settings,
         moderators: moderators.checked, broadcaster: broadcaster.checked, verified: verified.checked })
-      moderators.addEventListener('change', applyRoles)
-      broadcaster.addEventListener('change', applyRoles)
-      verified.addEventListener('change', applyRoles)
+      for (const input of [moderators, broadcaster, verified]) input.addEventListener('change', applyRoles)
       $('.ytcf-users', panel).addEventListener('submit', event => {
         event.preventDefault()
+        const rawInput = users.value.trim()
         const exclude = state.targetMode === 'exclude'
         const key = exclude ? 'excludedUsers' : 'users'
-        const nextSettings = changeTargetUsers(state.history.settings, users.value, false, exclude)
+        const account = normalizeAccount(rawInput)
+        const nextSettings = changeTargetUsers(state.history.settings, rawInput, false, exclude)
         if (!nextSettings) {
           showTargetStatus(state, '請輸入一個頻道 ID、頻道網址或 @帳號。')
           return
         }
+        const rawHandle = displayHandle(rawInput) || extractHandleFromUrl(rawInput)
+        if (account.startsWith('@') && rawHandle) recordTargetProfile({ handle: rawHandle, alias: account }, true)
         const added = nextSettings[key].length - (state.history.settings[key] || []).length
         state.updateSettings(nextSettings, added
           ? exclude ? '已排除帳號。' : '已新增帳號。'
           : '此帳號已在名單中。')
         users.value = ''
+        if (account) resolveTargetIdentity(account, state)
       })
       const setTargetMode = mode => {
         state.targetMode = mode
@@ -2425,6 +2743,7 @@
         targetSettings.hidden = !open
         targetButton.setAttribute('aria-expanded', String(open))
         panel.classList.toggle('ytcf-managing', open)
+        if (open) resolveMissingTargets(state)
       }
       targetButton.addEventListener('click', () => setTargetsOpen(targetSettings.hidden))
       setTargetsOpen(false)
@@ -2550,6 +2869,15 @@
       refreshTimer = setTimeout(() => { refreshTimer = 0; refresh() }, 250)
     }
 
+    const reloadTargetProfiles = () => {
+      targetProfilesLoaded = false
+      targetProfiles.clear()
+      loadTargetProfiles()
+      if (!mounted) return
+      renderTargets(mounted)
+      if (!$('.ytcf-targets', mounted.panel)?.hidden) resolveMissingTargets(mounted)
+    }
+
     const syncSettings = () => {
       pageSettings = null
       const settings = loadSettings()
@@ -2562,6 +2890,7 @@
       $('[name="broadcaster"]', panel).checked = history.settings.broadcaster
       $('[name="verified"]', panel).checked = history.settings.verified
       renderTargets(mounted)
+      if (!$('.ytcf-targets', panel)?.hidden) resolveMissingTargets(mounted)
       captureTree(mounted.scroller, history)
       if (history.enabled) renderMessages(mounted, true)
     }
@@ -2577,7 +2906,8 @@
       yt-live-chat-app > tp-yt-iron-dropdown:not([id]):has(yt-live-chat-toggle-renderer) tp-yt-paper-item { white-space: normal !important; }
       yt-live-chat-app > tp-yt-iron-dropdown:not([id]):has(yt-live-chat-toggle-renderer) .text-wrapper { min-width: 0; }
       yt-live-chat-app > tp-yt-iron-dropdown:not([id]):has(yt-live-chat-toggle-renderer) yt-formatted-string { white-space: normal !important; overflow-wrap: anywhere; }
-      #yt-chat-tweaks-filter-button:focus-visible, #yt-chat-tweaks-sc-button:focus-visible, .ytcf-panel button:focus-visible { outline: 2px solid var(--yt-live-chat-button-default-text-color, #065fd4); outline-offset: -2px; }
+      #yt-chat-tweaks-filter-button:focus-visible, #yt-chat-tweaks-sc-button:focus-visible, .ytcf-panel button:focus-visible, .ytcf-panel input:focus-visible { outline: 2px solid var(--yt-live-chat-button-default-text-color, #065fd4); outline-offset: -2px; }
+      .ytcf-visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
       .ytcf-host { position: relative; }
       .ytcf-active > .ytcf-source { pointer-events: none; isolation: isolate; }
       .ytcf-panel { position: absolute; inset: 0; z-index: 2147483647; display: flex; flex-direction: column; box-sizing: border-box; min-height: 0; max-width: none; max-height: none; margin: 0; padding: 0; border: 0; color: var(--yt-live-chat-primary-text-color, #0f0f0f); background: var(--yt-live-chat-background-color, #fff); font-size: 13px; }
@@ -2585,13 +2915,13 @@
       .ytcf-toolbar { flex: 0 0 auto; padding: 10px; border-bottom: 1px solid var(--yt-live-chat-message-input-border-color, #8884); }
       .ytcf-options { display: flex; align-items: center; gap: 6px; flex-wrap: nowrap; font-size: 12px; }
       .ytcf-roles { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; flex-shrink: 0; margin-bottom: 12px; }
-      .ytcf-roles label { display: flex; align-items: center; gap: 3px; white-space: nowrap; }
+      .ytcf-role { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
       .ytcf-roles input { width: 13px; height: 13px; margin: 0; accent-color: var(--yt-live-chat-button-default-text-color, #065fd4); }
       .ytcf-count { margin-left: auto; flex-shrink: 0; white-space: nowrap; color: var(--yt-live-chat-secondary-text-color, #606060); }
       .ytcf-sc-search { display: block; margin-top: 8px; }
       .ytcf-sc-search input { box-sizing: border-box; width: 100%; min-width: 0; height: 30px; padding: 5px 8px; border: 1px solid var(--yt-live-chat-message-input-border-color, #8886); border-radius: 4px; color: inherit; background: var(--yt-live-chat-background-color, #fff); font: inherit; }
       .ytcf-users { display: flex; align-items: center; gap: 6px; }
-      .ytcf-users label { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; white-space: nowrap; }
+      .ytcf-users label { white-space: nowrap; }
       .ytcf-users input { display: block; box-sizing: border-box; flex: 1; min-width: 0; width: 100%; padding: 5px 8px; border: 1px solid var(--yt-live-chat-message-input-border-color, #8886); border-radius: 4px; color: inherit; background: var(--yt-live-chat-background-color, #fff); font-size: 12px; }
       .ytcf-panel button { padding: 6px 10px; border: 0; border-radius: 4px; color: var(--yt-live-chat-button-default-text-color, #065fd4); background: var(--yt-live-chat-action-panel-background-color, #8882); cursor: pointer; }
       .ytcf-users input, .ytcf-users button[type="submit"] { box-sizing: border-box; height: 30px; font: inherit; }
@@ -2599,8 +2929,13 @@
       .ytcf-users button[type="submit"]:hover { filter: brightness(1.2); }
       .ytcf-empty { padding: 16px 12px; color: var(--yt-live-chat-secondary-text-color, #606060); }
       .ytcf-history-status { margin: 0; padding: 8px 12px; color: var(--yt-live-chat-secondary-text-color, #606060); font-size: 12px; }
+      .ytcf-list, .ytcf-target-list, .ytcf-managing > .ytcf-toolbar { --ytcf-scrollbar-thumb: color-mix(in srgb, var(--yt-live-chat-primary-text-color, #0f0f0f) 42%, transparent); --ytcf-scrollbar-track: transparent; scrollbar-color: var(--ytcf-scrollbar-thumb) var(--ytcf-scrollbar-track); scrollbar-width: auto; overscroll-behavior: contain; }
+      @media (prefers-contrast: more) {
+        .ytcf-list, .ytcf-target-list, .ytcf-managing > .ytcf-toolbar { --ytcf-scrollbar-thumb: var(--yt-live-chat-primary-text-color, #0f0f0f); --ytcf-scrollbar-track: var(--yt-live-chat-background-color, #fff); }
+        #yt-chat-tweaks-filter-button:focus-visible, #yt-chat-tweaks-sc-button:focus-visible, .ytcf-panel button:focus-visible, .ytcf-panel input:focus-visible { outline: 2px solid currentColor; }
+      }
       .ytcf-list { flex: 1; min-height: 0; overflow: auto; overflow-anchor: none; padding: 6px 0; }
-      .ytcf-message { padding: 5px 10px; overflow-wrap: anywhere; line-height: 1.6; content-visibility: auto; contain-intrinsic-size: auto 36px; }
+      .ytcf-message { padding: 5px 10px; overflow-wrap: anywhere; line-height: 1.6; content-visibility: auto; contain-intrinsic-size: auto none auto 36px; }
       .ytcf-message:has(> .ytcf-locate) { position: relative; padding-right: 58px; }
       .ytcf-panel .ytcf-locate { position: absolute; top: 5px; right: 6px; padding: 2px 6px; border: 1px solid currentColor; color: inherit; background: transparent; font: inherit; font-size: 11px; }
       .ytcf-message[data-ytcf-located] { outline: 2px solid #ffb300; outline-offset: -2px; box-shadow: inset 0 0 0 4px #0008; }
@@ -2624,6 +2959,19 @@
         background: var(--yt-live-chat-background-color, #fff);
         background: color-mix(in srgb, var(--yt-live-chat-background-color, #fff) 90%, var(--yt-live-chat-primary-text-color, #0f0f0f));
         font: 13px/1.5 Roboto, Arial, sans-serif;
+        opacity: 1;
+        transition-property: opacity, transform, display, overlay;
+        transition-duration: 0.16s;
+        transition-timing-function: ease-out;
+        transition-behavior: allow-discrete;
+      }
+      @media (prefers-reduced-motion: no-preference) {
+        .ytuc-card { transform: scale(1); }
+        @starting-style { .ytuc-card { opacity: 0; transform: scale(0.96); } }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .ytuc-card { transition-duration: 0.08s; }
+        @starting-style { .ytuc-card { opacity: 0; } }
       }
       .ytuc-card[hidden], .ytuc-card [hidden] { display: none !important; }
       .ytuc-header { display: flex; align-items: flex-start; gap: 12px; padding: 16px 12px; }
@@ -2674,8 +3022,8 @@
       .ytcf-managing > .ytcf-empty, .ytcf-managing > .ytcf-list, .ytcf-managing > .ytcf-latest { display: none !important; }
       .ytcf-options { flex-shrink: 0; }
       .ytcf-panel .ytcf-target-summary { display: inline-flex; align-items: center; gap: 3px; flex-shrink: 0; padding: 0; color: var(--yt-live-chat-button-default-text-color, #065fd4); background: transparent; white-space: nowrap; font: inherit; cursor: pointer; }
-      .ytcf-target-summary::before { content: '▸'; }
-      .ytcf-target-summary[aria-expanded="true"]::before { content: '▾'; }
+      .ytcf-target-summary::before { content: '▸'; content: '▸' / ''; }
+      .ytcf-target-summary[aria-expanded="true"]::before { content: '▾'; content: '▾' / ''; }
       .ytcf-targets { margin-top: 12px; flex: 1; min-height: 0; display: flex; flex-direction: column; }
       .ytcf-targets > :not(.ytcf-target-list) { flex-shrink: 0; }
       .ytcf-target-modes { display: flex; gap: 6px; margin-bottom: 8px; }
@@ -2684,8 +3032,12 @@
       .ytcf-target-search { display: flex; align-items: center; gap: 6px; margin-top: 8px; white-space: nowrap; }
       .ytcf-target-search input { display: block; box-sizing: border-box; flex: 1; min-width: 0; width: 100%; padding: 5px 8px; border: 1px solid var(--yt-live-chat-message-input-border-color, #8886); border-radius: 4px; color: inherit; background: var(--yt-live-chat-background-color, #fff); font-size: 12px; }
       .ytcf-target-list { list-style: none; padding: 0; margin: 6px 0 0; flex: 1; min-height: 40px; overflow-y: auto; }
-      .ytcf-target-list li { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 3px 0; }
-      .ytcf-target-list span { overflow-wrap: anywhere; }
+      .ytcf-target-list li { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--yt-live-chat-message-input-border-color, #8882); }
+      .ytcf-target-info { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
+      .ytcf-target-info span { overflow-wrap: anywhere; }
+      .ytcf-target-name { font-weight: 600; color: var(--yt-live-chat-primary-text-color, #0f0f0f); }
+      .ytcf-target-handle, .ytcf-target-id { font-size: 11px; color: var(--yt-live-chat-secondary-text-color, #606060); }
+      .ytcf-target-id { font-family: ui-monospace, Consolas, monospace; user-select: text; }
       .ytcf-target-list button { flex-shrink: 0; padding: 3px 8px; background: var(--yt-live-chat-action-panel-background-color, #8882); color: inherit; font-size: 11px; }
       .ytcf-target-empty, .ytcf-target-status { margin: 6px 0 0; font-size: 11px; color: var(--yt-live-chat-secondary-text-color, #606060); }
       .ytcf-target-status:empty { display: none; }
@@ -2693,10 +3045,11 @@
     ;(document.head || document.documentElement).appendChild(style)
     window.addEventListener('storage', event => {
       if (event.key === STORAGE_KEY || event.key === null) syncSettings()
+      if (event.key === TARGET_PROFILES_KEY || event.key === null) reloadTargetProfiles()
     })
     window.addEventListener('resize', schedulePanelPosition)
-    document.addEventListener('visibilitychange', handleMessageVisibility)
     document.addEventListener('visibilitychange', () => {
+      handleMessageVisibility()
       if (!document.hidden) pruneHistories()
       else for (const history of histories.values()) flushHistory(history)
     })

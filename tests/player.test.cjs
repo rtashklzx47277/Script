@@ -51,6 +51,9 @@ function boot(file, mode = 'worker', pathname = '/', { trustedTypes = false, set
       else this.children.splice(index, 0, element)
       return element
     }
+    append(...nodes) {
+      for (const node of nodes) this.appendChild(node)
+    }
     cloneNode() {
       const copy = new ElementMock(this.tagName)
       copy.className = this.className
@@ -64,7 +67,10 @@ function boot(file, mode = 'worker', pathname = '/', { trustedTypes = false, set
     matches(selector) {
       return selector.split(',').some(part => {
         part = part.trim()
+        if (part.startsWith('#')) return this.id === part.slice(1)
         if (part.startsWith('.')) return (this.className || '').split(' ').includes(part.slice(1))
+        const tagClass = part.match(/^([a-z0-9-]+)\.([a-z0-9_-]+)$/i)
+        if (tagClass) return tagClass[1] === this.tagName && (this.className || '').split(' ').includes(tagClass[2])
         const tagAttr = part.match(/^([a-z0-9-]+)\[([^\]]+)\]$/i)
         if (tagAttr) return tagAttr[1] === this.tagName && this.hasAttribute(tagAttr[2])
         return part === this.tagName
@@ -83,12 +89,23 @@ function boot(file, mode = 'worker', pathname = '/', { trustedTypes = false, set
       return false
     }
     querySelector(selector) {
-      return this.queries.get(selector) || this.children.find(child => `#${child.id}` === selector ||
-        selector.startsWith('.') && (child.className || '').split(' ').includes(selector.slice(1))) || null
+      if (this.queries.has(selector)) return this.queries.get(selector)
+      if (selector.includes(' > ')) {
+        const [parentSel, childSel] = selector.split(' > ').map(s => s.trim())
+        const parent = this.querySelector(parentSel)
+        return parent ? parent.children.find(child => child.matches(childSel)) || null : null
+      }
+      for (const child of this.children) {
+        if (child.matches(selector)) return child
+        const deep = child.querySelector(selector)
+        if (deep) return deep
+      }
+      return null
     }
     querySelectorAll(selector) { return this.queries.get(selector) || [] }
     getBoundingClientRect() { return this.rect }
     setAttribute(name, value) { this.attributes.set(name, value) }
+    getAttribute(name) { return this.attributes.get(name) ?? null }
     removeAttribute(name) { this.attributes.delete(name) }
     hasAttribute(name) { return this.attributes.has(name) }
     addEventListener(name, callback) {
@@ -1257,4 +1274,102 @@ test('Twitch: body MutationObserver ignores chat subtree churn without querying 
   assert.equal(env.timers.size, 1)
   for (const timer of [...env.timers.values()]) timer.fn()
   assert.ok(playerQueries >= 1)
+})
+
+test('Tooltips WCAG 1.4.13 (Twitch & YouTube): role=tooltip, aria-describedby, hover grace bridge, Escape and blur dismissal', async () => {
+  // 1. Twitch tooltip semantics, hover bridge, Escape, and blur
+  const tw = boot(scripts[1], 'worker', '/example')
+  const player = new tw.Element()
+  player.rect = { left: 0, top: 0, right: 400, bottom: 300, width: 400, height: 300 }
+  const controls = new tw.Element()
+  const slot = controls.appendChild(new tw.Element())
+  const wrapper = slot.appendChild(new tw.Element())
+  const theater = wrapper.appendChild(new tw.Element('button'))
+  player.queries.set(
+    'button[data-a-target="player-theatre-mode-button"], button[aria-label^="劇院模式"], button[aria-label^="Theater Mode"]',
+    [theater],
+  )
+  tw.api.ensurePlayerState(player)
+  tw.api.ensureScreenshotButtons(player)
+  const twBtn = controls.children[0].children[0].children[0]
+  const twTooltip = player.children.find(child => child.className === 'twitch-player-tweaks-tooltip')
+  assert.equal(twTooltip.getAttribute('role'), 'tooltip')
+  assert.ok(twTooltip.id)
+
+  twBtn.dispatchEvent({ type: 'mouseenter' })
+  assert.equal(twTooltip.dataset.visible, 'true')
+  assert.equal(twBtn.getAttribute('aria-describedby'), twTooltip.id)
+
+  // Moving pointer from button onto tooltip cancels hide grace period; leaving tooltip hides after 100ms
+  twBtn.dispatchEvent({ type: 'mouseleave' })
+  twTooltip.dispatchEvent({ type: 'mouseenter' })
+  tw.flush(100)
+  assert.equal(twTooltip.dataset.visible, 'true')
+  assert.equal(twBtn.getAttribute('aria-describedby'), twTooltip.id)
+
+  twTooltip.dispatchEvent({ type: 'mouseleave' })
+  tw.flush(100)
+  assert.equal(twTooltip.dataset.visible, 'false')
+  assert.equal(twBtn.getAttribute('aria-describedby'), null)
+
+  // Escape dismisses visible tooltip immediately
+  twBtn.dispatchEvent({ type: 'focus' })
+  assert.equal(twTooltip.dataset.visible, 'true')
+  tw.emit('keydown', { key: 'Escape' })
+  assert.equal(twTooltip.dataset.visible, 'false')
+  assert.equal(twBtn.getAttribute('aria-describedby'), null)
+
+  // Blur dismisses immediately without waiting for hover grace
+  twBtn.dispatchEvent({ type: 'focus' })
+  assert.equal(twTooltip.dataset.visible, 'true')
+  twBtn.dispatchEvent({ type: 'blur' })
+  assert.equal(twTooltip.dataset.visible, 'false')
+  assert.equal(twBtn.getAttribute('aria-describedby'), null)
+
+  // 2. YouTube tooltip semantics, no aria-hidden wrapper, hover bridge, Escape, and blur
+  const yt = boot(scripts[0], 'worker', '/watch')
+  const moviePlayer = new yt.Element()
+  moviePlayer.className = 'html5-video-player'
+  moviePlayer.rect = { left: 0, top: 0, right: 640, bottom: 360, width: 640, height: 360 }
+  moviePlayer.appendChild(new yt.Element()).className = 'html5-video-container'
+  moviePlayer.appendChild(new yt.Element('video'))
+  moviePlayer.appendChild(new yt.Element()).className = 'ytp-progress-bar'
+  const buttonGroup = moviePlayer.appendChild(new yt.Element())
+  const sizeBtn = buttonGroup.appendChild(new yt.Element('button'))
+  sizeBtn.className = 'ytp-size-button'
+  yt.selectors.set('#movie_player', moviePlayer)
+  yt.emit('yt-navigate-finish', {})
+  for (let i = 0; i < 5; i++) await Promise.resolve()
+
+  const photoBtn = buttonGroup.children.find(child => (child.className || '').includes('ytp-photo-button'))
+  const ytTooltip = moviePlayer.querySelector('#yt-player-tweaks-tooltip')
+  assert.ok(photoBtn && ytTooltip)
+  assert.equal(ytTooltip.getAttribute('role'), 'tooltip')
+  assert.equal(ytTooltip.querySelector('.ytp-tooltip-text-wrapper').getAttribute('aria-hidden'), null)
+
+  photoBtn.dispatchEvent({ type: 'mouseenter', currentTarget: photoBtn })
+  assert.equal(ytTooltip.dataset.visible, 'true')
+  assert.equal(photoBtn.getAttribute('aria-describedby'), ytTooltip.id)
+
+  photoBtn.dispatchEvent({ type: 'mouseleave' })
+  ytTooltip.dispatchEvent({ type: 'mouseenter' })
+  yt.flush(100)
+  assert.equal(ytTooltip.dataset.visible, 'true')
+
+  ytTooltip.dispatchEvent({ type: 'mouseleave' })
+  yt.flush(100)
+  assert.equal(ytTooltip.dataset.visible, 'false')
+  assert.equal(photoBtn.getAttribute('aria-describedby'), null)
+
+  photoBtn.dispatchEvent({ type: 'focus', currentTarget: photoBtn })
+  assert.equal(ytTooltip.dataset.visible, 'true')
+  yt.emit('keydown', { key: 'Escape', target: photoBtn })
+  assert.equal(ytTooltip.dataset.visible, 'false')
+  assert.equal(photoBtn.getAttribute('aria-describedby'), null)
+
+  photoBtn.dispatchEvent({ type: 'focus', currentTarget: photoBtn })
+  assert.equal(ytTooltip.dataset.visible, 'true')
+  photoBtn.dispatchEvent({ type: 'blur' })
+  assert.equal(ytTooltip.dataset.visible, 'false')
+  assert.equal(photoBtn.getAttribute('aria-describedby'), null)
 })

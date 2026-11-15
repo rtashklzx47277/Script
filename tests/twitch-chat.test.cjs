@@ -4,7 +4,7 @@ const fs = require('node:fs')
 const vm = require('node:vm')
 const path = require('node:path')
 
-function boot({ saved, blocked = false, trustedTypes = false, withResizeObserver = false, database, now } = {}) {
+function boot({ saved, blocked = false, trustedTypes = false, withResizeObserver = false, database, now, scheduler, performance } = {}) {
   class Element {
     constructor(tag = 'div') {
       this.tagName = tag
@@ -12,6 +12,7 @@ function boot({ saved, blocked = false, trustedTypes = false, withResizeObserver
       this.children = []
       this.attrs = new Map()
       this.listeners = new Map()
+      this.listenerCounts = new Map()
       this.style = {}
       this._textContent = ''
       this._innerHTML = ''
@@ -72,7 +73,10 @@ function boot({ saved, blocked = false, trustedTypes = false, withResizeObserver
     set textContent(value) { this._textContent = String(value); this.replaceChildren() }
     get childNodes() { return [...(this._textContent ? [{ nodeType: 3, textContent: this._textContent }] : []), ...this.children] }
     get firstChild() { return this.children[0] }
-    addEventListener(name, fn) { this.listeners.set(name, fn) }
+    addEventListener(name, fn) {
+      this.listenerCounts.set(name, (this.listenerCounts.get(name) || 0) + 1)
+      this.listeners.set(name, fn)
+    }
     setAttribute(name, value) { this.attrs.set(name, value); if (name === 'class') this.className = value }
     getAttribute(name) { return this.attrs.get(name) || null }
     removeAttribute(name) { this.attrs.delete(name) }
@@ -80,6 +84,7 @@ function boot({ saved, blocked = false, trustedTypes = false, withResizeObserver
       return selector.split(',').some(part => {
         part = part.trim()
         if (part === '*') return true
+        if (part.startsWith('#')) return this.id === part.slice(1) || this.getAttribute('id') === part.slice(1)
         if (part.startsWith('.')) return (this.className || '').split(' ').includes(part.slice(1))
         const attr = part.match(/^\[([^=]+)="([^"]+)"\]$/)
         if (attr) return this.getAttribute(attr[1]) === attr[2]
@@ -148,6 +153,8 @@ function boot({ saved, blocked = false, trustedTypes = false, withResizeObserver
   const context = {
     document, location: { pathname: '/sample_channel', href: 'https://www.twitch.tv/sample_channel' }, console, URL,
     indexedDB: database,
+    ...(scheduler ? { scheduler } : {}),
+    ...(performance ? { performance } : {}),
     Date: now ? class extends Date { static now() { return now() } } : Date,
     window: { addEventListener(name, fn) { listeners.set(name, fn) } },
     setTimeout(fn, delay) { const id = ++nextTimer; timers.set(id, { fn, delay }); return id },
@@ -866,4 +873,126 @@ test('Twitch following: late emote resize, load and visibility keep live bottom 
   assert.equal(state.list.scrollTop, 900)
   assert.equal(state.latest.hidden, true)
   env.api.unmount()
+})
+
+test('Twitch accessibility, visibilitychange merge, and restoreHistory 50ms scheduler/timer yield', async () => {
+  const database = fakeIndexedDB()
+  let nowTime = 1_000_000
+  const seed = boot({ database, now: () => nowTime })
+  const seedHistory = seed.api.getHistory('sample_channel')
+  await seedHistory.restorePromise
+  for (let i = 0; i < 4; i++) {
+    seed.api.captureLine(seed.message('mod_a', `line-${i}`, 'moderator', `t-${i}`).line, seedHistory)
+  }
+  await seed.api.flushHistory(seedHistory)
+
+  // Scheduler.yield branch + panel markup & single visibilitychange handler
+  let nowA = 0
+  let yields = 0
+  const envA = boot({
+    database,
+    now: () => nowTime,
+    performance: { now: () => (nowA += 30) },
+    scheduler: { yield: async () => { yields++ } },
+  })
+  assert.equal(envA.document.listenerCounts.get('visibilitychange'), 1)
+
+  const stream = envA.document.body.appendChild(new envA.Element('div'))
+  stream.className = 'stream-chat'
+  const header = stream.appendChild(new envA.Element('div'))
+  header.className = 'stream-chat-header'
+  const host = stream.appendChild(new envA.Element('div'))
+  const scroller = host.appendChild(new envA.Element('div'))
+  scroller.setAttribute('data-a-target', 'chat-scroller')
+  envA.api.refresh()
+  const state = envA.api.mounted
+  const panel = state.panel
+
+  for (const [labelText, inputId] of [
+    ['Broadcaster', 'ttc-role-broadcaster'],
+    ['Moderator', 'ttc-role-moderators'],
+    ['VIP', 'ttc-role-vip'],
+    ['新增帳號', 'ttc-input-users'],
+    ['搜尋帳號', 'ttc-input-search-users'],
+  ]) {
+    const label = panel.querySelectorAll('label').find(node => node.textContent === labelText)
+    assert.ok(label, `missing label ${labelText}`)
+    assert.equal(label.getAttribute('for'), inputId)
+    assert.equal(panel.querySelector(`#${inputId}`)?.tagName, 'input')
+  }
+  assert.equal(panel.querySelectorAll('search').length, 1)
+  for (const name of ['users', 'search-users']) {
+    const input = panel.querySelector(`[name="${name}"]`)
+    assert.equal(input.getAttribute('autocorrect'), 'off')
+    assert.equal(input.getAttribute('autocapitalize'), 'none')
+  }
+  assert.equal(panel.querySelector('.ttc-mode-include').getAttribute('aria-label'), null)
+  assert.equal(panel.querySelector('.ttc-mode-exclude').getAttribute('aria-label'), null)
+  const statusEl = panel.querySelector('.ttc-history-status')
+  assert.equal(statusEl.getAttribute('role'), null)
+
+  await state.history.restorePromise
+  assert.ok(yields > 0, 'Twitch restoreHistory should yield via scheduler.yield past 50ms')
+  assert.equal(state.history.messages.length, 4)
+
+  // Single visibilitychange handler both prunes expired history and updates panel messages
+  envA.api.setEnabled(state, true)
+  envA.flushFrames()
+  nowTime += 7 * 24 * 60 * 60 * 1000 + 1000
+  envA.document.hidden = false
+  envA.document.listeners.get('visibilitychange')()
+  assert.equal(state.history.messages.length, 0)
+
+  // setTimeout(0) fallback branch when scheduler is absent + error-only role="status"
+  const envB = boot({
+    database,
+    now: () => 1_000_000,
+    performance: { now: () => (nowA += 30) },
+  })
+  const stB = envB.document.body.appendChild(new envB.Element('div'))
+  stB.className = 'stream-chat'
+  const hB = stB.appendChild(new envB.Element('div'))
+  hB.className = 'stream-chat-header'
+  const hostB = stB.appendChild(new envB.Element('div'))
+  const scB = hostB.appendChild(new envB.Element('div'))
+  scB.setAttribute('data-a-target', 'chat-scroller')
+  // Seed fresh non-expired messages for envB
+  const seedB = boot({ database, now: () => 1_000_000 })
+  const shB = seedB.api.getHistory('sample_channel')
+  await shB.restorePromise
+  for (let i = 0; i < 4; i++) {
+    seedB.api.captureLine(seedB.message('mod_a', `b-${i}`, 'moderator', `tb-${i}`).line, shB)
+  }
+  await seedB.api.flushHistory(shB)
+
+  envB.api.refresh()
+  let fallbackTimers = 0
+  for (let step = 0; step < 20; step++) {
+    await new Promise(resolve => setTimeout(resolve, 5))
+    const zeroTimers = [...envB.timers.entries()].filter(([, timer]) => timer.delay === 0)
+    if (!zeroTimers.length) {
+      if (fallbackTimers > 0) break
+      continue
+    }
+    for (const [id, timer] of zeroTimers) {
+      envB.timers.delete(id)
+      fallbackTimers++
+      timer.fn()
+    }
+  }
+  await envB.api.mounted.history.restorePromise
+  assert.ok(fallbackTimers > 0, 'Twitch restoreHistory should fall back to setTimeout(0)')
+  assert.equal(envB.api.mounted.history.messages.length, 4)
+
+  const envErr = boot({ database: { open() { throw new Error('IDB blocked') } } })
+  const stErr = envErr.document.body.appendChild(new envErr.Element('div'))
+  stErr.className = 'stream-chat'
+  const hErr = stErr.appendChild(new envErr.Element('div'))
+  hErr.className = 'stream-chat-header'
+  const hostErr = stErr.appendChild(new envErr.Element('div'))
+  const scErr = hostErr.appendChild(new envErr.Element('div'))
+  scErr.setAttribute('data-a-target', 'chat-scroller')
+  envErr.api.refresh()
+  await envErr.api.mounted.history.restorePromise
+  assert.equal(envErr.api.mounted.panel.querySelector('.ttc-history-status').getAttribute('role'), 'status')
 })

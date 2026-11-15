@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Player Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.2.19
+// @version     0.2.20
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubePlayerTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubePlayerTweaks.user.js
 // @description 提供 YouTube 原解析度 PNG 截圖、滾輪音量與速度調整、直播追平，並擴大直播回看範圍。
@@ -228,6 +228,8 @@
   let tooltipText
   let tooltipKey
   let tooltipFrame = 0
+  let tooltipHideTimer = 0
+  let tooltipButton = null
   let liveBtn
   let floatingBarTimer = 0
   let persistentFloatingBarText = ''
@@ -315,6 +317,7 @@
 
     #yt-player-tweaks-tooltip[data-visible="true"] {
       display: block;
+      pointer-events: auto;
     }
 
     #yt-player-tweaks-tooltip[data-has-key="false"]
@@ -396,6 +399,8 @@
     floatingBar.style.display = 'none'
   }
 
+  const TOOLTIP_HOVER_GRACE = 100
+
   const getTooltip = () => {
     let element = $('#yt-player-tweaks-tooltip')
 
@@ -403,12 +408,12 @@
       element = document.createElement('div')
       element.id = 'yt-player-tweaks-tooltip'
       element.className = 'ytp-tooltip ytp-bottom'
+      element.setAttribute('role', 'tooltip')
       element.dataset.visible = 'false'
       element.dataset.hasKey = 'false'
 
       const wrapper = document.createElement('div')
       wrapper.className = 'ytp-tooltip-text-wrapper'
-      wrapper.setAttribute('aria-hidden', 'true')
 
       const bottomText = document.createElement('div')
       bottomText.className = 'ytp-tooltip-bottom-text'
@@ -457,6 +462,14 @@
   }
 
   const showTooltip = (button, text, key = '') => {
+    clearTimeout(tooltipHideTimer)
+    tooltipHideTimer = 0
+    if (tooltipButton && tooltipButton !== button) {
+      tooltipButton.removeAttribute?.('aria-describedby')
+    }
+    tooltipButton = button
+    if (tooltip?.id) button?.setAttribute?.('aria-describedby', tooltip.id)
+
     tooltipText.textContent = text
     tooltipKey.textContent = key
     tooltip.dataset.hasKey = String(Boolean(key))
@@ -471,11 +484,25 @@
   }
 
   const hideTooltip = () => {
+    clearTimeout(tooltipHideTimer)
+    tooltipHideTimer = 0
     if (tooltipFrame) {
       cancelAnimationFrame(tooltipFrame)
       tooltipFrame = 0
     }
-    tooltip.dataset.visible = 'false'
+    if (tooltipButton) {
+      tooltipButton.removeAttribute?.('aria-describedby')
+      tooltipButton = null
+    }
+    if (tooltip) tooltip.dataset.visible = 'false'
+  }
+
+  const scheduleHideTooltip = () => {
+    clearTimeout(tooltipHideTimer)
+    tooltipHideTimer = setTimeout(() => {
+      tooltipHideTimer = 0
+      hideTooltip()
+    }, TOOLTIP_HOVER_GRACE)
   }
 
   const stopScreenshotWorker = (error, disable = false) => {
@@ -1059,37 +1086,24 @@
     return { liveBtn, photoBtn, speedBtn }
   }
 
+  const bindTooltipEvents = (button, getLabel, shortcut, signal) => {
+    const show = (event) => showTooltip(event.currentTarget, getLabel(), shortcut)
+    button.addEventListener('mouseenter', show, { signal })
+    button.addEventListener('mouseleave', scheduleHideTooltip, { signal })
+    button.addEventListener('focus', show, { signal })
+    button.addEventListener('blur', hideTooltip, { signal })
+  }
+
   const bindButtonEvents = ({ liveBtn, photoBtn, speedBtn }, signal) => {
     liveBtn.addEventListener('click', toggleLiveCatchup, { signal })
-    liveBtn.addEventListener('mouseenter', (event) => {
-      showTooltip(event.currentTarget, getLiveTooltipText())
-    }, { signal })
-    liveBtn.addEventListener('mouseleave', hideTooltip, { signal })
-    liveBtn.addEventListener('focus', (event) => {
-      showTooltip(event.currentTarget, getLiveTooltipText())
-    }, { signal })
-    liveBtn.addEventListener('blur', hideTooltip, { signal })
+    bindTooltipEvents(liveBtn, getLiveTooltipText, '', signal)
 
     photoBtn.addEventListener('click', screenShot, { signal })
-    photoBtn.addEventListener('mouseenter', (event) => {
-      showTooltip(event.currentTarget, '截圖', 'S')
-    }, { signal })
-    photoBtn.addEventListener('mouseleave', hideTooltip, { signal })
-    photoBtn.addEventListener('focus', (event) => {
-      showTooltip(event.currentTarget, '截圖', 'S')
-    }, { signal })
-    photoBtn.addEventListener('blur', hideTooltip, { signal })
+    bindTooltipEvents(photoBtn, () => '截圖', 'S', signal)
 
     speedBtn.addEventListener('click', resetSpeed, { signal })
     speedBtn.addEventListener('wheel', changeSpeed, { passive: false, signal })
-    speedBtn.addEventListener('mouseenter', (event) => {
-      showTooltip(event.currentTarget, '播放速度')
-    }, { signal })
-    speedBtn.addEventListener('mouseleave', hideTooltip, { signal })
-    speedBtn.addEventListener('focus', (event) => {
-      showTooltip(event.currentTarget, '播放速度')
-    }, { signal })
-    speedBtn.addEventListener('blur', hideTooltip, { signal })
+    bindTooltipEvents(speedBtn, () => '播放速度', '', signal)
 
     videoPlayer.addEventListener('loadedmetadata', updateLiveButtonVisibility, { signal })
     videoPlayer.addEventListener('playing', updateLiveButtonVisibility, { signal })
@@ -1312,6 +1326,10 @@
   }
 
   const handleKeydown = (event) => {
+    if (event.key === 'Escape' && tooltip?.dataset?.visible === 'true') {
+      hideTooltip()
+      return
+    }
     if (
       event.key?.toLowerCase() === SCREENSHOT_KEY &&
       !event.altKey &&
@@ -1394,6 +1412,11 @@
 
     floatingBar = getFloatingBar()
     tooltip = getTooltip()
+    tooltip.addEventListener('mouseenter', () => {
+      clearTimeout(tooltipHideTimer)
+      tooltipHideTimer = 0
+    }, { signal })
+    tooltip.addEventListener('mouseleave', scheduleHideTooltip, { signal })
 
     if (volumeGainEnabled || volumeAudioContext) ensureVolumeGain()
 

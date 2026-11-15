@@ -137,8 +137,37 @@
     if (key === 'INNERTUBE_CONTEXT') return { client: { clientVersion: 'fixture', hl: 'zh-TW', gl: 'TW' } }
   } }
   const originalFetch = window.fetch
+  const fixtureHandleIds = new Map([
+    ['@alice', 'UCAbCdEfGhIjKlMnOpQrStUv'],
+    ['@donor', 'UCabcdefghijklmnopqrstuv'],
+    ['@mod_account', 'UCZYXWVUTSRQPONMLKJIHGFE'],
+    ['@fixture_channel', 'UC1234567890123456789012'],
+    ['@verylongaccounthandleforsinglelinelayout', 'UCAbCdEfGhIjKlMnOpQrStUv'],
+  ])
   window.fetch = (url, options) => {
-    if (!String(url).startsWith('/youtubei/v1/browse')) return originalFetch(url, options)
+    const endpoint = String(url)
+    const isBrowse = endpoint.startsWith('/youtubei/v1/browse')
+    const isResolve = endpoint.startsWith('/youtubei/v1/navigation/resolve_url')
+    if (!isBrowse && !isResolve) return originalFetch(url, options)
+    if (isResolve) {
+      let resolvedId = ''
+      let resolvedHandle = ''
+      try {
+        const rawUrl = JSON.parse(options.body).url || ''
+        const handleMatch = decodeURIComponent(rawUrl).match(/\/(@[A-Za-z0-9._-]+)$/)
+        if (handleMatch) {
+          resolvedHandle = handleMatch[1]
+          resolvedId = fixtureHandleIds.get(resolvedHandle.toLowerCase()) || ''
+        }
+      } catch (_) {}
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => fixtureParams.has('failProfile') ? reject(new Error('fixture offline'))
+          : resolve(new Response(JSON.stringify(resolvedId ? { endpoint: { browseEndpoint: {
+            browseId: resolvedId, canonicalBaseUrl: `/${resolvedHandle}`,
+          } } } : {}), { headers: { 'Content-Type': 'application/json' } })), +fixtureParams.get('profileDelay') || 200)
+        options.signal.addEventListener('abort', () => { clearTimeout(timer); reject(new Error('fixture aborted')) }, { once: true })
+      })
+    }
     countRequest('profiles')
     const id = JSON.parse(options.body).browseId
     let profile = id === 'UCAbCdEfGhIjKlMnOpQrStUv' ? ['Alice 的頻道', '@alice']

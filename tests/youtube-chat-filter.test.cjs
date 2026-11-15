@@ -4,7 +4,8 @@ const fs = require('node:fs')
 const vm = require('node:vm')
 const path = require('node:path')
 
-function boot({ saved, blocked = false, trustedTypes = false, parentWindow, fetchProfile, nativeMenu, database, now, withResizeObserver = false } = {}) {
+function boot({ saved, savedProfiles, storage: customStorage, blocked = false, trustedTypes = false,
+  parentWindow, fetchProfile, nativeMenu, database, now, withResizeObserver = false, scheduler, performance } = {}) {
   const profileCalls = []
   const menuCalls = []
   class Element {
@@ -14,6 +15,7 @@ function boot({ saved, blocked = false, trustedTypes = false, parentWindow, fetc
       this.children = []
       this.parentElement = null
       this.attrs = new Map()
+      this.dataset = {}
       this.style = {}
       this.textContent = ''
       this._innerHTML = ''
@@ -141,7 +143,10 @@ function boot({ saved, blocked = false, trustedTypes = false, parentWindow, fetc
   document.createElementNS = (_, tag) => new Element(tag)
   document.createElement = tag => new Element(tag)
   document.createTextNode = text => Object.assign(new Element('#text'), { textContent: text })
-  const storage = new Map(saved ? [['youtube-live-chat-tweaks-settings-v1', saved]] : [])
+  const storage = customStorage || new Map([
+    ...(saved ? [['youtube-live-chat-tweaks-settings-v1', saved]] : []),
+    ...(savedProfiles ? [['youtube-live-chat-tweaks-target-profiles-v1', savedProfiles]] : []),
+  ])
   const listeners = new Map()
   const timers = new Map()
   const frames = new Map()
@@ -149,6 +154,8 @@ function boot({ saved, blocked = false, trustedTypes = false, parentWindow, fetc
   const context = {
     document, location: { pathname: '/live_chat', href: 'https://www.youtube.com/live_chat?v=sample_video', origin: 'https://www.youtube.com' }, console, URL,
     indexedDB: database,
+    ...(scheduler ? { scheduler } : {}),
+    ...(performance ? { performance } : {}),
     Date: now ? class extends Date { static now() { return now() } } : Date,
     window: { parent: parentWindow, addEventListener(name, fn) {
       const previous = listeners.get(name)
@@ -182,11 +189,12 @@ function boot({ saved, blocked = false, trustedTypes = false, parentWindow, fetc
   }
   vm.createContext(context)
   vm.runInContext(source.replace('    // End YouTube chat filtering.', `
-    globalThis.api = { normalizeAccount, getChannel, getHistory, loadSettings, saveSettings,
+    globalThis.api = { TARGET_PROFILES_KEY, normalizeAccount, getChannel, getHistory, loadSettings, saveSettings,
       readMessage, matchesFilter, captureLine, captureTree, captureMutations, renderMessages, changeTargetUsers,
       scheduleMessageRender, releaseMessageViews, handleMessageVisibility,
-      archiveTree, restoreTree, archiveRecord, restoreRecord, flushHistory, pruneHistories, pruneArchive,
+      archiveTree, restoreTree, archiveRecord, restoreRecord, restoreHistory, flushHistory, pruneHistories, pruneArchive,
       applySupportAuthor, resolveSupportAuthor, locateSupportRecord,
+      resolveHandle, resolveTargetIdentity, resolveMissingTargets, getTargetMetadata, renderTargets, createPanel,
       refresh, unmount, refreshHeader, setEnabled, showTargetStatus, guardMessageMenu, guardMenuDismissal,
       getProfile, showAuthorCard, authorSnapshot, dismissCard, getAuthorCard, setPanelLayer, positionFilterPanel, fitCardText,
       setMounted: state => { mounted = state },
@@ -2199,4 +2207,288 @@ test('YouTube chat sanitization: strips unsafe avatar and badge URLs, encodes ca
   const restored = reloaded.api.getHistory('channel:@lru1')
   await restored.restorePromise
   assert.ok(restored.ids.has('lru-evict-sc'))
+})
+
+test('YouTube target list: displays name, @handle, and UCID, persists metadata, searches all fields, and supports URL/@handle/UCID input', async () => {
+  const sharedStorage = new Map()
+  const fetchByProfile = url => {
+    const endpoint = String(url)
+    return (_, options) => {
+      const body = JSON.parse(options.body)
+      if (endpoint.includes('navigation/resolve_url')) {
+        if (body.url === 'https://www.youtube.com/@bob') {
+          return Promise.resolve({ ok: true, json: async () => ({
+            endpoint: { browseEndpoint: { browseId: 'UC1111111111111111111111', canonicalBaseUrl: '/@BobReal' } },
+          }) })
+        }
+        return Promise.resolve({ ok: true, json: async () => ({}) })
+      }
+      if (endpoint.includes('browse')) {
+        const profilesById = {
+          UCAbCdEfGhIjKlMnOpQrStUv: { title: 'Alice 的頻道', vanityChannelUrl: 'https://www.youtube.com/@AliceOfficial' },
+          UC1111111111111111111111: { title: 'Bob Channel', vanityChannelUrl: 'https://www.youtube.com/@BobReal' },
+        }
+        const entry = profilesById[body.browseId]
+        return Promise.resolve(entry ? { ok: true, json: async () => ({
+          metadata: { channelMetadataRenderer: { externalId: body.browseId, ...entry } },
+        }) } : { ok: false })
+      }
+      return Promise.resolve({ ok: false })
+    }
+  }
+  const env = boot({
+    storage: sharedStorage,
+    fetchProfile: (url, options) => fetchByProfile(url)(url, options),
+  })
+  const { document, Element, api } = env
+  assert.equal(api.normalizeAccount('https://www.youtube.com/@AliceOfficial'), '@aliceofficial')
+  assert.equal(api.normalizeAccount('https://www.youtube.com/channel/UCAbCdEfGhIjKlMnOpQrStUv'), 'UCAbCdEfGhIjKlMnOpQrStUv')
+
+  const header = document.body.appendChild(new Element('yt-live-chat-header-renderer'))
+  header.appendChild(new Element('button')).id = 'live-chat-header-context-menu'
+  const scroller = document.body.appendChild(new Element('div')).appendChild(new Element('div'))
+  scroller.id = 'item-scroller'
+  scroller.appendChild(new Element('div')).id = 'items'
+  api.refresh()
+  const state = api.mounted
+
+  const usersInput = state.panel.querySelector('[name="users"]')
+  const form = state.panel.querySelector('.ytcf-users')
+  usersInput.value = 'UCAbCdEfGhIjKlMnOpQrStUv'
+  form.listeners.get('submit')({ preventDefault() {} })
+  await new Promise(resolve => setTimeout(resolve, 10))
+
+  usersInput.value = 'https://www.youtube.com/@bob'
+  form.listeners.get('submit')({ preventDefault() {} })
+  await new Promise(resolve => setTimeout(resolve, 10))
+
+  const rows = state.panel.querySelector('.ytcf-target-list').querySelectorAll('li')
+  assert.equal(rows.length, 2)
+  const bobRow = rows.find(row => row.dataset.targetUser === '@bob')
+  const aliceRow = rows.find(row => row.dataset.targetUser === 'UCAbCdEfGhIjKlMnOpQrStUv')
+  assert.ok(aliceRow && bobRow)
+  assert.equal(aliceRow.querySelector('.ytcf-target-name').textContent, 'Alice 的頻道')
+  assert.equal(aliceRow.querySelector('.ytcf-target-handle').textContent, '@AliceOfficial')
+  assert.equal(aliceRow.querySelector('.ytcf-target-id').textContent, 'UCAbCdEfGhIjKlMnOpQrStUv')
+  assert.equal(bobRow.querySelector('.ytcf-target-name').textContent, 'Bob Channel')
+  assert.equal(bobRow.querySelector('.ytcf-target-handle').textContent, '@BobReal')
+  assert.equal(bobRow.querySelector('.ytcf-target-id').textContent, 'UC1111111111111111111111')
+
+  const storedProfiles = JSON.parse(sharedStorage.get(api.TARGET_PROFILES_KEY))
+  assert.equal(storedProfiles.UCAbCdEfGhIjKlMnOpQrStUv.name, 'Alice 的頻道')
+  assert.equal(storedProfiles['@bob'].channelId, 'UC1111111111111111111111')
+  const flatSettings = JSON.parse(sharedStorage.get('youtube-live-chat-tweaks-settings-v1'))
+  assert.deepEqual(flatSettings.users, ['UCAbCdEfGhIjKlMnOpQrStUv', '@bob'])
+
+  // Reload in another session: cached metadata renders all three fields without network requests.
+  const reloaded = boot({
+    storage: sharedStorage,
+    fetchProfile: () => { throw new Error('Cached target metadata should not refetch') },
+  })
+  const rHeader = reloaded.document.body.appendChild(new reloaded.Element('yt-live-chat-header-renderer'))
+  rHeader.appendChild(new reloaded.Element('button')).id = 'live-chat-header-context-menu'
+  const rScroller = reloaded.document.body.appendChild(new reloaded.Element('div')).appendChild(new reloaded.Element('div'))
+  rScroller.id = 'item-scroller'
+  rScroller.appendChild(new reloaded.Element('div')).id = 'items'
+  reloaded.api.refresh()
+  const rState = reloaded.api.mounted
+  rState.panel.querySelector('.ytcf-target-summary').listeners.get('click')()
+  const rRows = rState.panel.querySelector('.ytcf-target-list').querySelectorAll('li')
+  assert.equal(rRows.length, 2)
+  assert.equal(rRows.find(r => r.dataset.targetUser === '@bob').querySelector('.ytcf-target-id').textContent, 'UC1111111111111111111111')
+
+  // Search filters across channel name, @handle, and UCID.
+  const searchInput = rState.panel.querySelector('[name="search-users"]')
+  for (const [query, expectedUser] of [
+    ['Bob Chan', '@bob'],
+    ['@AliceOfficial', 'UCAbCdEfGhIjKlMnOpQrStUv'],
+    ['UC1111111111', '@bob'],
+  ]) {
+    searchInput.value = query
+    searchInput.listeners.get('input')()
+    const filtered = rState.panel.querySelector('.ytcf-target-list').querySelectorAll('li')
+    assert.equal(filtered.length, 1)
+    assert.equal(filtered[0].dataset.targetUser, expectedUser)
+  }
+  searchInput.value = ''
+  searchInput.listeners.get('input')()
+  rState.panel.querySelector('.ytcf-target-list').querySelectorAll('li')
+    .find(r => r.dataset.targetUser === 'UCAbCdEfGhIjKlMnOpQrStUv')
+    .querySelector('button').listeners.get('click')()
+  const remaining = rState.panel.querySelector('.ytcf-target-list').querySelectorAll('li')
+  assert.equal(remaining.length, 1)
+  assert.equal(remaining[0].dataset.targetUser, '@bob')
+})
+
+test('YouTube target list: notes live/archived message metadata passively and displays offline fallbacks cleanly', async () => {
+  const database = fakeIndexedDB()
+  const seed = boot({ database })
+  seed.location.href = 'https://www.youtube.com/watch?v=passive_vid'
+  seed.api.getChannel()
+  const seedHistory = seed.api.getHistory('channel:@passive_room')
+  await seedHistory.restorePromise
+  const archivedMsg = seed.message('@ArchivedHandle', 'old message', '', 'archived-passive-1')
+  archivedMsg.line.data = { authorExternalChannelId: 'UC3333333333333333333333', authorName: { simpleText: '@ArchivedHandle' } }
+  seedHistory.settings.users = ['@archivedhandle']
+  assert.equal(seed.api.captureLine(archivedMsg.line, seedHistory), true)
+  await seed.api.flushHistory(seedHistory)
+  seedHistory.messages[0].profileName = '已存檔頻道'
+  seedHistory.messages[0].profileHandle = '@ArchivedHandle'
+  // Persist enriched archived record directly into IndexedDB.
+  const db = await new Promise((resolve, reject) => {
+    const req = database.open('youtube-live-chat-tweaks-archive-v1', 1)
+    req.onsuccess = () => resolve(req.result)
+    req.onerror = () => reject(req.error)
+  })
+  const tx = db.transaction('messages', 'readwrite')
+  tx.objectStore('messages').put({
+    ...seed.api.archiveRecord(seedHistory, seedHistory.messages[0]),
+    profileName: '已存檔頻道',
+    profileHandle: '@ArchivedHandle',
+  })
+  await new Promise(resolve => { tx.oncomplete = resolve })
+
+  const env = boot({
+    database,
+    saved: JSON.stringify({ users: ['UC2222222222222222222222', '@archivedhandle', '@offline_handle', 'UC9999999999999999999999'] }),
+    fetchProfile: () => Promise.resolve({ ok: false }),
+  })
+  const header = env.document.body.appendChild(new env.Element('yt-live-chat-header-renderer'))
+  header.appendChild(new env.Element('button')).id = 'live-chat-header-context-menu'
+  const scroller = env.document.body.appendChild(new env.Element('div')).appendChild(new env.Element('div'))
+  scroller.id = 'item-scroller'
+  scroller.appendChild(new env.Element('div')).id = 'items'
+  env.location.href = 'https://www.youtube.com/watch?v=passive_vid'
+  const owner = env.document.body.appendChild(new env.Element('div'))
+  owner.id = 'owner'
+  const ownerLink = owner.appendChild(new env.Element('a'))
+  ownerLink.setAttribute('href', '/@passive_room')
+
+  env.api.refresh()
+  const state = env.api.mounted
+  await state.history.restorePromise
+
+  // Live message supplies channel name for a UCID target without extra network lookups.
+  const callsBeforeLive = env.profileCalls.length
+  const liveMsg = env.message('現場頻道名稱', 'live hi', '', 'live-passive-1')
+  liveMsg.line.data = { authorExternalChannelId: 'UC2222222222222222222222', authorName: { simpleText: '現場頻道名稱' } }
+  assert.equal(env.api.captureLine(liveMsg.line, state.history), true)
+  assert.equal(env.profileCalls.length, callsBeforeLive)
+
+  await Promise.allSettled(env.api.resolveMissingTargets(state))
+  env.api.renderTargets(state)
+  const rows = state.panel.querySelector('.ytcf-target-list').querySelectorAll('li')
+  const byUser = new Map(rows.map(r => [r.dataset.targetUser, r]))
+
+  assert.equal(byUser.get('UC2222222222222222222222').querySelector('.ytcf-target-name').textContent, '現場頻道名稱')
+  assert.equal(byUser.get('UC2222222222222222222222').querySelector('.ytcf-target-handle').textContent, '@帳號未取得')
+  assert.equal(byUser.get('UC2222222222222222222222').querySelector('.ytcf-target-id').textContent, 'UC2222222222222222222222')
+
+  assert.equal(byUser.get('@archivedhandle').querySelector('.ytcf-target-name').textContent, '已存檔頻道')
+  assert.equal(byUser.get('@archivedhandle').querySelector('.ytcf-target-handle').textContent, '@ArchivedHandle')
+  assert.equal(byUser.get('@archivedhandle').querySelector('.ytcf-target-id').textContent, 'UC3333333333333333333333')
+
+  assert.equal(byUser.get('@offline_handle').querySelector('.ytcf-target-name').textContent, '名稱未取得')
+  assert.equal(byUser.get('@offline_handle').querySelector('.ytcf-target-handle').textContent, '@offline_handle')
+  assert.equal(byUser.get('@offline_handle').querySelector('.ytcf-target-id').textContent, 'UCID 未取得')
+
+  assert.equal(byUser.get('UC9999999999999999999999').querySelector('.ytcf-target-name').textContent, '名稱未取得')
+  assert.equal(byUser.get('UC9999999999999999999999').querySelector('.ytcf-target-handle').textContent, '@帳號未取得')
+  assert.equal(byUser.get('UC9999999999999999999999').querySelector('.ytcf-target-id').textContent, 'UC9999999999999999999999')
+})
+
+test('YouTube panel accessibility and restoreHistory yielding: explicit labels, search landmarks, error-only status role, and 50ms scheduler/timer yield', async () => {
+  const database = fakeIndexedDB()
+  const seed = boot({ database })
+  seed.location.href = 'https://www.youtube.com/watch?v=yield_vid'
+  const seedHistory = seed.api.getHistory(seed.api.getChannel())
+  await seedHistory.restorePromise
+  seedHistory.settings.users = ['@u']
+  for (let i = 0; i < 4; i++) {
+    const msg = seed.message('@u', `msg-${i}`, '', `y-${i}`)
+    seed.api.captureLine(msg.line, seedHistory)
+  }
+  await seed.api.flushHistory(seedHistory)
+
+  // Branch A: uses scheduler.yield when budget exceeded
+  let nowA = 0
+  let schedulerYields = 0
+  const envA = boot({
+    database,
+    performance: { now: () => (nowA += 30) },
+    scheduler: { yield: async () => { schedulerYields++ } },
+  })
+  const hA = envA.document.body.appendChild(new envA.Element('yt-live-chat-header-renderer'))
+  hA.appendChild(new envA.Element('button')).id = 'live-chat-header-context-menu'
+  const sA = envA.document.body.appendChild(new envA.Element('div')).appendChild(new envA.Element('div'))
+  sA.id = 'item-scroller'
+  sA.appendChild(new envA.Element('div')).id = 'items'
+  envA.location.href = 'https://www.youtube.com/watch?v=yield_vid'
+  envA.api.refresh()
+  const panel = envA.api.mounted.panel
+
+  // Verify forms/landmarks & error-only role="status"
+  for (const [labelText, inputId] of [
+    ['Broadcaster', 'ytcf-role-broadcaster'],
+    ['Moderator', 'ytcf-role-moderators'],
+    ['Verified', 'ytcf-role-verified'],
+    ['新增帳號', 'ytcf-input-users'],
+    ['搜尋帳號', 'ytcf-input-search-users'],
+    ['搜尋 SC／會員紀錄', 'ytcf-input-search-support'],
+  ]) {
+    const label = panel.querySelectorAll('label').find(node => node.textContent === labelText)
+    assert.ok(label, `missing label ${labelText}`)
+    assert.equal(label.getAttribute('for'), inputId)
+    assert.equal(panel.querySelector(`#${inputId}`)?.tagName, 'input')
+  }
+  assert.equal(panel.querySelectorAll('search').length, 2)
+  const historyStatus = panel.querySelector('.ytcf-history-status')
+  assert.equal(historyStatus.getAttribute('role'), null)
+
+  await envA.api.mounted.history.restorePromise
+  assert.ok(schedulerYields > 0, 'restoreHistory should yield via scheduler.yield past 50ms')
+  assert.equal(envA.api.mounted.history.messages.length, 4)
+
+  // Branch B: falls back to setTimeout(0) when scheduler is absent, and sets role="status" on IndexedDB error
+  let nowB = 0
+  const envB = boot({
+    database,
+    performance: { now: () => (nowB += 30) },
+  })
+  const hB = envB.document.body.appendChild(new envB.Element('yt-live-chat-header-renderer'))
+  hB.appendChild(new envB.Element('button')).id = 'live-chat-header-context-menu'
+  const sB = envB.document.body.appendChild(new envB.Element('div')).appendChild(new envB.Element('div'))
+  sB.id = 'item-scroller'
+  sB.appendChild(new envB.Element('div')).id = 'items'
+  envB.location.href = 'https://www.youtube.com/watch?v=yield_vid'
+  envB.api.refresh()
+  let flushedFallbacks = 0
+  for (let step = 0; step < 20; step++) {
+    await new Promise(resolve => setTimeout(resolve, 5))
+    const zeroTimers = [...envB.timers.entries()].filter(([, timer]) => timer.delay === 0)
+    if (!zeroTimers.length) {
+      if (flushedFallbacks > 0) break
+      continue
+    }
+    for (const [id, timer] of zeroTimers) {
+      envB.timers.delete(id)
+      flushedFallbacks++
+      timer.fn()
+    }
+  }
+  await envB.api.mounted.history.restorePromise
+  assert.ok(flushedFallbacks > 0, 'restoreHistory should fall back to setTimeout(0)')
+  assert.equal(envB.api.mounted.history.messages.length, 4)
+
+  const envErr = boot({
+    database: { open() { throw new Error('IDB blocked') } },
+  })
+  const hErr = envErr.document.body.appendChild(new envErr.Element('yt-live-chat-header-renderer'))
+  hErr.appendChild(new envErr.Element('button')).id = 'live-chat-header-context-menu'
+  const sErr = envErr.document.body.appendChild(new envErr.Element('div')).appendChild(new envErr.Element('div'))
+  sErr.id = 'item-scroller'
+  sErr.appendChild(new envErr.Element('div')).id = 'items'
+  envErr.api.refresh()
+  await envErr.api.mounted.history.restorePromise
+  assert.equal(envErr.api.mounted.panel.querySelector('.ytcf-history-status').getAttribute('role'), 'status')
 })

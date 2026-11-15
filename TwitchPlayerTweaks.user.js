@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        Twitch Player Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.3.5
+// @version     0.3.6
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchPlayerTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchPlayerTweaks.user.js
 // @description 提供 Twitch 原解析度 PNG 截圖、滾輪音量與音量增益，隱藏剪輯按鈕及互動擴充。
@@ -138,6 +138,7 @@
 
     .twitch-player-tweaks-tooltip[data-visible="true"] {
       display: inline-block;
+      pointer-events: auto;
     }
   `)
 
@@ -165,14 +166,24 @@
     return bar
   }
 
+  const TOOLTIP_HOVER_GRACE = 100
+  let nextTooltipId = 0
+  let openTooltipPlayer = null
+  let tooltipDismissBound = false
+
   const getTooltip = (player) => {
     let tooltip = $('.twitch-player-tweaks-tooltip', player)
 
     if (!tooltip) {
       tooltip = document.createElement('div')
+      tooltip.id = `twitch-player-tweaks-tooltip-${++nextTooltipId}`
       tooltip.className = 'twitch-player-tweaks-tooltip'
+      tooltip.setAttribute('role', 'tooltip')
       tooltip.dataset.visible = 'false'
       player.appendChild(tooltip)
+    } else if (!tooltip.id) {
+      tooltip.id = `twitch-player-tweaks-tooltip-${++nextTooltipId}`
+      tooltip.setAttribute('role', 'tooltip')
     }
 
     return tooltip
@@ -182,12 +193,23 @@
     let state = playerStates.get(player)
 
     if (!state) {
+      const tooltip = getTooltip(player)
       state = {
         volumeBar: getVolumeBar(player),
         volumeBarTimer: 0,
-        tooltip: getTooltip(player),
+        tooltip,
         tooltipFrame: 0,
+        tooltipHideTimer: 0,
+        tooltipButton: null,
       }
+
+      tooltip.addEventListener('mouseenter', () => {
+        clearTimeout(state.tooltipHideTimer)
+        state.tooltipHideTimer = 0
+      })
+      tooltip.addEventListener('mouseleave', () => {
+        scheduleHideTooltip(player)
+      })
 
       player.addEventListener(
         'wheel',
@@ -371,9 +393,32 @@
     showVolumeBar(player, nextVolume)
   }
 
+  const bindTooltipDismiss = () => {
+    if (tooltipDismissBound) return
+    tooltipDismissBound = true
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' && openTooltipPlayer) {
+        hideTooltip(openTooltipPlayer)
+      }
+    })
+  }
+
   const showTooltip = (player, button, text) => {
     const state = ensurePlayerState(player)
+    clearTimeout(state.tooltipHideTimer)
+    state.tooltipHideTimer = 0
     if (state.tooltipFrame) cancelAnimationFrame(state.tooltipFrame)
+    if (openTooltipPlayer && openTooltipPlayer !== player) {
+      hideTooltip(openTooltipPlayer)
+    }
+
+    if (state.tooltipButton && state.tooltipButton !== button) {
+      state.tooltipButton.removeAttribute?.('aria-describedby')
+    }
+    state.tooltipButton = button
+    if (state.tooltip.id) button.setAttribute?.('aria-describedby', state.tooltip.id)
+    openTooltipPlayer = player
+    bindTooltipDismiss()
 
     state.tooltip.textContent = text
     state.tooltip.dataset.visible = 'true'
@@ -401,11 +446,27 @@
 
   const hideTooltip = (player) => {
     const state = ensurePlayerState(player)
+    clearTimeout(state.tooltipHideTimer)
+    state.tooltipHideTimer = 0
     if (state.tooltipFrame) {
       cancelAnimationFrame(state.tooltipFrame)
       state.tooltipFrame = 0
     }
     state.tooltip.dataset.visible = 'false'
+    if (state.tooltipButton) {
+      state.tooltipButton.removeAttribute?.('aria-describedby')
+      state.tooltipButton = null
+    }
+    if (openTooltipPlayer === player) openTooltipPlayer = null
+  }
+
+  const scheduleHideTooltip = (player) => {
+    const state = ensurePlayerState(player)
+    clearTimeout(state.tooltipHideTimer)
+    state.tooltipHideTimer = setTimeout(() => {
+      state.tooltipHideTimer = 0
+      hideTooltip(player)
+    }, TOOLTIP_HOVER_GRACE)
   }
 
   const getScreenshotFileName = () => {
@@ -671,7 +732,7 @@
       showTooltip(player, button, '截圖')
     })
     button.addEventListener('mouseleave', () => {
-      hideTooltip(player)
+      scheduleHideTooltip(player)
     })
     button.addEventListener('focus', () => {
       showTooltip(player, button, '截圖')
@@ -736,7 +797,7 @@
     }
   }
 
-  // ponytail: throttle to ~4/s instead of per-frame, and let the cheap,
+  // Throttle to ~4/s instead of per-frame, and let the cheap,
   // idempotent refresh() do the selector matching once — rather than running a
   // deep querySelector on every added node during Twitch's constant DOM churn.
   const REFRESH_INTERVAL = 250

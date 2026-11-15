@@ -98,6 +98,12 @@ function createBrowser() {
   window.getSelection = () => null
   window.innerWidth = 1920
   window.innerHeight = 1080
+  let rootClientWidth
+  Object.defineProperty(document.documentElement, 'clientWidth', {
+    get() { return rootClientWidth ?? window.innerWidth },
+    set(value) { rootClientWidth = value },
+    configurable: true,
+  })
   window.scrollY = 0
   window.scrollTo = () => {}
 
@@ -123,6 +129,9 @@ function createBrowser() {
     selectors, timeouts, intervals, frames, observers, Element, document, window,
     run(filename) {
       vm.runInContext(fs.readFileSync(path.join(__dirname, '..', filename), 'utf8'), context, { filename })
+    },
+    runSource(source, filename = 'inline.user.js') {
+      vm.runInContext(source, context, { filename })
     },
     event(type, properties = {}) { return Object.assign(new Event(type), properties) },
     navigate(url) {
@@ -577,11 +586,39 @@ test('clock: clamps negative elapsed seconds and tolerates malformed navigation 
   assert.equal(browser.selectors.get('#yt-live-clock-elapsed').textContent, '0:00')
 })
 
-test('layout: stacked mode avoids 100vw, emits one resize on enter, and skips auto-theater in fullscreen', async () => {
+test('clock: archived streams format absolute dates via cached Intl.DateTimeFormat presets', async () => {
+  const twoDigit = (n) => String(n).padStart(2, '0')
+  const expectedDate = new Date(Date.parse('2026-09-25T00:00:00Z') + 123 * 1000)
+  const y = expectedDate.getFullYear()
+  const m = twoDigit(expectedDate.getMonth() + 1)
+  const d = twoDigit(expectedDate.getDate())
+  const t = `${twoDigit(expectedDate.getHours())}:${twoDigit(expectedDate.getMinutes())}:${twoDigit(expectedDate.getSeconds())}`
+  const weekdayShort = new Intl.DateTimeFormat('en-US', { weekday: 'short' }).format(expectedDate)
+  const weekdayLong = new Intl.DateTimeFormat('en-US', { weekday: 'long' }).format(expectedDate)
+  const monthLong = new Intl.DateTimeFormat('en-US', { month: 'long' }).format(expectedDate)
+
+  const clockSource = fs.readFileSync(path.join(__dirname, '..', 'YouTubeLiveClock.user.js'), 'utf8')
+  const expectedByFormat = [
+    [1, `(${y}/${m}/${d} ${t})`],
+    [4, `(${weekdayShort} ${d}/${m}/${y} ${t})`],
+    [6, `(${weekdayLong} ${d} ${monthLong} ${y} ${t})`],
+  ]
+  for (const [format, expected] of expectedByFormat) {
+    const browser = createBrowser()
+    addClockChrome(browser, 123)
+    addMicroformat(browser, 'example', true)
+    browser.runSource(clockSource.replace('const FORMAT = 1', `const FORMAT = ${format}`), `YouTubeLiveClock-format-${format}.user.js`)
+    await settle()
+    assert.equal(browser.selectors.get('#yt-live-clock-absolute').textContent, expected)
+  }
+})
+
+test('layout: stacked mode avoids 100vw, derives viewport width from clientWidth without dummy elements, and skips auto-theater in fullscreen', async () => {
   const browser = createBrowser()
-  const { flexy, sizeButton } = addLayoutChrome(browser, true)
+  const { flexy } = addLayoutChrome(browser, true)
   flexy.theater = true
   browser.window.innerWidth = 1000
+  browser.document.documentElement.clientWidth = 985
   let resizeCount = 0
   browser.window.addEventListener('resize', () => { resizeCount++ })
   browser.run('YouTubeLiveLayout.user.js')
@@ -589,11 +626,21 @@ test('layout: stacked mode avoids 100vw, emits one resize on enter, and skips au
   browser.flushFrames()
   const stackedStyle = browser.selectors.get('#yt-chat-theater').textContent
   assert.equal(stackedStyle.includes('100vw'), false)
+  assert.equal(browser.document.body.children.length, 0)
   assert.equal(
-    browser.document.documentElement.style.getPropertyValue('--yt-live-layout-scrollbar-width'),
-    '15px',
+    browser.document.documentElement.style.getPropertyValue('--yt-live-layout-viewport-width'),
+    '985px',
   )
   assert.equal(resizeCount, 1)
+
+  browser.document.documentElement.clientWidth = 1000
+  browser.window.dispatchEvent(browser.event('resize'))
+  browser.flushFrames()
+  assert.equal(
+    browser.document.documentElement.style.getPropertyValue('--yt-live-layout-viewport-width'),
+    '1000px',
+  )
+  assert.equal(resizeCount, 2)
 
   const fsBrowser = createBrowser()
   const fs = addLayoutChrome(fsBrowser, true)

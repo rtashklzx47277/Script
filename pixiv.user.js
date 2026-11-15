@@ -1,6 +1,7 @@
 // ==UserScript==
 // @name          Pixiv Jump Directly
-// @version       0.2.4
+// @namespace     https://tampermonkey.net/
+// @version       0.2.5
 // @updateURL     https://raw.githubusercontent.com/rtashklzx47277/Script/main/pixiv.user.js
 // @downloadURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/pixiv.user.js
 // @description   略過 Pixiv 外部連結跳轉頁，直接前往原始 HTTP／HTTPS 目標網址。

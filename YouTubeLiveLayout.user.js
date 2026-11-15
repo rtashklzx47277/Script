@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Live Layout
 // @namespace   https://tampermonkey.net/
-// @version     0.2.12
+// @version     0.2.13
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveLayout.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveLayout.user.js
 // @description 調整 YouTube 劇院模式：無聊天室時填滿視窗，有聊天室時依可用寬度切換左右或上下排列。
@@ -17,8 +17,8 @@
 
   const PRIMARY_RATIO = 0.75
   const SECONDARY_RATIO = 1 - PRIMARY_RATIO
-  const PRIMARY_WIDTH = `${PRIMARY_RATIO * 100}vw`
-  const SECONDARY_WIDTH = `${SECONDARY_RATIO * 100}vw`
+  const PRIMARY_WIDTH = `calc(var(--yt-live-layout-viewport-width, 100%) * ${PRIMARY_RATIO})`
+  const SECONDARY_WIDTH = `calc(var(--yt-live-layout-viewport-width, 100%) * ${SECONDARY_RATIO})`
   const MIN_SIDE_CHAT_WIDTH = 400
   const MAX_STACKED_VIEWPORT_RATIO = 0.75
   const FALLBACK_ASPECT_RATIO = 16 / 9
@@ -39,39 +39,15 @@
   let autoTheaterTimer = 0
   let currentLayout = ''
   let lastChatTheaterPlayerHeight = ''
-  let lastScrollbarWidth = ''
+  let lastViewportWidth = ''
   let layoutSyncFrame = 0
   let pendingWaitCancel = null
-  let scrollbarWidth = -1
-  let scrollbarDirty = true
-  let cachedDpr = NaN
 
-  const measureScrollbarWidth = () => {
-    const dpr = window.devicePixelRatio
-    if (!scrollbarDirty && scrollbarWidth >= 0 && cachedDpr === dpr) {
-      return scrollbarWidth
-    }
-
-    const root = document.documentElement || document.body
-    if (!root) return Math.max(0, scrollbarWidth)
-
-    const dummy = document.createElement('div')
-    dummy.style.overflowY = 'scroll'
-    dummy.style.width = '100px'
-    dummy.style.height = '100px'
-    dummy.style.position = 'absolute'
-    dummy.style.top = '-9999px'
-
-    root.appendChild(dummy)
-
-    const width = Math.max(0, dummy.offsetWidth - dummy.clientWidth)
-    dummy.remove()
-
-    scrollbarWidth = width
-    cachedDpr = dpr
-    scrollbarDirty = false
-
-    return width
+  const getViewportWidth = () => {
+    const clientWidth = document.documentElement?.clientWidth
+    return Number.isFinite(clientWidth) && clientWidth > 0
+      ? clientWidth
+      : window.innerWidth
   }
 
   const theaterFillCSS = `
@@ -127,12 +103,12 @@
     #chat {
       position: fixed !important;
       top: 0 !important;
-      right: auto !important;
+      right: 0 !important;
       bottom: auto !important;
       left: ${PRIMARY_WIDTH} !important;
-      width: calc(${SECONDARY_WIDTH} - var(--yt-live-layout-scrollbar-width, 0px)) !important;
-      min-width: calc(${SECONDARY_WIDTH} - var(--yt-live-layout-scrollbar-width, 0px)) !important;
-      max-width: calc(${SECONDARY_WIDTH} - var(--yt-live-layout-scrollbar-width, 0px)) !important;
+      width: ${SECONDARY_WIDTH} !important;
+      min-width: ${SECONDARY_WIDTH} !important;
+      max-width: ${SECONDARY_WIDTH} !important;
       height: 100vh !important;
       min-height: 100vh !important;
     }
@@ -363,25 +339,32 @@
   // Display scaling can make a maximized viewport look narrow in CSS pixels.
   // Edge split screen keeps the full screen width while shrinking each pane.
   const shouldStackChat = () =>
-    window.innerWidth * SECONDARY_RATIO - measureScrollbarWidth() <
-      MIN_SIDE_CHAT_WIDTH &&
+    getViewportWidth() * SECONDARY_RATIO < MIN_SIDE_CHAT_WIDTH &&
     window.innerWidth < screen.availWidth * MAX_STACKED_VIEWPORT_RATIO
 
   const updateChatTheaterMetrics = (stackChat) => {
-    const sbWidth = measureScrollbarWidth()
-    const nextScrollbarWidth = `${sbWidth}px`
-    const width = window.innerWidth * (stackChat ? 1 : PRIMARY_RATIO)
+    const viewportWidth = getViewportWidth()
+    const width = viewportWidth * (stackChat ? 1 : PRIMARY_RATIO)
     const height = Math.min(
       window.innerHeight,
       width / getVideoAspectRatio()
     )
 
+    const nextViewportWidth = `${viewportWidth}px`
     const nextHeight = `${height}px`
+    const widthChanged = nextViewportWidth !== lastViewportWidth
     const heightChanged = nextHeight !== lastChatTheaterPlayerHeight
-    const scrollbarChanged = nextScrollbarWidth !== lastScrollbarWidth
 
-    if (!heightChanged && !scrollbarChanged) {
+    if (!widthChanged && !heightChanged) {
       return false
+    }
+
+    if (widthChanged) {
+      lastViewportWidth = nextViewportWidth
+      document.documentElement.style.setProperty(
+        '--yt-live-layout-viewport-width',
+        nextViewportWidth
+      )
     }
 
     if (heightChanged) {
@@ -392,26 +375,18 @@
       )
     }
 
-    if (scrollbarChanged) {
-      lastScrollbarWidth = nextScrollbarWidth
-      document.documentElement.style.setProperty(
-        '--yt-live-layout-scrollbar-width',
-        nextScrollbarWidth
-      )
-    }
-
     return true
   }
 
   const clearChatTheaterMetrics = () => {
     lastChatTheaterPlayerHeight = ''
-    lastScrollbarWidth = ''
+    lastViewportWidth = ''
 
     document.documentElement.style.removeProperty(
       '--yt-live-layout-player-height'
     )
     document.documentElement.style.removeProperty(
-      '--yt-live-layout-scrollbar-width'
+      '--yt-live-layout-viewport-width'
     )
   }
 
@@ -519,34 +494,36 @@
     })
   }
 
-  const applyLayout = (layout) => {
-    if (currentLayout === layout) return
+  const applyLayout = (layout, forceResize = false) => {
+    if (currentLayout !== layout) {
+      currentLayout = layout
 
-    currentLayout = layout
+      removeStyle('yt-theater-fill')
+      removeStyle('yt-chat-theater')
+      removeStyle('yt-video-only-fullscreen')
 
-    removeStyle('yt-theater-fill')
-    removeStyle('yt-chat-theater')
-    removeStyle('yt-video-only-fullscreen')
+      if (layout === 'theater-fill') {
+        setStyle('yt-theater-fill', theaterFillCSS)
+      }
 
-    if (layout === 'theater-fill') {
-      setStyle('yt-theater-fill', theaterFillCSS)
-    }
+      if (layout === 'chat-theater') {
+        setStyle('yt-chat-theater', chatTheaterCSS)
+        window.scrollTo({ left: 0, top: window.scrollY })
+      }
 
-    if (layout === 'chat-theater') {
-      setStyle('yt-chat-theater', chatTheaterCSS)
-      window.scrollTo({ left: 0, top: window.scrollY })
-    }
+      if (layout === 'chat-theater-stacked') {
+        setStyle(
+          'yt-chat-theater',
+          `${chatTheaterCSS}\n${stackedChatTheaterCSS}`
+        )
+        window.scrollTo({ left: 0, top: window.scrollY })
+      }
 
-    if (layout === 'chat-theater-stacked') {
-      setStyle(
-        'yt-chat-theater',
-        `${chatTheaterCSS}\n${stackedChatTheaterCSS}`
-      )
-      window.scrollTo({ left: 0, top: window.scrollY })
-    }
-
-    if (layout === 'fullscreen') {
-      setStyle('yt-video-only-fullscreen', fullscreenCSS)
+      if (layout === 'fullscreen') {
+        setStyle('yt-video-only-fullscreen', fullscreenCSS)
+      }
+    } else if (!forceResize) {
+      return
     }
 
     dispatchResize()
@@ -567,14 +544,8 @@
     if (hasVisibleChat() && watchFlexy.theater) {
       const stackChat = shouldStackChat()
       const layout = stackChat ? 'chat-theater-stacked' : 'chat-theater'
-      const prevLayout = currentLayout
       const metricsChanged = updateChatTheaterMetrics(stackChat)
-      applyLayout(layout)
-
-      if (metricsChanged && prevLayout === layout) {
-        dispatchResize()
-      }
-
+      applyLayout(layout, metricsChanged)
       return
     }
 
@@ -602,7 +573,7 @@
     const playerObserver = new MutationObserver(queueLayoutSync)
     const monitoredVideo = video
 
-    // ponytail: drop the childList firehose (fired on every comment/related-video
+    // Drop the childList firehose (fired on every comment/related-video
     // DOM change). Layout only reacts to the theater/collapsed attributes; subtree
     // stays so `collapsed` on the deep #chat element is still covered.
     observer.observe(watchFlexy, {
@@ -625,16 +596,11 @@
     // syncLayout as a catch-all for every missed trigger.
     const heartbeat = setInterval(queueLayoutSync, 1000)
 
-    const onResize = () => {
-      scrollbarDirty = true
-      queueLayoutSync()
-    }
-
     const onLoadedMetadata = queueLayoutSync
     const onPlaybackState = queueLayoutSync
 
     document.addEventListener('fullscreenchange', queueLayoutSync)
-    window.addEventListener('resize', onResize)
+    window.addEventListener('resize', queueLayoutSync)
     monitoredVideo.addEventListener('loadedmetadata', onLoadedMetadata)
     monitoredVideo.addEventListener('play', onPlaybackState)
     monitoredVideo.addEventListener('ended', onPlaybackState)
@@ -644,7 +610,7 @@
       playerObserver.disconnect()
       clearInterval(heartbeat)
       document.removeEventListener('fullscreenchange', queueLayoutSync)
-      window.removeEventListener('resize', onResize)
+      window.removeEventListener('resize', queueLayoutSync)
       monitoredVideo.removeEventListener('loadedmetadata', onLoadedMetadata)
       monitoredVideo.removeEventListener('play', onPlaybackState)
       monitoredVideo.removeEventListener('ended', onPlaybackState)

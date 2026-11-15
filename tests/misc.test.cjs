@@ -52,3 +52,35 @@ test('Pixiv: prefers location.replace when available', () => {
   assert.equal(replaced, 'https://example.test/page')
   assert.equal(location.href, 'unchanged')
 })
+
+function collectRepoTextFiles(dir = repoRoot) {
+  const results = []
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name === '.git' || entry.name === 'Script-Private' || entry.name === 'node_modules') continue
+    const fullPath = path.join(dir, entry.name)
+    if (entry.isDirectory()) results.push(...collectRepoTextFiles(fullPath))
+    else if (/\.(js|cjs|html|md)$|^\.(gitattributes|gitignore)$/.test(entry.name)) results.push(fullPath)
+  }
+  return results
+}
+
+test('Repo hygiene: userscripts declare @namespace, no ponytail comments remain, README matches behavior, and files use LF', () => {
+  const files = collectRepoTextFiles()
+  const userscripts = files.filter(file => file.endsWith('.user.js'))
+  assert.ok(userscripts.length >= 10)
+  for (const script of userscripts) {
+    const content = fs.readFileSync(script, 'utf8')
+    assert.match(content, /^\/\/ @namespace\s+https:\/\/tampermonkey\.net\/$/m, path.basename(script))
+  }
+
+  for (const file of files) {
+    const content = fs.readFileSync(file, 'utf8')
+    assert.equal(content.includes('\r\n'), false, `expected LF-only line endings in ${path.relative(repoRoot, file)}`)
+    if (file.endsWith('.user.js') || file.endsWith('.cjs') || file.endsWith('.html')) {
+      assert.equal(content.includes('pony' + 'tail:'), false, `unexpected comment tag in ${path.relative(repoRoot, file)}`)
+    }
+  }
+
+  const readme = readScript('README.md')
+  assert.equal(readme.includes('超級貼圖' + '尚未納入紀錄'), false)
+})
