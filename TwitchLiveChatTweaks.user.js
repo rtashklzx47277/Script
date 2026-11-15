@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name        Twitch Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.7.0
+// @version     0.7.1
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
-// @description 依頻道主、管理員與帳號包含／排除名單篩選 Twitch 聊天，支援頻道／全域設定、7 天紀錄與自動跟隨。
+// @description 依頻道主、管理員、VIP 與帳號包含／排除名單篩選 Twitch 聊天，支援頻道／全域設定、7 天紀錄與自動跟隨。
 // @author      Derek
 // @match       *://www.twitch.tv/*
 // @run-at      document-idle
@@ -28,6 +28,7 @@
   let messageOrder = 0
   let anonymousMessage = 0
   const MODERATOR_BADGE = '3267646d-33f0-4b17-b3df-f923a41db1d0'
+  const VIP_BADGE = 'b817aba4-fad8-49e2-b88a-7cc744dfa6ec'
   const histories = new Map()
   let globalTargets = { users: [], excludedUsers: [] }
   let mounted = null
@@ -69,18 +70,19 @@
       return {
         moderators: saved?.moderators !== false,
         broadcaster: saved?.broadcaster !== false,
+        vip: saved?.vip !== false,
         users: normalizeUsers(Array.isArray(saved?.users) ? saved.users.join(' ') : ''),
         excludedUsers: normalizeUsers(Array.isArray(saved?.excludedUsers) ? saved.excludedUsers.join(' ') : ''),
         globalUsers: globalTargets.users, globalExcludedUsers: globalTargets.excludedUsers,
       }
     } catch (_) {
-      return { moderators: true, broadcaster: true, users: [], excludedUsers: [],
+      return { moderators: true, broadcaster: true, vip: true, users: [], excludedUsers: [],
         globalUsers: globalTargets.users, globalExcludedUsers: globalTargets.excludedUsers }
     }
   }
 
   const saveSettings = (history, global = false) => {
-    const { moderators, broadcaster, users, excludedUsers = [], globalUsers = [], globalExcludedUsers = [] } = history.settings
+    const { moderators, broadcaster, vip, users, excludedUsers = [], globalUsers = [], globalExcludedUsers = [] } = history.settings
     if (global) {
       globalTargets = { users: globalUsers, excludedUsers: globalExcludedUsers }
       for (const item of histories.values()) Object.assign(item.settings, { globalUsers, globalExcludedUsers })
@@ -88,7 +90,7 @@
     try {
       const saved = readSavedSettings()
       if (global) saved['@global'] = globalTargets
-      else saved[history.channel] = { moderators, broadcaster, users, excludedUsers }
+      else saved[history.channel] = { moderators, broadcaster, vip, users, excludedUsers }
       localStorage.setItem(STORAGE_KEY, JSON.stringify(saved))
       return true
     } catch (_) { return false }
@@ -202,7 +204,7 @@
   const archiveRecord = (history, record) => ({
     scope: history.scope, storageId: record.storageId, id: record.id, user: record.user,
     createdAt: record.createdAt, order: record.order, expiresAt: record.createdAt + RETENTION_MS,
-    moderator: record.moderator, broadcaster: record.broadcaster,
+    moderator: record.moderator, broadcaster: record.broadcaster, vip: record.vip,
     fingerprint: record.fingerprint, tree: archiveTree(record.view),
   })
   const validArchiveRecord = (saved, scope) => saved && saved.scope === scope &&
@@ -217,7 +219,7 @@
     view.className = 'ttc-message'
     return { id: saved.id, storageId: saved.storageId, user: saved.user, createdAt: saved.createdAt,
       order: Number.isSafeInteger(saved.order) ? saved.order : 0,
-      moderator: saved.moderator === true, broadcaster: saved.broadcaster === true,
+      moderator: saved.moderator === true, broadcaster: saved.broadcaster === true, vip: saved.vip === true,
       fingerprint: saved.fingerprint, view, retained: true }
   }
   const updateArchiveStatus = history => {
@@ -399,14 +401,20 @@
       /^(moderator|管理員|モデレーター)$/i.test(badge.getAttribute('alt') || ''))
     const broadcaster = user === channel || badges.some(badge =>
       /^(broadcaster|實況主|頻道主|配信者)$/i.test(badge.getAttribute('alt') || ''))
-    return { user, moderator, broadcaster, author, body, badges,
+    const vip = badges.some(badge =>
+      (badge.getAttribute('src') || '').includes(VIP_BADGE) ||
+      (badge.getAttribute('srcset') || '').includes(VIP_BADGE) ||
+      /^(vip|vip\s*(?:徽章|バッジ))$/i.test((badge.getAttribute('alt') || '').trim()))
+    return { user, moderator, broadcaster, vip, author, body, badges,
       id: line.getAttribute('data-id') || line.getAttribute('data-message-id') || line.id || '' }
   }
 
   const matchesFilter = (message, settings) =>
-    !(settings.excludedUsers || []).includes(message.user) && !(settings.globalExcludedUsers || []).includes(message.user) && (
+    !(settings.excludedUsers || []).includes(message.user) && !(settings.globalExcludedUsers || []).includes(message.user) && Boolean(
       (settings.moderators && message.moderator) ||
-      (settings.broadcaster && message.broadcaster) || settings.users.includes(message.user) || (settings.globalUsers || []).includes(message.user)
+      (settings.broadcaster && message.broadcaster) ||
+      (settings.vip && message.vip) ||
+      settings.users.includes(message.user) || (settings.globalUsers || []).includes(message.user)
     )
 
   const makeMessageView = (message) => {
@@ -446,12 +454,13 @@
   const captureLine = (line, history) => {
     const message = readMessage(line, history.channel)
     if (!message) return false
-    // Keep both roles even when unchecked so turning a role back on restores its history.
-    if (!message.moderator && !message.broadcaster && !history.settings.users.includes(message.user) &&
-      !(history.settings.globalUsers || []).includes(message.user)) return false
-    const fingerprint = `${message.user}\n${message.moderator}\n${message.broadcaster}\n${message.author.textContent}\n${message.body.innerHTML}`
     const previous = message.id ? history.ids.get(message.id) : history.nodes.get(line)
     const archived = message.id ? history.older.get(message.id) : null
+    // Keep all roles even when unchecked so turning a role back on restores its history.
+    if (!(previous?.retained && previous.user === message.user) && !message.moderator && !message.broadcaster &&
+      !message.vip && !history.settings.users.includes(message.user) &&
+      !(history.settings.globalUsers || []).includes(message.user)) return false
+    const fingerprint = `${message.user}\n${message.moderator}\n${message.broadcaster}\n${message.vip}\n${message.author.textContent}\n${message.body.innerHTML}`
     if (previous?.fingerprint === fingerprint) { history.nodes.set(line, previous); return false }
     const view = makeMessageView(message)
     let record
@@ -459,10 +468,10 @@
       // Reflect edits/deletion placeholders while the original line is still present.
       view.firstChild.textContent = previous.view.firstChild.textContent
       record = Object.assign(previous, { moderator: message.moderator,
-        broadcaster: message.broadcaster, view, fingerprint })
+        broadcaster: message.broadcaster, vip: message.vip, view, fingerprint })
     } else {
       record = { id: message.id, user: message.user, moderator: message.moderator,
-        broadcaster: message.broadcaster, view, fingerprint, retained: true,
+        broadcaster: message.broadcaster, vip: message.vip, view, fingerprint, retained: true,
         storageId: message.id || `${pageKey}-${++anonymousMessage}`,
         createdAt: archived?.createdAt || Date.now(), order: archived?.order || ++messageOrder }
       if (archived) {
@@ -634,7 +643,7 @@
     state.panel.hidden = !enabled
     setPanelLayer(state, enabled)
     state.button.setAttribute('aria-pressed', String(enabled))
-    state.button.title = enabled ? '' : '只看 Broadcaster、Moderator 與指定用戶'
+    state.button.title = enabled ? '' : '只看 Broadcaster、Moderator、VIP 與指定用戶'
     if (enabled) renderMessages(state, true)
   }
 
@@ -704,6 +713,7 @@
           <div class="ttc-roles">
             <label><input type="checkbox" name="broadcaster"> Broadcaster</label>
             <label><input type="checkbox" name="moderators"> Moderator</label>
+            <label><input type="checkbox" name="vip"> VIP</label>
           </div>
           <label class="ttc-target-scope">名單範圍<select name="target-scope"><option value="channel">目前頻道</option><option value="global">全域</option></select></label>
           <div class="ttc-target-modes" role="group" aria-label="帳號篩選方式">
@@ -734,9 +744,11 @@
     state.older.addEventListener('click', () => loadOlderRecords(state))
     const moderators = $('[name="moderators"]', panel)
     const broadcaster = $('[name="broadcaster"]', panel)
+    const vip = $('[name="vip"]', panel)
     const users = $('[name="users"]', panel)
     moderators.checked = state.history.settings.moderators
     broadcaster.checked = state.history.settings.broadcaster
+    vip.checked = state.history.settings.vip
     state.status = $('.ttc-target-status', panel)
     state.targetMode = 'include'
     state.targetScope = 'channel'
@@ -749,9 +761,10 @@
       if (state.history.enabled) renderMessages(state, true)
     }
     const applyRoles = () => state.updateSettings({ ...state.history.settings,
-      moderators: moderators.checked, broadcaster: broadcaster.checked })
+      moderators: moderators.checked, broadcaster: broadcaster.checked, vip: vip.checked })
     moderators.addEventListener('change', applyRoles)
     broadcaster.addEventListener('change', applyRoles)
+    vip.addEventListener('change', applyRoles)
     $('.ttc-users', panel).addEventListener('submit', event => {
       event.preventDefault()
       const exclude = state.targetMode === 'exclude'
@@ -844,7 +857,7 @@
       if (captureMutations(mutations, state.history)) scheduleMessageRender(state)
     })
     state.observer.observe(scroller, { childList: true, subtree: true, characterData: true,
-      attributes: true, attributeFilter: ['data-a-user', 'alt', 'src'] })
+      attributes: true, attributeFilter: ['data-a-user', 'alt', 'src', 'srcset'] })
     mounted = state
     setEnabled(state, state.history.enabled)
     updateArchiveStatus(state.history)
@@ -862,6 +875,7 @@
     const { panel, history } = mounted
     $('[name="moderators"]', panel).checked = history.settings.moderators
     $('[name="broadcaster"]', panel).checked = history.settings.broadcaster
+    $('[name="vip"]', panel).checked = history.settings.vip
     renderTargets(mounted)
     captureTree(mounted.scroller, history)
     if (history.enabled) renderMessages(mounted, true)
@@ -879,7 +893,7 @@
     .ttc-panel [hidden], .ttc-panel[hidden] { display: none !important; }
     .ttc-toolbar { flex: 0 0 auto; padding: 10px; border-bottom: 1px solid var(--color-border-base, #ffffff22); }
     .ttc-options { display: flex; align-items: center; gap: 6px; flex-wrap: nowrap; font-size: 12px; }
-    .ttc-roles { display: flex; align-items: center; gap: 12px; flex-shrink: 0; margin-bottom: 12px; }
+    .ttc-roles { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; flex-shrink: 0; margin-bottom: 12px; }
     .ttc-roles label { display: flex; align-items: center; gap: 3px; white-space: nowrap; }
     .ttc-roles input { width: 13px; height: 13px; margin: 0; accent-color: #9147ff; }
     .ttc-count { margin-left: auto; flex-shrink: 0; white-space: nowrap; color: var(--color-text-alt-2, #adadb8); }

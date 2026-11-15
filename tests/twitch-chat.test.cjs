@@ -11,11 +11,56 @@ function boot({ saved, blocked = false, database, now } = {}) {
       this.nodeType = 1
       this.children = []
       this.attrs = new Map()
+      this.listeners = new Map()
       this.style = {}
-      this.textContent = ''
-      this.innerHTML = ''
+      this._textContent = ''
+      this._innerHTML = ''
       this.hidden = false
       this.value = ''
+    }
+    get innerHTML() { return this._innerHTML }
+    set innerHTML(value) {
+      const html = String(value)
+      this._innerHTML = html
+      if (!html.includes('<')) return
+      this.replaceChildren()
+      const stack = [this]
+      const voidTags = new Set(['input', 'img', 'br', 'hr', 'source'])
+      for (const token of html.match(/<\/?[a-zA-Z0-9-]+(?:\s+[^>]*)?>|[^<]+/g) || []) {
+        if (!token.startsWith('<')) {
+          stack.at(-1)._textContent += token
+          continue
+        }
+        const close = token.match(/^<\/([a-zA-Z0-9-]+)>/)
+        if (close) {
+          if (stack.length > 1 && stack.at(-1).tagName === close[1].toLowerCase()) stack.pop()
+          continue
+        }
+        const open = token.match(/^<([a-zA-Z0-9-]+)([\s\S]*?)>$/)
+        if (!open) continue
+        const child = new Element(open[1].toLowerCase())
+        for (const attr of open[2].matchAll(/([a-zA-Z0-9:-]+)(?:="([^"]*)")?/g)) {
+          child.setAttribute(attr[1], attr[2] ?? '')
+        }
+        stack.at(-1).appendChild(child)
+        if (!voidTags.has(child.tagName)) stack.push(child)
+      }
+    }
+    get classList() {
+      const self = this
+      const list = () => new Set((self.className || '').split(/\s+/).filter(Boolean))
+      const commit = set => { self.className = [...set].join(' ') }
+      return {
+        add(...names) { const set = list(); for (const name of names) set.add(name); commit(set) },
+        remove(...names) { const set = list(); for (const name of names) set.delete(name); commit(set) },
+        toggle(name, force) {
+          const set = list()
+          const next = force === undefined ? !set.has(name) : !!force
+          if (next) set.add(name); else set.delete(name)
+          commit(set)
+          return next
+        },
+      }
     }
     get attributes() {
       const attrs = new Map(this.attrs)
@@ -26,7 +71,7 @@ function boot({ saved, blocked = false, database, now } = {}) {
     set textContent(value) { this._textContent = String(value); this.replaceChildren() }
     get childNodes() { return [...(this._textContent ? [{ nodeType: 3, textContent: this._textContent }] : []), ...this.children] }
     get firstChild() { return this.children[0] }
-    addEventListener() {}
+    addEventListener(name, fn) { this.listeners.set(name, fn) }
     setAttribute(name, value) { this.attrs.set(name, value); if (name === 'class') this.className = value }
     getAttribute(name) { return this.attrs.get(name) || null }
     removeAttribute(name) { this.attrs.delete(name) }
@@ -78,7 +123,7 @@ function boot({ saved, blocked = false, database, now } = {}) {
       copy.attrs = new Map(this.attrs)
       copy.className = this.className
       copy.style = { ...this.style }
-      copy.innerHTML = this.innerHTML
+      copy._innerHTML = this._innerHTML
       copy.textContent = this._textContent || ''
       if (deep) for (const child of this.children) copy.appendChild(child.cloneNode(true))
       return copy
@@ -116,7 +161,7 @@ function boot({ saved, blocked = false, database, now } = {}) {
     matchesFilter, captureLine, captureTree, captureMutations, renderMessages, changeTargetUsers, showTargetStatus,
     scheduleMessageRender, releaseMessageViews, handleMessageVisibility,
     archiveTree, restoreTree, archiveRecord, restoreRecord, flushHistory, pruneHistories, pruneArchive, loadOlderRecords,
-    setPanelLayer, positionFilterPanel,
+    setPanelLayer, positionFilterPanel, createPanel, setEnabled,
     setMounted: state => { mounted = state }
   }; })()`), context)
   const message = (user, text, role = '', id = '') => {
@@ -131,6 +176,8 @@ function boot({ saved, blocked = false, database, now } = {}) {
       badge.setAttribute('alt', role)
       if (role === 'localized-mod') badge.setAttribute('src',
         'https://static-cdn.jtvnw.net/badges/v1/3267646d-33f0-4b17-b3df-f923a41db1d0/1')
+      if (role === 'localized-vip') badge.setAttribute('src',
+        'https://static-cdn.jtvnw.net/badges/v1/b817aba4-fad8-49e2-b88a-7cc744dfa6ec/1')
     }
     const author = authorContainer.appendChild(new Element('span'))
     author.setAttribute('data-a-target', 'chat-message-username')
@@ -333,23 +380,101 @@ test('Twitch chat: badge identity, broadcaster login and specified login match i
   const env = boot()
   const history = env.api.getHistory('sample_channel')
   history.settings.users = ['chosen']
-  for (const [name, badge] of [['MOD_NAME', 'localized-mod'], ['sample_channel', ''], ['chosen', '']]) {
+  for (const [name, badge] of [['MOD_NAME', 'localized-mod'], ['sample_channel', ''], ['vip_name', 'localized-vip'], ['chosen', '']]) {
     assert.equal(env.api.captureLine(env.message(name, 'hello', badge).line, history), true)
   }
   assert.equal(env.api.captureLine(env.message('ordinary', 'ignored').line, history), false)
-  assert.equal(history.messages.length, 3)
-  assert.equal(env.api.matchesFilter(history.messages[0], { moderators: false, broadcaster: false, users: [] }), false)
-  assert.equal(env.api.matchesFilter(history.messages[1], { moderators: false, broadcaster: true, users: [] }), true)
-  assert.equal(env.api.matchesFilter(history.messages[2], { moderators: false, broadcaster: false, users: ['chosen'] }), true)
+  assert.equal(history.messages.length, 4)
+  assert.equal(env.api.matchesFilter(history.messages[0], { moderators: false, broadcaster: false, vip: false, users: [] }), false)
+  assert.equal(env.api.matchesFilter(history.messages[1], { moderators: false, broadcaster: true, vip: false, users: [] }), true)
+  assert.equal(env.api.matchesFilter(history.messages[2], { moderators: false, broadcaster: false, vip: true, users: [] }), true)
+  assert.equal(env.api.matchesFilter(history.messages[2], { moderators: true, broadcaster: true, vip: false, users: [] }), false)
+  assert.equal(env.api.matchesFilter(history.messages[3], { moderators: false, broadcaster: false, vip: false, users: ['chosen'] }), true)
 })
 
-test('Twitch chat: quoted badges do not grant the author moderator status', () => {
+test('Twitch VIP users: recognize badge alt, asset UUID and srcset, preserve history, and respect exclusions', async () => {
+  const database = fakeIndexedDB()
+  const env = boot({ database })
+  const history = env.api.getHistory('sample_channel')
+  await history.restorePromise
+  history.settings.vip = false
+  const variants = [
+    env.message('vip_alt', 'by alt', 'VIP', 'vip-1'),
+    env.message('vip_tw', 'by zh-TW alt', 'VIP 徽章', 'vip-2'),
+    env.message('vip_src', 'by src', 'localized-vip', 'vip-3'),
+    (() => {
+      const msg = env.message('vip_srcset', 'by srcset', '', 'vip-4')
+      const badge = msg.authorContainer.appendChild(new env.Element('img'))
+      badge.className = 'chat-badge'
+      badge.setAttribute('alt', 'Custom VIP Label')
+      badge.setAttribute('srcset', 'https://static-cdn.jtvnw.net/badges/v1/b817aba4-fad8-49e2-b88a-7cc744dfa6ec/1 1x')
+      return msg
+    })(),
+  ]
+  for (const msg of variants) {
+    assert.equal(env.api.captureLine(msg.line, history), true, 'VIP messages are retained while vip filter is off')
+  }
+  assert.equal(env.api.captureLine(env.message('sub_vip_tier', 'ordinary sub', 'VIP Subscriber').line, history), false)
+  const state = { history, list: new env.Element(), empty: {}, count: {}, latest: {} }
+  env.api.renderMessages(state)
+  assert.equal(state.count.textContent, '0 則')
+  history.settings.vip = true
+  env.api.renderMessages(state)
+  assert.equal(state.count.textContent, '4 則')
+  history.settings.excludedUsers = ['vip_alt']
+  history.settings.globalExcludedUsers = ['vip_tw']
+  env.api.renderMessages(state)
+  assert.equal(state.count.textContent, '2 則')
+  await env.api.flushHistory(history)
+  const fresh = boot({ database })
+  const restored = fresh.api.getHistory('sample_channel')
+  await restored.restorePromise
+  assert.equal(restored.messages.length, 4)
+  assert.equal(restored.ids.get('vip-3').vip, true)
+  const restoredState = { history: restored, list: new fresh.Element(), empty: {}, count: {}, latest: {} }
+  restored.settings.vip = false
+  fresh.api.renderMessages(restoredState)
+  assert.equal(restoredState.count.textContent, '0 則')
+  restored.settings.vip = true
+  fresh.api.renderMessages(restoredState)
+  assert.equal(restoredState.count.textContent, '4 則')
+})
+
+test('Twitch VIP users: update retained VIP status when badges appear or disappear', () => {
+  const env = boot()
+  const history = env.api.getHistory('sample_channel')
+  const msg = env.message('alice', 'hello', '', 'vip-mutation-1')
+  assert.equal(env.api.captureLine(msg.line, history), false)
+  const badge = msg.authorContainer.appendChild(new env.Element('img'))
+  badge.className = 'chat-badge'
+  badge.setAttribute('alt', 'VIP')
+  assert.equal(env.api.captureMutations([{ target: msg.authorContainer, addedNodes: [badge] }], history), true)
+  const record = history.messages[0]
+  const time = record.view.firstChild.textContent
+  assert.equal(record.vip, true)
+  badge.remove()
+  assert.equal(env.api.captureMutations([{ target: msg.authorContainer, addedNodes: [] }], history), true)
+  assert.equal(history.messages.length, 1)
+  assert.equal(record.vip, false)
+  assert.equal(record.view.firstChild.textContent, time)
+  assert.equal(env.api.matchesFilter(record, history.settings), false)
+  history.settings.users = ['alice']
+  assert.equal(env.api.matchesFilter(record, history.settings), true)
+})
+
+test('Twitch chat: quoted badges do not grant the author moderator or VIP status', () => {
   const env = boot()
   const { line } = env.message('ordinary', 'reply')
-  const quote = line.appendChild(new env.Element('img'))
-  quote.className = 'chat-badge'
-  quote.setAttribute('alt', 'Moderator')
-  assert.equal(env.api.readMessage(line, 'sample_channel').moderator, false)
+  const quoteMod = line.appendChild(new env.Element('img'))
+  quoteMod.className = 'chat-badge'
+  quoteMod.setAttribute('alt', 'Moderator')
+  const quoteVip = line.appendChild(new env.Element('img'))
+  quoteVip.className = 'chat-badge'
+  quoteVip.setAttribute('alt', 'VIP')
+  quoteVip.setAttribute('src', 'https://static-cdn.jtvnw.net/badges/v1/b817aba4-fad8-49e2-b88a-7cc744dfa6ec/1')
+  const parsed = env.api.readMessage(line, 'sample_channel')
+  assert.equal(parsed.moderator, false)
+  assert.equal(parsed.vip, false)
 })
 
 test('Twitch chat: preserve pruned native messages, deduplicate mutations, retain repeated sends', () => {
@@ -462,7 +587,7 @@ test('Twitch targets: remote edits update mounted filters and start capturing th
   const history = env.api.getHistory('sample_channel')
   history.enabled = true
   const panel = new env.Element()
-  for (const name of ['moderators', 'broadcaster', 'users']) {
+  for (const name of ['moderators', 'broadcaster', 'vip', 'users']) {
     const input = panel.appendChild(new env.Element('input'))
     input.setAttribute('name', name)
   }
@@ -476,18 +601,21 @@ test('Twitch targets: remote edits update mounted filters and start capturing th
   const state = { history, panel, scroller, list: new env.Element(), empty: {}, count: {}, latest: {} }
   env.api.setMounted(state)
   env.storage.set('twitch-live-chat-tweaks-settings-v1', JSON.stringify({
-    sample_channel: { moderators: false, broadcaster: false, users: ['alice'] },
+    sample_channel: { moderators: false, broadcaster: false, vip: false, users: ['alice'] },
   }))
   env.listeners.get('storage')({ key: 'unrelated-setting' })
   assert.equal(history.messages.length, 0)
   env.listeners.get('storage')({ key: 'twitch-live-chat-tweaks-settings-v1' })
   assert.equal(history.messages.length, 1)
+  assert.equal(panel.querySelector('[name="vip"]').checked, false)
   assert.equal(panel.querySelector('.ttc-target-list').children[0].children[0].textContent, 'alice')
   assert.equal(state.count.textContent, '1 則')
   env.storage.set('twitch-live-chat-tweaks-settings-v1', JSON.stringify({
-    sample_channel: { moderators: false, broadcaster: false, users: [] },
+    sample_channel: { moderators: false, broadcaster: false, vip: true, users: [] },
   }))
   env.listeners.get('storage')({ key: 'twitch-live-chat-tweaks-settings-v1' })
+  assert.equal(panel.querySelector('[name="vip"]').checked, true)
+  assert.equal(history.settings.vip, true)
   assert.equal(state.count.textContent, '0 則')
   assert.equal(env.api.captureLine(env.message('alice', 'no longer tracked').line, history), false)
 })
@@ -514,12 +642,16 @@ test('Twitch exclusions: override both roles and explicit inclusion, and restore
 test('Twitch exclusions: preserve legacy targets and save normalized exclusions per channel', () => {
   const env = boot({ saved: JSON.stringify({ sample_channel: { users: ['alice'] } }) })
   const history = env.api.getHistory('sample_channel')
+  assert.equal(history.settings.vip, true)
   assert.equal(history.settings.users.join(','), 'alice')
   assert.equal(history.settings.excludedUsers.length, 0)
+  history.settings.vip = false
   history.settings = env.api.changeTargetUsers(history.settings, ' @MOD_BOT ', false, true)
   assert.equal(env.api.changeTargetUsers(history.settings, 'a,b', false, true), null)
   env.api.saveSettings(history)
   const fresh = boot({ saved: env.storage.get('twitch-live-chat-tweaks-settings-v1') })
+  assert.equal(fresh.api.loadSettings('sample_channel').vip, false)
+  assert.equal(fresh.api.loadSettings('other_channel').vip, true)
   assert.equal(fresh.api.loadSettings('sample_channel').excludedUsers.join(','), 'mod_bot')
   assert.equal(fresh.api.loadSettings('sample_channel').users.join(','), 'alice')
   assert.equal(fresh.api.loadSettings('other_channel').excludedUsers.length, 0)
@@ -590,4 +722,33 @@ test('Twitch scopes: sync global edits across stored histories and keep globals 
   history.settings = blocked.api.changeTargetUsers(history.settings, 'chosen', false, false, true)
   assert.equal(blocked.api.saveSettings(history, true), false)
   assert.equal(blocked.api.getHistory('other_channel').settings.globalUsers.join(','), 'chosen')
+})
+
+test('Twitch panel: VIP role checkbox defaults to checked, toggles filtering and persists per channel', () => {
+  const env = boot()
+  const history = env.api.getHistory('sample_channel')
+  const scroller = new env.Element()
+  scroller.appendChild(env.message('vip_guest', 'vip hello', 'VIP', 'vip-panel-1').line)
+  const state = { history, host: new env.Element(), scroller, button: new env.Element('button') }
+  env.api.createPanel(state)
+  env.api.setMounted(state)
+  env.api.captureTree(scroller, history)
+  env.api.setEnabled(state, false)
+  assert.equal(state.button.title.includes('VIP'), true)
+  env.api.setEnabled(state, true)
+  assert.equal(state.button.title, '')
+  const vipCheckbox = state.panel.querySelector('[name="vip"]')
+  assert.equal(vipCheckbox.checked, true)
+  assert.equal(state.count.textContent, '1 則')
+  vipCheckbox.checked = false
+  vipCheckbox.listeners.get('change')()
+  assert.equal(history.settings.vip, false)
+  assert.equal(state.count.textContent, '0 則')
+  const fresh = boot({ saved: env.storage.get('twitch-live-chat-tweaks-settings-v1') })
+  assert.equal(fresh.api.loadSettings('sample_channel').vip, false)
+  assert.equal(fresh.api.loadSettings('other_channel').vip, true)
+  vipCheckbox.checked = true
+  vipCheckbox.listeners.get('change')()
+  assert.equal(history.settings.vip, true)
+  assert.equal(state.count.textContent, '1 則')
 })
