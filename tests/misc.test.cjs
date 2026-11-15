@@ -10,7 +10,7 @@ const pixivSource = readScript('pixiv.user.js')
 
 function jump(search, hash = '') {
   const location = { search, hash, href: 'unchanged' }
-  vm.runInNewContext(pixivSource, { window: { location } })
+  vm.runInNewContext(pixivSource, { window: { location }, URL })
   return location.href
 }
 
@@ -29,6 +29,9 @@ const jumpCases = [
   ['data scheme rejected', '?data:text/html,hi', '', 'unchanged'],
   ['file scheme rejected', '?file:///c:/file', '', 'unchanged'],
   ['protocol relative URL rejected', '?//example.test', '', 'unchanged'],
+  ['empty authority rejected', '?https://', '', 'unchanged'],
+  ['missing hostname rejected', '?https://:8080', '', 'unchanged'],
+  ['control character rejected', '?https://example.test/\n', '', 'unchanged'],
   ['malformed encoding rejected', '?https%3A%2F%2Fexample%ZZ', '', 'unchanged'],
   ['empty target rejected', '', '#something', 'unchanged'],
 ]
@@ -36,3 +39,16 @@ const jumpCases = [
 for (const [name, search, hash, expected] of jumpCases) {
   test(`Pixiv: ${name}`, () => assert.equal(jump(search, hash), expected))
 }
+
+test('Pixiv: prefers location.replace when available', () => {
+  let replaced = 'unchanged'
+  const location = {
+    search: '?https://example.test/page',
+    hash: '',
+    href: 'unchanged',
+    replace(next) { replaced = next },
+  }
+  vm.runInNewContext(pixivSource, { window: { location }, URL })
+  assert.equal(replaced, 'https://example.test/page')
+  assert.equal(location.href, 'unchanged')
+})

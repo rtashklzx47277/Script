@@ -56,7 +56,7 @@ YouTube 與 Twitch 的「目標用戶」預設收合，按標題才展開管理�
 - **TwitchPlayerTweaks**:與 YouTube 使用相同音量曲線，原生音量 v（0–1）乘上 2v 增益；顯示值 25/50/100 對應約 12.5/50/200% 的原生輸出。滾輪仍每次增減 5，顯示範圍維持 0–100；首次滾輪或原生音量控制操作才啟用，之後原生滑桿變動也會同步。同一分頁切換頻道或影片、替換 video 元素仍會套用，回到舊元素會重用來源節點；多播放器共用一個 AudioContext、各自持有增益，移除的播放器會斷開音訊節點。重新整理或新分頁需再次啟用；沒有可用 Web Audio、跨來源或受保護媒體會保留原生音量。
 
 - **YouTube / Twitch 截圖**:播放器就緒後預先啟動背景編碼 Worker,截圖保留原解析度 PNG,剪貼簿與下載共用同一份圖片。PNG 完成後直接由瀏覽器下載,省去 Tampermonkey 下載流程的等待;檔案存到瀏覽器設定的下載位置,不再自動放入 `ScreenShot/` 子資料夾。不支援相關瀏覽器功能時自動使用相容流程;PNG 編碼與瀏覽器存檔仍需要時間。
-- **PlayerTweaks 會覆寫頁面的 `JSON.parse` 並攔截 `ytInitialPlayerResponse`**:這是 player response 送達的僅有兩條路徑。副作用:接手 `ytInitialPlayerResponse` 後,先前掛在該屬性上的其他攔截器(如 uBO scriptlet)之後的 setter 只會被通知一次。
+- **PlayerTweaks 會覆寫頁面的 `JSON.parse` 並攔截 `ytInitialPlayerResponse`**:這是 player response 送達的僅有兩條路徑。若頁面上先前已有其他攔截器(如 uBO scriptlet)掛在 `ytInitialPlayerResponse` 的存取器上,會串接保留其 getter／setter 並持續轉發寫入;若無既有存取器,則在首次攔截後恢復為一般屬性。
 - 所有腳本都依賴 YouTube / Twitch 的內部 DOM 結構與非公開 API,**上游改版隨時可能使功能失效**,失效模式以「靜默不動作」為主,不會弄壞頁面本身。
 
 ## 本機驗證

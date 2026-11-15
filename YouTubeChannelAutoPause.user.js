@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Channel Auto Pause
 // @namespace   https://tampermonkey.net/
-// @version     0.2.2
+// @version     0.2.3
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeChannelAutoPause.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeChannelAutoPause.user.js
 // @description 進入 YouTube 頻道頁時，暫停自動播放的預告或精選影片。
@@ -29,9 +29,17 @@
   const isChannelPage = () =>
     /^(\/@|\/channel\/|\/user\/|\/c\/)/.test(location.pathname)
 
+  const findChannelVideo = () => {
+    const visible = $('ytd-browse:not([hidden]) video')
+    if (visible) return visible
+
+    const cached = $('ytd-browse video')
+    return cached && !cached.closest?.('ytd-browse[hidden]') ? cached : null
+  }
+
   const waitForChannelVideo = () =>
     new Promise((resolve) => {
-      const currentVideo = $('ytd-browse video')
+      const currentVideo = findChannelVideo()
 
       if (currentVideo) {
         resolve(currentVideo)
@@ -39,17 +47,20 @@
       }
 
       const observer = new MutationObserver(() => {
-        const video = $('ytd-browse video')
+        const video = findChannelVideo()
 
         if (!video) return
 
         finish(video)
       })
 
+      let settled = false
       let fallbackTimer = 0
       let pollTimer = 0
       const cancel = () => finish(null)
       const finish = (video) => {
+        if (settled) return
+        settled = true
         clearTimeout(fallbackTimer)
         clearInterval(pollTimer)
         observer.disconnect()
@@ -66,7 +77,7 @@
       fallbackTimer = setTimeout(() => {
         observer.disconnect()
         pollTimer = setInterval(() => {
-          const video = $('ytd-browse video')
+          const video = findChannelVideo()
           if (video) finish(video)
         }, 1000)
       }, 10000)

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        Twitch Player Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.3.3
+// @version     0.3.4
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchPlayerTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchPlayerTweaks.user.js
 // @description 提供 Twitch 原解析度 PNG 截圖、滾輪音量與音量增益，隱藏剪輯按鈕及互動擴充。
@@ -33,12 +33,16 @@
   const TOOLTIP_VERTICAL_GAP = 10
   const SCREENSHOT_WORKER_TIMEOUT = 15000
 
+  const SVG_NS = 'http://www.w3.org/2000/svg'
   const playerStates = new WeakMap()
   const volumeSources = new WeakMap()
   const boundVolumeVideos = new WeakSet()
+  const failedVolumeVideos = new WeakSet()
   const activeVolumeVideos = new Set()
+  const pendingVolumeVideos = new Set()
   let volumeAudioContext = null
   let volumeGainEnabled = false
+  let volumeActivationBound = false
   const screenshotWorkerJobs = new Map()
   let screenshotWorker = null
   let screenshotWorkerAvailable = true
@@ -182,6 +186,7 @@
         volumeBar: getVolumeBar(player),
         volumeBarTimer: 0,
         tooltip: getTooltip(player),
+        tooltipFrame: 0,
       }
 
       player.addEventListener(
@@ -218,8 +223,33 @@
     return state
   }
 
+  const bindVolumeActivation = () => {
+    if (volumeActivationBound) return
+    volumeActivationBound = true
+    const activate = () => {
+      if (!volumeAudioContext) return
+      const flushPending = () => {
+        if (volumeAudioContext?.state !== 'running') return
+        for (const target of [...pendingVolumeVideos]) {
+          pendingVolumeVideos.delete(target)
+          if (volumeGainEnabled && target.isConnected) ensureVolumeGain(target)
+        }
+        document.removeEventListener?.('pointerdown', activate, true)
+        document.removeEventListener?.('keydown', activate, true)
+        volumeActivationBound = false
+      }
+      if (volumeAudioContext.state === 'suspended') {
+        volumeAudioContext.resume().then(flushPending).catch(() => {})
+      } else {
+        flushPending()
+      }
+    }
+    document.addEventListener('pointerdown', activate, { capture: true, passive: true })
+    document.addEventListener('keydown', activate, { capture: true, passive: true })
+  }
+
   const ensureVolumeGain = video => {
-    if (!video || !volumeGainEnabled) return
+    if (!video || !volumeGainEnabled || failedVolumeVideos.has(video)) return
     const AudioContextClass = window.AudioContext || window.webkitAudioContext
     if (!AudioContextClass) return
     let graph = volumeSources.get(video)
@@ -230,7 +260,24 @@
         // Routing a non-CORS remote stream through Web Audio would silence it.
         // Wait for a known same-origin source (including Twitch's MSE blob).
         if (!video.currentSrc || video.mediaKeys || new URL(video.currentSrc, location.href).origin !== location.origin) return
-        if (!volumeAudioContext) volumeAudioContext = new AudioContextClass()
+      }
+      if (!volumeAudioContext) volumeAudioContext = new AudioContextClass()
+      if (volumeAudioContext.state === 'suspended') {
+        volumeAudioContext.resume().then(() => {
+          if (volumeAudioContext?.state === 'running' && volumeGainEnabled && video.isConnected) {
+            pendingVolumeVideos.delete(video)
+            ensureVolumeGain(video)
+          }
+        }).catch(() => {})
+      }
+      // Never call createMediaElementSource while AudioContext is suspended without
+      // user activation: taking ownership before running mutes native audio.
+      if (volumeAudioContext.state !== 'running') {
+        pendingVolumeVideos.add(video)
+        bindVolumeActivation()
+        return
+      }
+      if (!graph) {
         gain = volumeAudioContext.createGain()
         gain.connect(volumeAudioContext.destination)
         source = volumeAudioContext.createMediaElementSource(video)
@@ -245,7 +292,6 @@
       // Match YouTube: native volume v multiplied by a gain of 2v.
       if (graph.gain) graph.gain.gain.value = MAX_VOLUME_GAIN * clamp(video.volume, 0, 1)
       activeVolumeVideos.add(video)
-      if (volumeAudioContext.state === 'suspended') volumeAudioContext.resume().catch(() => {})
     } catch (_) {
       // If graph creation fails after taking ownership, reconnect directly so
       // native playback can continue without trying to wrap this video twice.
@@ -256,8 +302,11 @@
           source.connect(volumeAudioContext.destination)
           volumeSources.set(video, { source, gain: null, connected: true })
           activeVolumeVideos.add(video)
-          if (volumeAudioContext.state === 'suspended') volumeAudioContext.resume().catch(() => {})
-        } catch (_) {}
+        } catch (_) {
+          failedVolumeVideos.add(video)
+        }
+      } else {
+        failedVolumeVideos.add(video)
       }
     }
   }
@@ -324,17 +373,26 @@
 
   const showTooltip = (player, button, text) => {
     const state = ensurePlayerState(player)
-    const playerRect = player.getBoundingClientRect()
-    const buttonRect = button.getBoundingClientRect()
+    if (state.tooltipFrame) cancelAnimationFrame(state.tooltipFrame)
 
     state.tooltip.textContent = text
     state.tooltip.dataset.visible = 'true'
 
-    requestAnimationFrame(() => {
+    state.tooltipFrame = requestAnimationFrame(() => {
+      state.tooltipFrame = 0
+      if (button.isConnected === false || state.tooltip.dataset.visible !== 'true') return
+      const playerRect = player.getBoundingClientRect()
+      const buttonRect = button.getBoundingClientRect()
       const tooltipRect = state.tooltip.getBoundingClientRect()
+      const halfWidth = tooltipRect.width / 2
+      const rawLeft = buttonRect.left - playerRect.left + buttonRect.width / 2
+      const minLeft = halfWidth + 8
+      const maxLeft = Math.max(minLeft, playerRect.width - halfWidth - 8)
+      const left = playerRect.width > 0 && tooltipRect.width > 0
+        ? clamp(rawLeft, minLeft, maxLeft)
+        : rawLeft
 
-      state.tooltip.style.left =
-        `${buttonRect.left - playerRect.left + buttonRect.width / 2}px`
+      state.tooltip.style.left = `${left}px`
 
       state.tooltip.style.top =
         `${buttonRect.top - playerRect.top - tooltipRect.height - TOOLTIP_VERTICAL_GAP}px`
@@ -342,7 +400,12 @@
   }
 
   const hideTooltip = (player) => {
-    ensurePlayerState(player).tooltip.dataset.visible = 'false'
+    const state = ensurePlayerState(player)
+    if (state.tooltipFrame) {
+      cancelAnimationFrame(state.tooltipFrame)
+      state.tooltipFrame = 0
+    }
+    state.tooltip.dataset.visible = 'false'
   }
 
   const getScreenshotFileName = () => {
@@ -583,11 +646,25 @@
 
     // Bare SVG + own CSS instead of Twitch's build-hashed wrapper classes,
     // which change on every redeploy.
-    button.innerHTML = `
-      <svg width="24" height="24" viewBox="0 0 24 24" focusable="false" aria-hidden="true" role="presentation">
-        <path d="M9 4 7.5 6H5a3 3 0 0 0-3 3v8a3 3 0 0 0 3 3h14a3 3 0 0 0 3-3V9a3 3 0 0 0-3-3h-2.5L15 4H9Zm3 4a5 5 0 1 1 0 10a5 5 0 0 1 0-10Zm0 2a3 3 0 1 0 0 6a3 3 0 0 0 0-6Z"></path>
-      </svg>
-    `
+    const createSvgElement = (tag, attributes = {}) => {
+      const node = typeof document.createElementNS === 'function'
+        ? document.createElementNS(SVG_NS, tag)
+        : document.createElement(tag)
+      for (const [name, value] of Object.entries(attributes)) node.setAttribute(name, value)
+      return node
+    }
+    const icon = createSvgElement('svg', {
+      width: '24',
+      height: '24',
+      viewBox: '0 0 24 24',
+      focusable: 'false',
+      'aria-hidden': 'true',
+      role: 'presentation',
+    })
+    icon.appendChild(createSvgElement('path', {
+      d: 'M9 4 7.5 6H5a3 3 0 0 0-3 3v8a3 3 0 0 0 3 3h14a3 3 0 0 0 3-3V9a3 3 0 0 0-3-3h-2.5L15 4H9Zm3 4a5 5 0 1 1 0 10a5 5 0 0 1 0-10Zm0 2a3 3 0 1 0 0 6a3 3 0 0 0 0-6Z',
+    }))
+    button.appendChild(icon)
 
     button.addEventListener('click', () => takeScreenshot(player))
     button.addEventListener('mouseenter', () => {
@@ -652,6 +729,10 @@
       graph.gain?.disconnect()
       graph.connected = false
       activeVolumeVideos.delete(video)
+      pendingVolumeVideos.delete(video)
+    }
+    for (const video of pendingVolumeVideos) {
+      if (!video.isConnected) pendingVolumeVideos.delete(video)
     }
   }
 

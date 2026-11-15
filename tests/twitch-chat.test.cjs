@@ -4,7 +4,7 @@ const fs = require('node:fs')
 const vm = require('node:vm')
 const path = require('node:path')
 
-function boot({ saved, blocked = false, database, now } = {}) {
+function boot({ saved, blocked = false, trustedTypes = false, withResizeObserver = false, database, now } = {}) {
   class Element {
     constructor(tag = 'div') {
       this.tagName = tag
@@ -20,6 +20,7 @@ function boot({ saved, blocked = false, database, now } = {}) {
     }
     get innerHTML() { return this._innerHTML }
     set innerHTML(value) {
+      if (trustedTypes) throw new TypeError('This document requires TrustedHTML assignment')
       const html = String(value)
       this._innerHTML = html
       if (!html.includes('<')) return
@@ -132,7 +133,12 @@ function boot({ saved, blocked = false, database, now } = {}) {
   const document = new Element('document')
   document.head = new Element('head')
   document.body = new Element('body')
+  document.hidden = false
+  document.appendChild(document.head)
+  document.appendChild(document.body)
+  document.createElementNS = (_, tag) => new Element(tag)
   document.createElement = tag => new Element(tag)
+  const observers = []
   document.createTextNode = text => Object.assign(new Element('#text'), { textContent: text })
   const storage = new Map(saved ? [['twitch-live-chat-tweaks-settings-v1', saved]] : [])
   const listeners = new Map()
@@ -148,20 +154,28 @@ function boot({ saved, blocked = false, database, now } = {}) {
     clearTimeout(id) { timers.delete(id) }, setInterval() {},
     requestAnimationFrame(fn) { const id = ++nextTimer; frames.set(id, fn); return id },
     cancelAnimationFrame(id) { frames.delete(id) },
-    MutationObserver: class { observe() {} },
+    MutationObserver: class { observe() {}; disconnect() {} },
     localStorage: {
       getItem(key) { if (blocked) throw Error('Blocked'); return storage.get(key) || null },
       setItem(key, value) { if (blocked) throw Error('Blocked'); storage.set(key, value) },
     },
   }
   const source = fs.readFileSync(path.join(__dirname, '..', 'TwitchLiveChatTweaks.user.js'), 'utf8')
+  if (withResizeObserver) context.ResizeObserver = class {
+    constructor(callback) { this.callback = callback; this.targets = new Set(); observers.push(this) }
+    observe(target) { this.targets.add(target) }
+    unobserve(target) { this.targets.delete(target) }
+    disconnect() { this.targets.clear() }
+    notify() { this.callback([...this.targets].map(target => ({ target }))) }
+  }
   vm.createContext(context)
   vm.runInContext(source.replace(/\}\)\(\)\s*$/, `globalThis.api = {
     normalizeUsers, getChannel, getHistory, loadSettings, saveSettings, readMessage,
     matchesFilter, captureLine, captureTree, captureMutations, renderMessages, changeTargetUsers, showTargetStatus,
     scheduleMessageRender, releaseMessageViews, handleMessageVisibility,
     archiveTree, restoreTree, archiveRecord, restoreRecord, flushHistory, pruneHistories, pruneArchive, loadOlderRecords,
-    setPanelLayer, positionFilterPanel, createPanel, setEnabled,
+    setPanelLayer, positionFilterPanel, createPanel, setEnabled, refresh, unmount, releaseMessageViews,
+    get mounted() { return mounted },
     setMounted: state => { mounted = state }
   }; })()`), context)
   const message = (user, text, role = '', id = '') => {
@@ -190,7 +204,7 @@ function boot({ saved, blocked = false, database, now } = {}) {
     body.textContent = text
     return { line, body, authorContainer }
   }
-  return { api: context.api, message, Element, storage, timers, frames, document, location: context.location, listeners,
+  return { api: context.api, message, Element, storage, timers, frames, observers, document, location: context.location, listeners,
     flushFrames() { const pending = [...frames.values()]; frames.clear(); for (const fn of pending) fn() } }
 }
 
@@ -751,4 +765,98 @@ test('Twitch panel: VIP role checkbox defaults to checked, toggles filtering and
   vipCheckbox.listeners.get('change')()
   assert.equal(history.settings.vip, true)
   assert.equal(state.count.textContent, '1 則')
+})
+
+test('Twitch panel: mount and render without innerHTML when Trusted Types rejects HTML strings', () => {
+  const env = boot({ trustedTypes: true })
+  const stream = env.document.body.appendChild(env.document.createElement('div'))
+  stream.className = 'stream-chat'
+  const header = stream.appendChild(env.document.createElement('div'))
+  header.className = 'stream-chat-header'
+  const host = stream.appendChild(env.document.createElement('div'))
+  const scroller = host.appendChild(env.document.createElement('div'))
+  scroller.setAttribute('data-a-target', 'chat-scroller')
+
+  env.api.refresh()
+  const state = env.api.mounted
+  assert.ok(state)
+  assert.ok(state.button.querySelector('svg'))
+  assert.ok(state.panel.querySelector('.ttc-list'))
+  assert.equal(state.panel.querySelector('.ttc-targets').hidden, true)
+  env.api.setEnabled(state, true)
+  assert.equal(state.panel.hidden, false)
+  env.api.unmount()
+})
+
+test('Twitch archive: preserve data image srcsets, drop blank/unsafe candidates and flush evicted LRU channels', async () => {
+  const database = fakeIndexedDB()
+  const env = boot({ database })
+  const img = env.api.restoreTree({
+    tag: 'img',
+    attributes: [
+      ['srcset', 'data:image/png;base64,iVBORw0K 1x, data:image/webp;base64,UklGRg== 2x, data:text/html,<script>alert(1)</script> 3x'],
+    ],
+  })
+  assert.equal(img.getAttribute('srcset'), 'data:image/png;base64,iVBORw0K 1x, data:image/webp;base64,UklGRg== 2x')
+
+  const blank = env.api.restoreTree({ tag: 'img', attributes: [['src', '   ']] })
+  assert.equal(blank.getAttribute('src'), null)
+
+  const h1 = env.api.getHistory('lru_one')
+  await h1.restorePromise
+  env.api.captureLine(env.message('mod', 'evicted flush check', 'moderator', 'twitch-lru-1').line, h1)
+  for (let i = 2; i <= 6; i++) env.api.getHistory(`lru_${i}`)
+  await new Promise(resolve => setTimeout(resolve, 20))
+
+  const reloaded = boot({ database })
+  const restored = reloaded.api.getHistory('lru_one')
+  await restored.restorePromise
+  assert.ok(restored.ids.has('twitch-lru-1'))
+})
+
+test('Twitch following: late emote resize, load and visibility keep live bottom without overriding manual pause', () => {
+  const env = boot({ withResizeObserver: true })
+  const stream = env.document.body.appendChild(env.document.createElement('div'))
+  stream.className = 'stream-chat'
+  const header = stream.appendChild(env.document.createElement('div'))
+  header.className = 'stream-chat-header'
+  const host = stream.appendChild(env.document.createElement('div'))
+  const scroller = host.appendChild(env.document.createElement('div'))
+  scroller.setAttribute('data-a-target', 'chat-scroller')
+  env.api.refresh()
+  const state = env.api.mounted
+  state.list.clientHeight = 300
+  state.list.scrollHeight = 500
+  env.api.captureLine(env.message('mod', 'emote line', 'moderator', 'twitch-follow-1').line, state.history)
+  env.api.setEnabled(state, true)
+  assert.equal(state.list.scrollTop, 500)
+
+  state.list.scrollHeight = 640
+  env.observers[0].notify()
+  env.flushFrames()
+  assert.equal(state.list.scrollTop, 640)
+
+  state.list.scrollHeight = 720
+  state.list.listeners.get('load')()
+  env.flushFrames()
+  assert.equal(state.list.scrollTop, 720)
+
+  state.list.listeners.get('wheel')()
+  state.list.scrollTop = 120
+  state.list.listeners.get('scroll')()
+  assert.equal(state.history.follow, false)
+  assert.equal(state.latest.hidden, false)
+
+  state.list.scrollHeight = 900
+  env.observers[0].notify()
+  state.list.listeners.get('load')()
+  env.document.listeners.get('visibilitychange')()
+  env.flushFrames()
+  assert.equal(state.list.scrollTop, 120)
+
+  state.latest.listeners.get('click')()
+  assert.equal(state.history.follow, true)
+  assert.equal(state.list.scrollTop, 900)
+  assert.equal(state.latest.hidden, true)
+  env.api.unmount()
 })

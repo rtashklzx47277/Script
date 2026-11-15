@@ -8,7 +8,7 @@ const scripts = ['YouTubePlayerTweaks.user.js', 'TwitchPlayerTweaks.user.js']
 
 // Run the real userscript and expose its closed-over functions at the end of
 // its IIFE. Only browser primitives are mocked; production functions are intact.
-function boot(file, mode = 'worker', pathname = '/') {
+function boot(file, mode = 'worker', pathname = '/', { trustedTypes = false, setupWindow } = {}) {
   const isYouTube = file === scripts[0]
   let nextId = 0
   let activeWorker
@@ -42,8 +42,34 @@ function boot(file, mode = 'worker', pathname = '/') {
     appendChild(element) {
       element.parentElement = this
       this.children.push(element)
+      return element
     }
-    matches(selector) { return selector.split(',').some(part => part.trim() === this.tagName) }
+    insertBefore(element, ref) {
+      element.parentElement = this
+      const index = this.children.indexOf(ref)
+      if (index === -1) this.children.push(element)
+      else this.children.splice(index, 0, element)
+      return element
+    }
+    cloneNode() {
+      const copy = new ElementMock(this.tagName)
+      copy.className = this.className
+      copy.attributes = new Map(this.attributes)
+      return copy
+    }
+    set innerHTML(value) {
+      if (trustedTypes) throw new TypeError('This document requires TrustedHTML assignment')
+      this._innerHTML = value
+    }
+    matches(selector) {
+      return selector.split(',').some(part => {
+        part = part.trim()
+        if (part.startsWith('.')) return (this.className || '').split(' ').includes(part.slice(1))
+        const tagAttr = part.match(/^([a-z0-9-]+)\[([^\]]+)\]$/i)
+        if (tagAttr) return tagAttr[1] === this.tagName && this.hasAttribute(tagAttr[2])
+        return part === this.tagName
+      })
+    }
     closest(selector) {
       for (let node = this; node; node = node.parentElement) {
         if (node.matches(selector)) return node
@@ -98,8 +124,17 @@ function boot(file, mode = 'worker', pathname = '/') {
       listeners.set(name, callback)
       eventListeners.push({ name, callback, options })
     },
+    removeEventListener(name, callback) {
+      for (let i = eventListeners.length - 1; i >= 0; i--) {
+        if (eventListeners[i].name === name && eventListeners[i].callback === callback) {
+          eventListeners.splice(i, 1)
+        }
+      }
+      if (listeners.get(name) === callback) listeners.delete(name)
+    },
     querySelector(selector) { return selectors.get(selector) || null },
     querySelectorAll(selector) { return selectors.get(selector) || [] },
+    createElementNS(_, tag) { return new ElementMock(tag) },
     createElement(tag) {
       if (tag === 'canvas') {
         return {
@@ -221,16 +256,21 @@ function boot(file, mode = 'worker', pathname = '/') {
         setContainer: (element) => { container = element; },
         cancelWait: () => pendingWaitCancel?.(),
         catching: () => Boolean(liveCatchupTimer),
+        collectPlayerElements, ensureVolumeGain, showTooltip, hideTooltip,
+        setTooltip: (node) => { tooltip = node; tooltipText = node; tooltipKey = node },
+        handleKeydown,
         encode: (video) => { videoPlayer = video; return encodeScreenshot(); },
         jobs: () => screenshotWorkerJobs.size,
       };`
     : `globalThis.__test = {
         encode: encodeScreenshot, jobs: () => screenshotWorkerJobs.size,
-        changeVolume, ensurePlayerState, refresh,
+        changeVolume, ensurePlayerState, ensureVolumeGain, refresh,
+        showTooltip, hideTooltip, ensureScreenshotButtons,
       };`
   const source = fs.readFileSync(path.join(__dirname, '..', file), 'utf8')
   assert.match(source, /\}\)\(\)\s*$/)
   vm.createContext(context)
+  setupWindow?.(context.window)
   vm.runInContext(source.replace(/\}\)\(\)\s*$/, exposure + '})()'), context, { filename: file })
 
   return {
@@ -929,4 +969,213 @@ test('Twitch volume: failed gain connections fall back to native output without 
   env.selectors.set('[data-a-target="video-player"]', [])
   env.api.refresh()
   assert.ok(audio.sources[0].disconnected > 0)
+})
+
+test('Twitch volume: wheel without user activation keeps native playback unmuted until activation, and permanent setup errors stop retries', async () => {
+  const env = boot(scripts[1])
+  let allowResume = false
+  let badAttempts = 0
+  const sources = []
+  const gains = []
+  const badVideo = new env.Element('video')
+  Object.assign(badVideo, { volume: 0.5, currentSrc: 'blob:https://www.twitch.tv/bad', isConnected: true })
+
+  env.window.AudioContext = class {
+    constructor() { this.destination = {}; this.state = 'suspended' }
+    resume() {
+      if (allowResume) this.state = 'running'
+      return Promise.resolve()
+    }
+    createGain() {
+      const gain = { gain: { value: 1 }, connect() {}, disconnect() {} }
+      gains.push(gain)
+      return gain
+    }
+    createMediaElementSource(video) {
+      if (video === badVideo) {
+        badAttempts++
+        throw new Error('already connected')
+      }
+      const source = { video, connect() {}, disconnect() {} }
+      sources.push(source)
+      return source
+    }
+  }
+
+  const { player, video } = addTwitchPlayer(env, 0.5)
+  env.api.changeVolume(wheel(video), player)
+  await Promise.resolve()
+  assert.equal(sources.length, 0, 'Must not wrap video while AudioContext stays suspended')
+
+  allowResume = true
+  env.emit('pointerdown', {})
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(sources.length, 1, 'User activation resumes AudioContext and attaches gain')
+  assert.equal(gains[0].gain.value, 0.9)
+
+  env.api.ensureVolumeGain(badVideo)
+  env.api.ensureVolumeGain(badVideo)
+  assert.equal(badAttempts, 1, 'Permanent source creation failures are not retried repeatedly')
+})
+
+test('Twitch screenshot & tooltips: Trusted Types SVG icon builds cleanly, hideTooltip cancels frame and left clamps to player', () => {
+  const env = boot(scripts[1], 'worker', '/', { trustedTypes: true })
+  const player = new env.Element()
+  player.rect = { left: 0, top: 0, right: 400, bottom: 300, width: 400, height: 300 }
+  const controls = new env.Element()
+  const slot = controls.appendChild(new env.Element())
+  const wrapper = slot.appendChild(new env.Element())
+  const theater = wrapper.appendChild(new env.Element('button'))
+  player.queries.set(
+    'button[data-a-target="player-theatre-mode-button"], button[aria-label^="劇院模式"], button[aria-label^="Theater Mode"]',
+    [theater]
+  )
+  // No pre-existing screenshot slot.
+  player.queries.set('[data-a-target="video-player"]', [player])
+
+  env.api.ensurePlayerState(player)
+  env.api.ensureScreenshotButtons(player)
+  const screenshotBtn = controls.children[0].children[0].children[0]
+  assert.ok(screenshotBtn.children[0].tagName === 'svg')
+
+  const tooltipNode = player.queries.get('.twitch-player-tweaks-tooltip') ||
+    player.children.find(child => child.className === 'twitch-player-tweaks-tooltip')
+  tooltipNode.rect = { left: 0, top: 0, right: 60, bottom: 28, width: 60, height: 28 }
+  screenshotBtn.rect = { left: 380, top: 260, right: 400, bottom: 290, width: 20, height: 30 }
+
+  env.api.showTooltip(player, screenshotBtn, '截圖')
+  assert.equal(env.animationFrames.size, 1)
+  env.api.hideTooltip(player)
+  assert.equal(env.animationFrames.size, 0, 'hideTooltip must cancel pending animation frame')
+
+  env.api.showTooltip(player, screenshotBtn, '截圖')
+  env.render()
+  assert.equal(tooltipNode.style.left, '362px')
+})
+
+test('YouTube volume, Shorts transitions & tooltips: defer suspended capture, follow active reel playing, check composedPath and cancel tooltip frame', async () => {
+  const env = boot(scripts[0], 'worker', '/shorts/first')
+  let allowResume = false
+  const sources = []
+  let sourceCount = 0
+  const gain = { gain: { value: 1 }, connect() {} }
+  env.window.AudioContext = class {
+    constructor() { this.destination = {}; this.state = 'suspended' }
+    resume() {
+      if (allowResume) this.state = 'running'
+      return Promise.resolve()
+    }
+    createGain() { return gain }
+    createMediaElementSource(video) {
+      sourceCount++
+      const source = { video, disconnected: 0, connect() {}, disconnect() { this.disconnected++ } }
+      sources.push(source)
+      return source
+    }
+  }
+
+  const shorts = new env.Element('ytd-shorts')
+  const overlay = new env.Element()
+  shorts.appendChild(overlay)
+  const first = addShortsPlayer(env, shorts)
+  env.selectors.set('ytd-shorts', shorts)
+
+  env.emit('wheel', wheel(overlay))
+  await Promise.resolve()
+  assert.equal(sourceCount, 0, 'Suspended AudioContext on wheel must not hijack native playback')
+
+  allowResume = true
+  env.emit('pointerdown', {})
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(sourceCount, 1)
+  assert.equal(gain.gain.value, 0.9)
+
+  // Switch reels without wheeling the second reel.
+  first.area.rect.top = -600
+  first.area.rect.bottom = -100
+  const next = addShortsPlayer(env, shorts)
+  next.player.className = 'html5-video-player'
+  shorts.className = 'ytd-shorts'
+  next.player.volume = 80
+  next.video.closest = (selector) => {
+    if (selector === 'ytd-shorts') return shorts
+    if (selector === '.html5-video-player') return next.player
+    return null
+  }
+  env.emit('playing', { target: next.video })
+  assert.equal(sourceCount, 2)
+  assert.ok(sources[0].disconnected > 0)
+  assert.equal(gain.gain.value, 1.6)
+
+  // Editable target inside shadow DOM (exposed via composedPath) blocks screenshot key.
+  const shadowHost = new env.Element('custom-host')
+  const shadowInput = new env.Element('input')
+  let prevented = false
+  env.api.handleKeydown({
+    key: 's',
+    target: shadowHost,
+    composedPath: () => [shadowInput, shadowHost],
+    preventDefault() { prevented = true },
+  })
+  assert.equal(prevented, false)
+
+  // hideTooltip cancels pending tooltip frame.
+  const ytTooltip = new env.Element()
+  ytTooltip.dataset = { visible: 'false' }
+  env.api.setTooltip(ytTooltip)
+  env.api.setPlayers(first.video, Object.assign(new env.Element(), { getBoundingClientRect: () => ({ left: 0, width: 500 }) }))
+  const beforeFrames = env.animationFrames.size
+  env.api.showTooltip(new env.Element(), '截圖')
+  assert.equal(env.animationFrames.size, beforeFrames + 1)
+  env.api.hideTooltip()
+  assert.equal(env.animationFrames.size, beforeFrames)
+})
+
+test('YouTube player lookup & initial response: scope player queries to #movie_player and chain upstream ytInitialPlayerResponse descriptors', () => {
+  let stored = undefined
+  let upstreamSets = 0
+  let upstreamGets = 0
+  const env = boot(scripts[0], 'worker', '/watch', {
+    setupWindow(win) {
+      Object.defineProperty(win, 'ytInitialPlayerResponse', {
+        configurable: true,
+        enumerable: true,
+        get() { upstreamGets++; return stored },
+        set(value) { upstreamSets++; stored = value },
+      })
+    },
+  })
+
+  env.window.ytInitialPlayerResponse = { videoDetails: { isLive: false } }
+  const firstLive = { videoDetails: { isLive: true } }
+  env.window.ytInitialPlayerResponse = firstLive
+  const secondLive = { videoDetails: { isLive: true } }
+  env.window.ytInitialPlayerResponse = secondLive
+  assert.equal(upstreamSets, 3)
+  assert.ok(upstreamGets >= 2)
+  assert.equal(firstLive.videoDetails.isLiveDvrEnabled, true)
+  assert.equal(secondLive.videoDetails.isLiveDvrEnabled, true)
+  assert.equal(env.window.ytInitialPlayerResponse, secondLive)
+
+  const previewPlayer = new env.Element()
+  previewPlayer.className = 'html5-video-player'
+  const previewContainer = previewPlayer.appendChild(new env.Element())
+  const moviePlayer = new env.Element()
+  moviePlayer.className = 'html5-video-player'
+
+  env.selectors.set('#movie_player', moviePlayer)
+  env.selectors.set('.html5-video-container', previewContainer)
+  env.selectors.set('button.ytp-size-button', new env.Element('button'))
+  env.selectors.set('.ytp-progress-bar', new env.Element())
+  env.selectors.set('#movie_player video', new env.Element('video'))
+  assert.equal(env.api.collectPlayerElements(), false, 'Must ignore containers owned by inline preview players')
+
+  const ownContainer = moviePlayer.appendChild(new env.Element())
+  moviePlayer.queries.set('.html5-video-container', ownContainer)
+  moviePlayer.queries.set('button.ytp-size-button', new env.Element('button'))
+  moviePlayer.queries.set('.ytp-progress-bar', new env.Element())
+  moviePlayer.queries.set('video', new env.Element('video'))
+  assert.equal(env.api.collectPlayerElements(), true)
 })

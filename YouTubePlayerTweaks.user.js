@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Player Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.2.17
+// @version     0.2.18
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubePlayerTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubePlayerTweaks.user.js
 // @description 提供 YouTube 原解析度 PNG 截圖、滾輪音量與速度調整、直播追平，並擴大直播回看範圍。
@@ -82,6 +82,7 @@
   // release the global so uBO and other scriptlets can keep editing it normally.
   const initialDescriptor =
     Object.getOwnPropertyDescriptor(pageWindow, 'ytInitialPlayerResponse')
+  const previousInitialGetter = initialDescriptor?.get
   const previousInitialSetter = initialDescriptor?.set
   let initialResponse = pageWindow.ytInitialPlayerResponse
 
@@ -89,15 +90,19 @@
     try {
       Object.defineProperty(pageWindow, 'ytInitialPlayerResponse', {
         configurable: true,
+        enumerable: initialDescriptor ? initialDescriptor.enumerable : true,
         get() {
-          return initialResponse
+          return previousInitialGetter ? previousInitialGetter.call(this) : initialResponse
         },
         set(value) {
           previousInitialSetter?.call(this, value)
           initialResponse = value
-          if (patchResponse(value)) {
+          const current = previousInitialGetter ? previousInitialGetter.call(this) : value
+          const didPatch = patchResponse(current) || (current !== value && patchResponse(value))
+          if (didPatch && !previousInitialGetter && !previousInitialSetter) {
             Object.defineProperty(pageWindow, 'ytInitialPlayerResponse', {
               configurable: true,
+              enumerable: initialDescriptor ? initialDescriptor.enumerable : true,
               writable: true,
               value,
             })
@@ -213,10 +218,15 @@
   let volumeGain = null
   let volumeSource = null
   const volumeSources = new WeakMap()
+  const failedVolumeVideos = new WeakSet()
+  let volumeGainEnabled = false
+  let volumeActivationBound = false
+  let pendingVolumeTarget = null
   let floatingBar
   let tooltip
   let tooltipText
   let tooltipKey
+  let tooltipFrame = 0
   let liveBtn
   let floatingBarTimer = 0
   let persistentFloatingBarText = ''
@@ -318,11 +328,13 @@
 
   const isShortsPage = () => location.pathname.startsWith('/shorts/')
 
+  const eventTarget = (event) => event?.composedPath?.()[0] || event?.target
+
   const isEditableTarget = (target) =>
     target instanceof HTMLElement &&
     (
       target.isContentEditable ||
-      target.matches('input, textarea, [role="textbox"]')
+      target.matches('input, textarea, select, [role="textbox"], [contenteditable="true"], [contenteditable=""]')
     )
 
   const twoDigit = (num) => num.toString().padStart(2, '0')
@@ -449,10 +461,19 @@
     tooltip.dataset.hasKey = String(Boolean(key))
     tooltip.dataset.visible = 'true'
 
-    requestAnimationFrame(() => positionTooltip(button))
+    if (tooltipFrame) cancelAnimationFrame(tooltipFrame)
+    tooltipFrame = requestAnimationFrame(() => {
+      tooltipFrame = 0
+      if (!tooltip || tooltip.dataset.visible !== 'true') return
+      positionTooltip(button)
+    })
   }
 
   const hideTooltip = () => {
+    if (tooltipFrame) {
+      cancelAnimationFrame(tooltipFrame)
+      tooltipFrame = 0
+    }
     tooltip.dataset.visible = 'false'
   }
 
@@ -833,37 +854,87 @@
     volumeGain.gain.value = MAX_VOLUME_GAIN * volume / 100
   }
 
+  const bindVolumeActivation = () => {
+    if (volumeActivationBound) return
+    volumeActivationBound = true
+    const activate = () => {
+      if (!volumeAudioContext) return
+      const resumeAndApply = () => {
+        if (volumeAudioContext?.state !== 'running') return
+        if (volumeGainEnabled && (pendingVolumeTarget || videoPlayer)) {
+          pendingVolumeTarget = null
+          ensureVolumeGain()
+        }
+        document.removeEventListener?.('pointerdown', activate, true)
+        document.removeEventListener?.('keydown', activate, true)
+        volumeActivationBound = false
+      }
+      if (volumeAudioContext.state === 'suspended') {
+        volumeAudioContext.resume().then(resumeAndApply).catch(() => {})
+      } else {
+        resumeAndApply()
+      }
+    }
+    document.addEventListener('pointerdown', activate, { capture: true, passive: true })
+    document.addEventListener('keydown', activate, { capture: true, passive: true })
+  }
+
   const ensureVolumeGain = () => {
+    volumeGainEnabled = true
     const AudioContextClass = pageWindow.AudioContext || pageWindow.webkitAudioContext
-    if (!AudioContextClass || !videoPlayer) return
+    if (!AudioContextClass || !videoPlayer || failedVolumeVideos.has(videoPlayer)) return
 
-    // A cross-origin media URL without CORS would become silent when routed
-    // through MediaElementAudioSourceNode. YouTube's same-origin blob is safe.
-    const sourceUrl = videoPlayer.currentSrc
-    if (sourceUrl && new URL(sourceUrl, pageWindow.location.href).origin !== pageWindow.location.origin) return
-
+    let source
     try {
+      // A cross-origin media URL without CORS would become silent when routed
+      // through MediaElementAudioSourceNode. YouTube's same-origin blob is safe.
+      const sourceUrl = videoPlayer.currentSrc
+      if (sourceUrl && new URL(sourceUrl, pageWindow.location.href).origin !== pageWindow.location.origin) return
+
       if (!volumeAudioContext) {
         volumeAudioContext = new AudioContextClass()
         volumeGain = volumeAudioContext.createGain()
         volumeGain.connect(volumeAudioContext.destination)
       }
 
-      if (volumeSource !== videoPlayer) {
+      if (volumeAudioContext.state === 'suspended') {
+        volumeAudioContext.resume().then(() => {
+          if (volumeAudioContext?.state === 'running' && volumeGainEnabled && videoPlayer) {
+            pendingVolumeTarget = null
+            ensureVolumeGain()
+          }
+        }).catch(() => {})
+      }
+
+      // Never call createMediaElementSource before AudioContext is running:
+      // taking ownership during a wheel gesture without user activation mutes playback.
+      if (volumeAudioContext.state !== 'running') {
+        pendingVolumeTarget = videoPlayer
+        bindVolumeActivation()
+        return
+      }
+
+      const cachedSource = volumeSources.get(videoPlayer)
+      if (!cachedSource || volumeSource !== cachedSource) {
         volumeSource?.disconnect()
-        volumeSource = volumeSources.get(videoPlayer)
+        volumeSource = cachedSource
         if (!volumeSource) {
-          volumeSource = volumeAudioContext.createMediaElementSource(videoPlayer)
+          source = volumeAudioContext.createMediaElementSource(videoPlayer)
+          volumeSource = source
           volumeSources.set(videoPlayer, volumeSource)
         }
         volumeSource.connect(volumeGain)
       }
 
       syncVolumeGain()
-      if (volumeAudioContext.state === 'suspended') {
-        volumeAudioContext.resume().catch(() => {})
-      }
     } catch (_) {
+      if (source) {
+        try {
+          source.disconnect()
+          source.connect(volumeAudioContext.destination)
+        } catch (_) {}
+      }
+      if (!volumeSources.has(videoPlayer)) failedVolumeVideos.add(videoPlayer)
       // Keep YouTube's native volume working if Web Audio is unavailable.
     }
   }
@@ -1041,7 +1112,7 @@
 
   const handleShortsWheel = (event) => {
     if (!isShortsPage() || event.ctrlKey || event.deltaY === 0) return
-    if (!(event.target instanceof Node) || isEditableTarget(event.target)) return
+    if (!(event.target instanceof Node) || isEditableTarget(eventTarget(event))) return
 
     const shorts = event.target.closest?.('ytd-shorts')
     if (!shorts) return
@@ -1182,8 +1253,27 @@
       passive: false,
       signal,
     })
+    const syncShortsAudio = (event, requireActive = false) => {
+      if (!volumeGainEnabled) return
+      const target = event.target
+      if (!target || target.tagName?.toLowerCase?.() !== 'video') return
+      const shorts = target.closest?.('ytd-shorts')
+      const player = target.closest?.('.html5-video-player')
+      if (!shorts || !player || typeof player.getVolume !== 'function') return
+      if (requireActive) {
+        const reel = target.closest?.('ytd-reel-video-renderer')
+        const active = reel?.hasAttribute?.('is-active') ||
+          (!shorts.querySelector?.('ytd-reel-video-renderer[is-active]') && target.paused === false)
+        if (!active) return
+      }
+      moviePlayer = player
+      videoPlayer = target
+      ensureVolumeGain()
+    }
+    document.addEventListener('playing', (event) => syncShortsAudio(event, false), { capture: true, signal })
     document.addEventListener('volumechange', (event) => {
       if (event.target === videoPlayer) syncVolumeGain()
+      else syncShortsAudio(event, true)
     }, { capture: true, signal })
 
     return () => {
@@ -1205,7 +1295,7 @@
       !event.metaKey &&
       !event.shiftKey &&
       !event.repeat &&
-      !isEditableTarget(event.target)
+      !isEditableTarget(eventTarget(event))
     ) {
       event.preventDefault()
       screenShot()
@@ -1213,12 +1303,19 @@
   }
 
   const collectPlayerElements = () => {
-    container = $('.html5-video-container')
-    sizeBtn = $('button.ytp-size-button')
-    videoTitle = $('a.ytp-title-link')
     moviePlayer = $('#movie_player')
-    progressBar = $('.ytp-progress-bar')
-    videoPlayer = $('#movie_player video')
+    const pick = (selector, globalSelector = selector) => {
+      const scoped = moviePlayer?.querySelector?.(selector)
+      if (scoped) return scoped
+      const candidate = $(globalSelector)
+      const owner = candidate?.closest?.('.html5-video-player')
+      return !owner || owner === moviePlayer ? candidate : null
+    }
+    container = pick('.html5-video-container')
+    sizeBtn = pick('button.ytp-size-button')
+    videoTitle = pick('a.ytp-title-link')
+    progressBar = pick('.ytp-progress-bar')
+    videoPlayer = pick('video', '#movie_player video')
 
     return Boolean(container && sizeBtn && moviePlayer && progressBar && videoPlayer)
   }
@@ -1234,10 +1331,13 @@
         if (collectPlayerElements()) finish(true)
       })
 
+      let settled = false
       let fallbackTimer = 0
       let pollTimer = 0
       const cancel = () => finish(false)
       const finish = (ready) => {
+        if (settled) return
+        settled = true
         clearTimeout(fallbackTimer)
         clearInterval(pollTimer)
         observer.disconnect()
@@ -1271,7 +1371,7 @@
     floatingBar = getFloatingBar()
     tooltip = getTooltip()
 
-    if (volumeAudioContext) ensureVolumeGain()
+    if (volumeGainEnabled || volumeAudioContext) ensureVolumeGain()
 
     const buttons = ensureButtons()
     bindButtonEvents(buttons, signal)

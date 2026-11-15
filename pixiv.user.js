@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name          Pixiv Jump Directly
-// @version       0.2.3
+// @version       0.2.4
 // @updateURL     https://raw.githubusercontent.com/rtashklzx47277/Script/main/pixiv.user.js
 // @downloadURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/pixiv.user.js
 // @description   略過 Pixiv 外部連結跳轉頁，直接前往原始 HTTP／HTTPS 目標網址。
@@ -37,5 +37,25 @@
     targetUrl += window.location.hash
   }
 
-  window.location.href = targetUrl
+  if (/[\u0000-\u001f\u007f]/.test(targetUrl)) return
+
+  let parsedUrl
+  try {
+    parsedUrl = new URL(targetUrl)
+  } catch (_) {
+    return
+  }
+
+  if (
+    (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') ||
+    !parsedUrl.hostname
+  ) {
+    return
+  }
+
+  if (typeof window.location.replace === 'function') {
+    window.location.replace(targetUrl)
+  } else {
+    window.location.href = targetUrl
+  }
 })()

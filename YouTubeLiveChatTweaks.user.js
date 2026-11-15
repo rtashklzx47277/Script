@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.8.7
+// @version     0.8.8
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @description 提供 YouTube 聊天室用戶資訊卡、獨立 SC／會員事件紀錄、角色與帳號包含／排除篩選、表情複製、重新載入與自動跟隨。
@@ -379,7 +379,7 @@
     target instanceof HTMLElement &&
     (
       target.isContentEditable ||
-      target.matches('input, textarea, [role="textbox"]')
+      target.matches('input, textarea, select, [role="textbox"], [contenteditable="true"], [contenteditable=""]')
     )
 
   const isNearBottom = (element) =>
@@ -469,7 +469,8 @@
   }
 
   const handleScrollKeys = (event) => {
-    if (isEditableTarget(event.target) || event.target?.closest?.('.ytcf-panel')) return
+    const target = event.composedPath?.()[0] || event.target
+    if (isEditableTarget(target) || target?.closest?.('.ytcf-panel') || event.target?.closest?.('.ytcf-panel')) return
 
     if (SCROLL_UP_KEYS.has(event.key)) {
       followLatest = false
@@ -694,9 +695,11 @@
       }
     }
     const safeArchiveUrl = value => {
+      const trimmed = typeof value === 'string' ? value.trim() : ''
+      if (!trimmed) return ''
       try {
-        const url = new URL(value, location.href)
-        return ['https:', 'http:'].includes(url.protocol) || /^data:image\/(png|gif|jpe?g|webp);base64,/i.test(value) ? url.href : ''
+        const url = new URL(trimmed, location.href)
+        return ['https:', 'http:'].includes(url.protocol) || /^data:image\/(png|gif|jpe?g|webp|avif);base64,/i.test(trimmed) ? url.href : ''
       } catch (_) { return '' }
     }
     const restoreTree = (tree, budget = { remaining: 3000 }, depth = 0) => {
@@ -1041,7 +1044,14 @@
       }
       histories.delete(channel)
       histories.set(channel, history)
-      if (histories.size > MAX_CHANNELS) histories.delete(histories.keys().next().value)
+      if (histories.size > MAX_CHANNELS) {
+        const oldest = histories.keys().next().value
+        const evicted = histories.get(oldest)
+        histories.delete(oldest)
+        if (evicted?.saveQueue?.size) {
+          Promise.resolve(evicted.restorePromise).then(() => flushHistory(evicted)).catch(() => {})
+        }
+      }
       return history
     }
 
@@ -1143,7 +1153,7 @@
         authorHandle: [originalName, author.textContent].find(name => typeof name === 'string' && name.trim().startsWith('@') && normalizeAccount(name))?.trim() || '',
         colors: supportEvent ? readEventColors(line, data) : null,
         id: line.id || data.id || '', time: $('#timestamp', line)?.textContent?.trim() || textValue(data.timestampText),
-        avatar: $('#author-photo img', line)?.getAttribute('src') || identity.authorPhoto?.thumbnails?.[0]?.url || '',
+        avatar: safeArchiveUrl($('#author-photo img', line)?.getAttribute('src') || identity.authorPhoto?.thumbnails?.[0]?.url || ''),
         contextMenuEndpoint: data.contextMenuEndpoint || identity.contextMenuEndpoint }
     }
 
@@ -1429,12 +1439,18 @@
       const card = element('section', { class: 'ytuc-card', role: 'dialog', tabindex: '-1',
         'aria-label': '用戶資訊', 'aria-modal': 'false' })
       const photo = element('div', { class: 'ytuc-photo', 'aria-hidden': 'true' })
-      if (/^https:\/\//.test(author.avatar)) photo.appendChild(element('img', { src: originalImageUrl(author.avatar), alt: '' }))
+      const safeAvatar = safeArchiveUrl(originalImageUrl(author.avatar))
+      if (/^https:\/\//.test(safeAvatar)) photo.appendChild(element('img', { src: safeAvatar, alt: '' }))
       else photo.textContent = (author.name || author.user || '?').replace(/^@/, '').slice(0,1).toUpperCase()
       const title = element('a', { class: 'ytuc-name', target: '_blank', rel: 'noopener noreferrer' }, [author.name || author.user])
       if (author.color) title.style.color = author.color
-      title.href = author.channelId ? `https://www.youtube.com/channel/${author.channelId}`
-        : `https://www.youtube.com/${author.user}`
+      const rawUser = String(author.user || '').trim().replace(/^\/+/, '')
+      const safeHandle = rawUser.startsWith('@')
+        ? `@${encodeURIComponent(rawUser.slice(1))}`
+        : encodeURIComponent(rawUser)
+      title.href = author.channelId
+        ? `https://www.youtube.com/channel/${encodeURIComponent(author.channelId)}`
+        : `https://www.youtube.com/${safeHandle}`
       const close = element('button', { class: 'ytuc-close', type: 'button', 'aria-label': '關閉用戶資訊' }, ['×'])
       const handle = element('div', { class: 'ytuc-handle' }, [author.user])
       const id = element('div', { class: 'ytuc-id' }, [author.channelId || '無法取得頻道 ID'])
@@ -1453,12 +1469,15 @@
           if (badge.color) item.style.color = badge.color
           if (badge.visual) {
             const visual = clonePresentation(badge.visual)
-            if (visual.tagName?.toLowerCase() === 'img') {
-              const src = visual.getAttribute('src') || ''
-              const original = originalImageUrl(src)
-              if (original !== src) {
-                visual.setAttribute('src', original)
-                visual.removeAttribute('srcset')
+            for (const image of visual.tagName?.toLowerCase() === 'img' ? [visual] : $$('img', visual)) {
+              const src = image.getAttribute('src') || ''
+              const safe = safeArchiveUrl(originalImageUrl(src))
+              if (!safe) {
+                image.removeAttribute('src')
+                image.removeAttribute('srcset')
+              } else if (safe !== src) {
+                image.setAttribute('src', safe)
+                image.removeAttribute('srcset')
               }
             }
             item.appendChild(visual)
@@ -1602,10 +1621,11 @@
       if (message.supportEvent) time.style.color = message.colors.timestamp
       time.textContent = message.time || new Date().toLocaleTimeString('zh-TW', { hour12: false })
       row.appendChild(time)
-      if (message.avatar) {
+      const safeAvatar = safeArchiveUrl(message.avatar)
+      if (safeAvatar) {
         const avatar = document.createElement('img')
         avatar.className = 'ytcf-avatar'
-        avatar.src = message.avatar
+        avatar.src = safeAvatar
         avatar.alt = ''
         row.appendChild(avatar)
       }
@@ -1817,7 +1837,6 @@
         record.visible = false
       }
       for (const [key, record] of state.searchRecords) if (!archived.has(key)) record.retained = false
-      const previousViews = [...list.children]
       let index = 0
       const scrollTop = list.scrollTop
       for (const record of shown) {
@@ -1833,7 +1852,11 @@
           locate.addEventListener('click', () => locateSupportRecord(state, record.storageId))
           record.view.appendChild(locate)
         }
-        if (previousViews[index++] !== record.view) list.appendChild(record.view)
+        const existing = list.children[index++]
+        if (existing !== record.view) {
+          if (existing) existing.insertAdjacentElement('beforebegin', record.view)
+          else list.appendChild(record.view)
+        }
         record.renderedView = record.view
         record.visible = true
         state.messageResizeObserver?.observe(record.view)

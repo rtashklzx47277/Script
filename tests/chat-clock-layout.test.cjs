@@ -531,3 +531,78 @@ test('layout: normal landscape playback keeps its ratio when the waiting backgro
   assert.equal(browser.document.documentElement.style
     .getPropertyValue('--yt-live-layout-player-height'), '607.5px')
 })
+
+test('chat: scroll keys ignore editable targets inside Shadow DOM via composedPath', () => {
+  const browser = createBrowser()
+  const { scroller, items } = addChat(browser)
+  browser.run('YouTubeLiveChatTweaks.user.js')
+  browser.flushFrames()
+
+  const host = new browser.Element('custom-input-host')
+  const shadowInput = new browser.Element('input')
+  shadowInput.matches = (selector) => selector.includes('input')
+  const shadowKey = browser.event('keydown', { key: 'Home', composedPath: () => [shadowInput, host] })
+  Object.defineProperty(shadowKey, 'target', { value: host })
+  browser.document.dispatchEvent(shadowKey)
+  scroller.scrollHeight += 100
+  browser.mutate(items)
+  browser.flushFrames()
+  assert.equal(scroller.scrollTop, scroller.scrollHeight)
+
+  scroller.scrollTop = 500
+  const listKey = browser.event('keydown', { key: 'Home', composedPath: () => [scroller] })
+  browser.document.dispatchEvent(listKey)
+  scroller.scrollHeight += 100
+  browser.mutate(items)
+  browser.flushFrames()
+  assert.equal(scroller.scrollTop, 500)
+})
+
+test('clock: clamps negative elapsed seconds and tolerates malformed navigation URLs', async () => {
+  const browser = createBrowser()
+  addClockChrome(browser, -12)
+  addMicroformat(browser)
+  browser.run('YouTubeLiveClock.user.js')
+  await settle()
+  assert.equal(browser.selectors.get('#yt-live-clock-elapsed').textContent, '0:00')
+  assert.doesNotThrow(() => {
+    browser.document.dispatchEvent(browser.event('yt-navigate-finish', {
+      detail: { endpoint: { commandMetadata: { webCommandMetadata: { url: 'http://[' } } } },
+    }))
+  })
+  await settle()
+  assert.equal(browser.selectors.has('#yt-live-clock-elapsed'), false)
+  browser.navigate('/watch?v=example')
+  await settle()
+  assert.equal(browser.selectors.get('#yt-live-clock-elapsed').textContent, '0:00')
+})
+
+test('layout: stacked mode avoids 100vw, emits one resize on enter, and skips auto-theater in fullscreen', async () => {
+  const browser = createBrowser()
+  const { flexy, sizeButton } = addLayoutChrome(browser, true)
+  flexy.theater = true
+  browser.window.innerWidth = 1000
+  let resizeCount = 0
+  browser.window.addEventListener('resize', () => { resizeCount++ })
+  browser.run('YouTubeLiveLayout.user.js')
+  await settle()
+  browser.flushFrames()
+  const stackedStyle = browser.selectors.get('#yt-chat-theater').textContent
+  assert.equal(stackedStyle.includes('100vw'), false)
+  assert.equal(
+    browser.document.documentElement.style.getPropertyValue('--yt-live-layout-scrollbar-width'),
+    '15px',
+  )
+  assert.equal(resizeCount, 1)
+
+  const fsBrowser = createBrowser()
+  const fs = addLayoutChrome(fsBrowser, true)
+  fsBrowser.selectors.get('#movie_player').classList = {
+    contains: (name) => name === 'ytp-fullscreen',
+  }
+  fsBrowser.run('YouTubeLiveLayout.user.js')
+  await settle()
+  fsBrowser.flushFrames()
+  assert.equal(fs.sizeButton.clickCount || 0, 0)
+  assert.equal(fsBrowser.selectors.has('#yt-video-only-fullscreen'), true)
+})

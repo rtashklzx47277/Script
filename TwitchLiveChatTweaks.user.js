@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        Twitch Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.7.1
+// @version     0.7.2
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
 // @description 依頻道主、管理員、VIP 與帳號包含／排除名單篩選 Twitch 聊天，支援頻道／全域設定、7 天紀錄與自動跟隨。
@@ -36,6 +36,26 @@
 
   const $ = (selector, root = document) => root.querySelector(selector)
   const $$ = (selector, root = document) => [...root.querySelectorAll(selector)]
+  const SVG_NS = 'http://www.w3.org/2000/svg'
+  const buildElement = (tag, attributes = {}, children = [], svg = false) => {
+    const node = svg && typeof document.createElementNS === 'function'
+      ? document.createElementNS(SVG_NS, tag)
+      : document.createElement(tag)
+    for (const [name, value] of Object.entries(attributes)) {
+      if (value === false || value == null) continue
+      const text = value === true ? '' : String(value)
+      node.setAttribute(name, text)
+      if (name === 'class' && typeof node.className === 'string') node.className = text
+      if (name === 'id') node.id = text
+      if (name === 'hidden') node.hidden = true
+    }
+    for (const child of children) {
+      node.appendChild(typeof child === 'string' ? document.createTextNode(child) : child)
+    }
+    return node
+  }
+  const element = (tag, attributes, children) => buildElement(tag, attributes, children, false)
+  const svgElement = (tag, attributes, children) => buildElement(tag, attributes, children, true)
   const normalizeUsers = (value) => [...new Set(String(value || '')
     .toLowerCase().split(/[\s,，;；]+/).map(name => name.replace(/^@/, ''))
     .filter(name => /^[a-z0-9_]{1,25}$/.test(name)))]
@@ -162,18 +182,36 @@
       children: [...node.childNodes].map(child => archiveTree(child, depth + 1)).filter(Boolean) }
   }
   const safeArchiveUrl = value => {
-    if (typeof value !== 'string' || !value.trim()) return ''
+    const trimmed = typeof value === 'string' ? value.trim() : ''
+    if (!trimmed) return ''
     try {
-      const url = new URL(value, location.href)
-      return ['https:', 'http:'].includes(url.protocol) || /^data:image\/(png|gif|jpe?g|webp|avif);base64,/i.test(value) ? url.href : ''
+      const url = new URL(trimmed, location.href)
+      return ['https:', 'http:'].includes(url.protocol) || /^data:image\/(png|gif|jpe?g|webp|avif);base64,/i.test(trimmed) ? url.href : ''
     } catch (_) { return '' }
   }
-  const safeSrcset = value => value.split(',').map(part => {
-    const [url, descriptor, extra] = part.trim().split(/\s+/)
-    const safe = safeArchiveUrl(url)
-    return safe && !extra && (!descriptor || /^\d+(?:\.\d+)?[wx]$/.test(descriptor))
-      ? [safe, descriptor].filter(Boolean).join(' ') : ''
-  }).filter(Boolean).join(', ')
+  const safeSrcset = value => {
+    const candidates = []
+    let rest = typeof value === 'string' ? value.trim() : ''
+    while (rest) {
+      let candidate
+      const dataMatch = rest.match(/^(data:[^\s,]*,[^\s,]+(?:\s+[^\s,]*)?)(?:\s*,\s*(.*))?$/is)
+      if (dataMatch) {
+        candidate = dataMatch[1]
+        rest = (dataMatch[2] || '').trim()
+      } else {
+        const comma = rest.indexOf(',')
+        candidate = (comma === -1 ? rest : rest.slice(0, comma)).trim()
+        rest = comma === -1 ? '' : rest.slice(comma + 1).trim()
+      }
+      if (!candidate) continue
+      const [url, descriptor, extra] = candidate.split(/\s+/)
+      const safe = safeArchiveUrl(url)
+      if (safe && !extra && (!descriptor || /^\d+(?:\.\d+)?[wx]$/.test(descriptor))) {
+        candidates.push([safe, descriptor].filter(Boolean).join(' '))
+      }
+    }
+    return candidates.join(', ')
+  }
   const restoreTree = (tree, budget = { remaining: 3000 }, depth = 0) => {
     if (!tree || typeof tree !== 'object' || depth > 20 || --budget.remaining < 0) return null
     if (typeof tree.text === 'string') return document.createTextNode(tree.text)
@@ -384,7 +422,14 @@
     }
     histories.delete(channel)
     histories.set(channel, history)
-    if (histories.size > MAX_CHANNELS) histories.delete(histories.keys().next().value)
+    if (histories.size > MAX_CHANNELS) {
+      const oldest = histories.keys().next().value
+      const evicted = histories.get(oldest)
+      histories.delete(oldest)
+      if (evicted?.saveQueue?.size) {
+        Promise.resolve(evicted.restorePromise).then(() => flushHistory(evicted)).catch(() => {})
+      }
+    }
     return history
   }
 
@@ -531,13 +576,31 @@
     state.renderFrame = 0
   }
 
+  const cancelListFollow = state => {
+    if (state.followFrame) cancelAnimationFrame(state.followFrame)
+    state.followFrame = 0
+  }
+
+  const scheduleListFollow = state => {
+    if (mounted !== state || !state.history.enabled || !state.history.follow || document.hidden || state.followFrame || state.renderFrame) return
+    state.followFrame = requestAnimationFrame(() => {
+      state.followFrame = 0
+      if (mounted !== state || !state.history.enabled || !state.history.follow || document.hidden) return
+      state.list.scrollTop = state.list.scrollHeight
+      state.followScrollTop = state.list.scrollTop
+      state.latest.hidden = true
+    })
+  }
+
   const renderMessages = (state, rebuild = false) => {
     cancelMessageRender(state)
+    cancelListFollow(state)
     const { history, list, empty, count, latest } = state
     const filterKey = JSON.stringify(history.settings)
     const full = rebuild || state.renderedHistory !== history || state.filterKey !== filterKey
     if (full) state.visibleCount = 0
     for (const record of history.removed) {
+      if (record.renderedView) state.messageResizeObserver?.unobserve(record.renderedView)
       if (!full && record.renderedView?.parentElement === list && record.visible) state.visibleCount--
       record.renderedView?.remove()
       record.renderedView = null
@@ -551,12 +614,15 @@
       state.visibleCount += Number(show) - (full ? 0 : Number(!!wasVisible))
       if (record.view.hidden !== !show) record.view.hidden = !show
       if (oldView && oldView !== record.view) {
+        state.messageResizeObserver?.unobserve(oldView)
         if (oldView.parentElement === list) oldView.replaceWith(record.view)
         else oldView.remove()
       }
       if (full || record.view.parentElement !== list) list.appendChild(record.view)
       record.renderedView = record.view
       record.visible = show
+      if (show) state.messageResizeObserver?.observe(record.view)
+      else state.messageResizeObserver?.unobserve(record.view)
     }
     history.dirty.clear()
     state.renderedHistory = history
@@ -569,12 +635,16 @@
       state.older.textContent = `載入較早紀錄（${history.older.size}）`
     }
     // All row writes finish before the one layout read needed for following.
-    if (history.follow) list.scrollTop = list.scrollHeight
+    if (history.follow) {
+      list.scrollTop = list.scrollHeight
+      state.followScrollTop = list.scrollTop
+    }
     latest.hidden = history.follow
   }
 
   const scheduleMessageRender = state => {
     if (!state.history.enabled || document.hidden || state.renderFrame) return
+    cancelListFollow(state)
     state.renderFrame = requestAnimationFrame(() => {
       state.renderFrame = 0
       if (mounted === state && state.history.enabled && !document.hidden) renderMessages(state)
@@ -582,6 +652,8 @@
   }
 
   const releaseMessageViews = state => {
+    state.messageResizeObserver?.disconnect()
+    cancelListFollow(state)
     cancelMessageRender(state)
     for (const record of [...state.history.messages, ...state.history.removed]) {
       record.renderedView?.remove()
@@ -593,8 +665,11 @@
 
   const handleMessageVisibility = () => {
     if (!mounted) return
-    if (document.hidden) cancelMessageRender(mounted)
-    else if (mounted.history.dirty.size || mounted.history.removed.size) scheduleMessageRender(mounted)
+    if (document.hidden) { cancelMessageRender(mounted); cancelListFollow(mounted) }
+    else {
+      if (mounted.history.dirty.size || mounted.history.removed.size) scheduleMessageRender(mounted)
+      scheduleListFollow(mounted)
+    }
   }
 
   let panelFramePending = false
@@ -637,6 +712,9 @@
   }
 
   const setEnabled = (state, enabled) => {
+    state.messageResizeObserver?.disconnect()
+    cancelListFollow(state)
+    state.readerScrollIntent = false
     cancelMessageRender(state)
     state.history.enabled = enabled
     state.host.classList.toggle('ttc-active', enabled)
@@ -700,43 +778,72 @@
   }
 
   const createPanel = (state) => {
-    const panel = document.createElement('section')
-    panel.className = 'ttc-panel'
-    panel.setAttribute('aria-label', '指定用戶聊天室')
-    panel.innerHTML = `
-      <div class="ttc-toolbar">
-        <div class="ttc-options">
-          <button type="button" class="ttc-target-summary" aria-label="目標用戶" aria-controls="ttc-target-settings" aria-expanded="false">目標用戶</button>
-          <span class="ttc-count"></span>
-        </div>
-        <div class="ttc-targets" id="ttc-target-settings" hidden>
-          <div class="ttc-roles">
-            <label><input type="checkbox" name="broadcaster"> Broadcaster</label>
-            <label><input type="checkbox" name="moderators"> Moderator</label>
-            <label><input type="checkbox" name="vip"> VIP</label>
-          </div>
-          <label class="ttc-target-scope">名單範圍<select name="target-scope"><option value="channel">目前頻道</option><option value="global">全域</option></select></label>
-          <div class="ttc-target-modes" role="group" aria-label="帳號篩選方式">
-            <button type="button" class="ttc-mode-include" aria-label="＋ 包含">＋ 包含</button>
-            <button type="button" class="ttc-mode-exclude" aria-label="－ 排除">－ 排除</button>
-          </div>
-          <form class="ttc-users">
-            <label>新增帳號<input type="text" name="users" placeholder="英文帳號" autocomplete="off" spellcheck="false"></label>
-            <button type="submit">新增</button>
-          </form>
-          <label class="ttc-target-search">搜尋帳號<input type="search" name="search-users" placeholder="搜尋目標帳號" autocomplete="off"></label>
-          <ul class="ttc-target-list" aria-label="目標用戶清單"></ul>
-          <p class="ttc-target-empty"></p>
-          <p class="ttc-target-status" role="status" aria-live="polite"></p>
-        </div>
-      </div>
-      <p class="ttc-history-status" role="status"></p>
-      <p class="ttc-empty">尚無符合條件的發言。新增目標帳號後開始收集。</p>
-      <button class="ttc-older" type="button" hidden>載入較早紀錄</button>
-      <div class="ttc-list" role="log" aria-label="篩選後的聊天訊息" aria-live="off"></div>
-      <button class="ttc-latest" type="button" hidden>回到最新訊息</button>`
+    const panel = element('section', { class: 'ttc-panel', 'aria-label': '指定用戶聊天室' }, [
+      element('div', { class: 'ttc-toolbar' }, [
+        element('div', { class: 'ttc-options' }, [
+          element('button', {
+            type: 'button',
+            class: 'ttc-target-summary',
+            'aria-label': '目標用戶',
+            'aria-controls': 'ttc-target-settings',
+            'aria-expanded': 'false',
+          }, ['目標用戶']),
+          element('span', { class: 'ttc-count' }),
+        ]),
+        element('div', { class: 'ttc-targets', id: 'ttc-target-settings', hidden: '' }, [
+          element('div', { class: 'ttc-roles' }, [
+            element('label', {}, [element('input', { type: 'checkbox', name: 'broadcaster' }), ' Broadcaster']),
+            element('label', {}, [element('input', { type: 'checkbox', name: 'moderators' }), ' Moderator']),
+            element('label', {}, [element('input', { type: 'checkbox', name: 'vip' }), ' VIP']),
+          ]),
+          element('label', { class: 'ttc-target-scope' }, [
+            '名單範圍',
+            element('select', { name: 'target-scope' }, [
+              element('option', { value: 'channel' }, ['目前頻道']),
+              element('option', { value: 'global' }, ['全域']),
+            ]),
+          ]),
+          element('div', { class: 'ttc-target-modes', role: 'group', 'aria-label': '帳號篩選方式' }, [
+            element('button', { type: 'button', class: 'ttc-mode-include', 'aria-label': '＋ 包含' }, ['＋ 包含']),
+            element('button', { type: 'button', class: 'ttc-mode-exclude', 'aria-label': '－ 排除' }, ['－ 排除']),
+          ]),
+          element('form', { class: 'ttc-users' }, [
+            element('label', {}, [
+              '新增帳號',
+              element('input', {
+                type: 'text',
+                name: 'users',
+                placeholder: '英文帳號',
+                autocomplete: 'off',
+                spellcheck: 'false',
+              }),
+            ]),
+            element('button', { type: 'submit' }, ['新增']),
+          ]),
+          element('label', { class: 'ttc-target-search' }, [
+            '搜尋帳號',
+            element('input', { type: 'search', name: 'search-users', placeholder: '搜尋目標帳號', autocomplete: 'off' }),
+          ]),
+          element('ul', { class: 'ttc-target-list', 'aria-label': '目標用戶清單' }),
+          element('p', { class: 'ttc-target-empty' }),
+          element('p', { class: 'ttc-target-status', role: 'status', 'aria-live': 'polite' }),
+        ]),
+      ]),
+      element('p', { class: 'ttc-history-status', role: 'status' }),
+      element('p', { class: 'ttc-empty' }, ['尚無符合條件的發言。新增目標帳號後開始收集。']),
+      element('button', { class: 'ttc-older', type: 'button', hidden: '' }, ['載入較早紀錄']),
+      element('div', { class: 'ttc-list', role: 'log', 'aria-label': '篩選後的聊天訊息', 'aria-live': 'off' }),
+      element('button', { class: 'ttc-latest', type: 'button', hidden: '' }, ['回到最新訊息']),
+    ])
     state.panel = panel
     state.list = $('.ttc-list', panel)
+    if (typeof ResizeObserver === 'function') {
+      state.messageResizeObserver = new ResizeObserver(() => scheduleListFollow(state))
+    }
+    // Image loading may change a row after the initial append and scroll.
+    // Capture load/error too, including browsers without ResizeObserver.
+    state.list.addEventListener('load', () => scheduleListFollow(state), true)
+    state.list.addEventListener('error', () => scheduleListFollow(state), true)
     state.empty = $('.ttc-empty', panel)
     state.count = $('.ttc-count', panel)
     state.latest = $('.ttc-latest', panel)
@@ -805,10 +912,29 @@
     setTargetsOpen(false)
     renderTargets(state)
     state.list.addEventListener('scroll', () => {
-      state.history.follow = state.list.scrollHeight - state.list.scrollTop - state.list.clientHeight < 40
+      if (!state.history.enabled || state.panel.hidden) return
+      const nearBottom = state.list.scrollHeight - state.list.scrollTop - state.list.clientHeight < 40
+      const movedUp = Number.isFinite(state.followScrollTop) && state.list.scrollTop < state.followScrollTop - 1
+      // A delayed image can invalidate a pending programmatic scroll event.
+      // Preserve following unless the reader actually moves up or scrolls.
+      if (state.history.follow && !state.readerScrollIntent && !movedUp && !nearBottom) {
+        scheduleListFollow(state)
+        return
+      }
+      state.history.follow = nearBottom
+      if (nearBottom) {
+        state.readerScrollIntent = false
+        state.followScrollTop = state.list.scrollTop
+      }
       state.latest.hidden = state.history.follow
     }, { passive: true })
+    for (const event of ['wheel', 'touchstart', 'pointerdown', 'keydown']) {
+      state.list.addEventListener(event, () => {
+        state.readerScrollIntent = true
+      }, { passive: true })
+    }
     state.latest.addEventListener('click', () => {
+      state.readerScrollIntent = false
       state.history.follow = true
       renderMessages(state)
     })
@@ -839,11 +965,16 @@
     const state = { history: getHistory(channel), header, scroller, host: scroller.parentElement }
     state.host.classList.add('ttc-host')
     scroller.classList.add('ttc-source')
-    const button = document.createElement('button')
+    const button = element('button', {
+      type: 'button',
+      class: 'ttc-toggle',
+      'aria-label': '切換指定用戶聊天室',
+    }, [
+      svgElement('svg', { width: '20', height: '20', viewBox: '0 0 24 24', 'aria-hidden': 'true' }, [
+        svgElement('path', { fill: 'currentColor', d: 'M3 4h18v2l-7 8v6l-4 2v-8L3 6V4zm3 2 6 7 6-7H6z' }),
+      ]),
+    ])
     button.type = 'button'
-    button.className = 'ttc-toggle'
-    button.setAttribute('aria-label', '切換指定用戶聊天室')
-    button.innerHTML = `<svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M3 4h18v2l-7 8v6l-4 2v-8L3 6V4zm3 2 6 7 6-7H6z"/></svg>`
     state.button = button
     const community = $('[data-test-selector="chat-viewer-list"]', header)
     const actions = community?.parentElement?.parentElement

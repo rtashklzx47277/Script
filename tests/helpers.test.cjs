@@ -185,3 +185,70 @@ test('channel: pause first early play, but allow later manual playback', async (
   assert.equal(video.calls, 1)
   assert.equal(env.jobs.size, 0)
 })
+
+test('channel: ignores hidden cached browse video until visible browse video appears', async () => {
+  const env = environment(scripts[2].file, '/@channel')
+  const hiddenVideo = scripts[2].node()
+  hiddenVideo.closest = (selector) => (selector === 'ytd-browse[hidden]' ? {} : null)
+  env.nodes.set('ytd-browse video', hiddenVideo)
+  await env.mutate()
+  assert.equal(hiddenVideo.paused, false)
+  assert.equal(hiddenVideo.calls, 0)
+
+  const visibleVideo = scripts[2].node()
+  env.nodes.set('ytd-browse:not([hidden]) video', visibleVideo)
+  await env.mutate()
+  assert.equal(hiddenVideo.paused, false)
+  assert.equal(visibleVideo.paused, true)
+  assert.equal(visibleVideo.calls, 1)
+})
+
+test('quality & subtitles: tolerate transient player method errors and recover', async () => {
+  const qEnv = environment(scripts[1].file, '/watch')
+  let qThrow = true
+  const qPlayer = {
+    quality: null,
+    calls: 0,
+    getAvailableQualityLevels() {
+      if (qThrow) {
+        qThrow = false
+        throw new Error('transient player error')
+      }
+      return ['hd1080']
+    },
+    setPlaybackQualityRange(value) {
+      this.quality = value
+      this.calls++
+    },
+  }
+  qEnv.nodes.set('#movie_player', qPlayer)
+  await qEnv.mutate()
+  assert.equal(qPlayer.calls, 0)
+  await qEnv.advance(250)
+  assert.equal(qPlayer.quality, 'hd1080')
+  assert.equal(qPlayer.calls, 1)
+
+  const sEnv = environment(scripts[0].file, '/watch')
+  let sThrow = true
+  const sPlayer = {
+    on: true,
+    calls: 0,
+    isSubtitlesOn() {
+      if (sThrow) {
+        sThrow = false
+        throw new Error('transient subtitle error')
+      }
+      return this.on
+    },
+    toggleSubtitles() {
+      this.on = !this.on
+      this.calls++
+    },
+  }
+  sEnv.nodes.set('#movie_player', sPlayer)
+  await sEnv.mutate()
+  assert.equal(sPlayer.calls, 0)
+  await sEnv.advance(250)
+  assert.equal(sPlayer.on, false)
+  assert.equal(sPlayer.calls, 1)
+})

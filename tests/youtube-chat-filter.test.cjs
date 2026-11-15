@@ -2084,3 +2084,92 @@ test('YouTube scopes: sync global edits across stored histories and keep globals
   assert.equal(blocked.api.saveSettings(history, true), false)
   assert.equal(blocked.api.getHistory('channel:@other').settings.globalUsers.join(','), '@chosen')
 })
+
+test('YouTube SC search: keeps exact chronological DOM order when an existing row moves ahead of later rows', () => {
+  const env = boot()
+  const app = env.document.body.appendChild(new env.Element('yt-live-chat-app'))
+  const history = env.api.getHistory('video:search-reorder')
+  history.enabled = true
+  history.supportOnly = true
+  history.supportSearch = 'needle'
+  for (const [id, createdAt] of [['a', 100], ['c', 200], ['b', 300], ['d', 400]]) {
+    env.api.captureLine(superChatMessage(env, '@donor', `needle ${id}`, 'NT$150', id).line, history)
+    history.ids.get(id).createdAt = createdAt
+  }
+  const state = {
+    history,
+    list: app.appendChild(new env.Element('div')),
+    empty: new env.Element('div'),
+    count: new env.Element('span'),
+    latest: new env.Element('button'),
+  }
+  env.api.renderMessages(state)
+  assert.deepEqual(
+    state.list.children.map(node => node),
+    ['a', 'c', 'b', 'd'].map(id => history.ids.get(id).view)
+  )
+  // Resolve an earlier creation time for `b` while `d` stays last.
+  history.ids.get('b').createdAt = 150
+  env.api.renderMessages(state)
+  assert.deepEqual(
+    state.list.children.map(node => node),
+    ['a', 'b', 'c', 'd'].map(id => history.ids.get(id).view)
+  )
+})
+
+test('YouTube chat sanitization: strips unsafe avatar and badge URLs, encodes card links and allows avif archive images', async () => {
+  const database = fakeIndexedDB()
+  const env = boot({ database })
+  const app = env.document.body.appendChild(new env.Element('yt-live-chat-app'))
+  const msg = env.message('@sanitize_user', 'hi')
+  const photo = msg.line.appendChild(new env.Element('div'))
+  photo.id = 'author-photo'
+  const avatarImg = photo.appendChild(new env.Element('img'))
+  avatarImg.setAttribute('src', 'javascript:alert(1)')
+  const badBadge = msg.chip.appendChild(new env.Element('yt-live-chat-author-badge-renderer'))
+  badBadge.setAttribute('aria-label', 'bad')
+  const badBadgeImg = badBadge.appendChild(new env.Element('img'))
+  badBadgeImg.setAttribute('src', 'javascript:alert(2)')
+  badBadgeImg.setAttribute('srcset', 'javascript:alert(3) 2x')
+
+  const read = env.api.readMessage(msg.line)
+  assert.equal(read.avatar, '')
+  const history = env.api.getHistory('channel:@sanitize')
+  await history.restorePromise
+  history.settings.users = ['@sanitize_user']
+  assert.equal(env.api.captureLine(msg.line, history), true)
+  const record = history.messages[0]
+  assert.equal(record.view.querySelector('.ytcf-avatar'), null)
+
+  env.api.showAuthorCard({
+    user: '@bad/user?x=1',
+    name: 'Test',
+    channelId: 'UC123/../../evil?q=1',
+    avatar: 'javascript:alert(4)',
+    badges: [{ label: 'bad', visual: badBadgeImg }],
+  }, msg.author)
+  const card = env.api.getAuthorCard()
+  assert.equal(card.querySelector('.ytuc-photo').querySelector('img'), null)
+  const badgeOut = card.querySelector('.ytuc-badge').querySelector('img')
+  assert.equal(badgeOut.getAttribute('src'), null)
+  assert.equal(badgeOut.getAttribute('srcset'), null)
+  assert.equal(card.querySelector('.ytuc-name').href, 'https://www.youtube.com/channel/UC123%2F..%2F..%2Fevil%3Fq%3D1')
+
+  env.api.showAuthorCard({ user: '@alice/../hack?x=1', name: 'Alice', channelId: '', avatar: '' }, msg.author)
+  assert.equal(env.api.getAuthorCard().querySelector('.ytuc-name').href, 'https://www.youtube.com/@alice%2F..%2Fhack%3Fx%3D1')
+
+  const avifImg = env.api.restoreTree({ tag: 'img', attributes: [['src', 'data:image/avif;base64,AAAA']] })
+  assert.equal(avifImg.getAttribute('src'), 'data:image/avif;base64,AAAA')
+
+  // Evicting an LRU channel flushes pending saveQueue entries to IndexedDB.
+  const lru1 = env.api.getHistory('channel:@lru1')
+  await lru1.restorePromise
+  const sc = superChatMessage(env, '@donor', 'save on evict', 'NT$150', 'lru-evict-sc')
+  env.api.captureLine(sc.line, lru1)
+  for (let i = 2; i <= 6; i++) env.api.getHistory(`channel:@lru${i}`)
+  await new Promise(resolve => setTimeout(resolve, 20))
+  const reloaded = boot({ database })
+  const restored = reloaded.api.getHistory('channel:@lru1')
+  await restored.restorePromise
+  assert.ok(restored.ids.has('lru-evict-sc'))
+})

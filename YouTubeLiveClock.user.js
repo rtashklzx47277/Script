@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Live Clock
 // @namespace   https://tampermonkey.net/
-// @version     0.2.3
+// @version     0.2.4
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveClock.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveClock.user.js
 // @description 直播顯示經過時間，直播存檔顯示對應日期與時刻，支援多種日期格式。
@@ -68,7 +68,7 @@
     String(num).padStart(2, '0')
 
   const timeFormat = (time) => {
-    const totalSeconds = Math.floor(Number(time) || 0)
+    const totalSeconds = Math.max(0, Math.floor(Number(time) || 0))
     const second = totalSeconds % 60
     const minute = Math.floor((totalSeconds / 60) % 60)
     const hour = Math.floor(totalSeconds / 3600)
@@ -112,14 +112,18 @@
   }
 
   const getVideoIdFromUrl = (rawUrl) => {
-    const url = new URL(rawUrl, location.origin)
+    try {
+      const url = new URL(rawUrl, location.origin)
 
-    if (url.pathname === '/watch') {
-      return url.searchParams.get('v')
-    }
+      if (url.pathname === '/watch') {
+        return url.searchParams.get('v')
+      }
 
-    if (url.pathname.startsWith('/live/')) {
-      return url.pathname.split('/')[2] || null
+      if (url.pathname.startsWith('/live/')) {
+        return url.pathname.split('/')[2] || null
+      }
+    } catch (_) {
+      return null
     }
 
     return null
