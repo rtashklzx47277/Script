@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name        YouTube Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.8.10
+// @version     0.8.11
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
-// @description 提供 YouTube 聊天室用戶資訊卡、獨立 SC／會員事件紀錄、全域角色與帳號包含／排除篩選、表情複製、重新載入與自動跟隨。
+// @description 提供 YouTube 聊天室用戶資訊卡、獨立 SC／會員事件紀錄與類型顏色篩選、全域角色與帳號包含／排除篩選、表情複製、重新載入與自動跟隨。
 // @author      Derek
 // @match       *://www.youtube.com/live_chat*
 // @match       *://www.youtube.com/live_chat_replay*
@@ -173,6 +173,7 @@
   const MEMBERSHIP_EVENT_SELECTORS = {
     membership: 'yt-live-chat-membership-item-renderer',
     membershipGift: 'ytd-sponsorships-live-chat-gift-purchase-announcement-renderer, yt-live-chat-sponsorships-gift-purchase-announcement-renderer',
+    giftRecipients: 'ytd-sponsorships-live-chat-gift-redemption-announcement-renderer, yt-live-chat-sponsorships-gift-redemption-announcement-renderer',
   }
   const NATIVE_MESSAGE_SELECTOR = [
     'yt-live-chat-text-message-renderer', 'yt-live-chat-paid-message-renderer',
@@ -592,6 +593,33 @@
     const RETENTION_MS = 7 * 24 * 60 * 60 * 1000
     const STREAMS_KEY = 'youtube-live-chat-tweaks-streams-v1'
     const DEFAULT_SETTINGS = { moderators: true, broadcaster: true, verified: true, users: [], excludedUsers: [] }
+    const SUPPORT_EVENTS = ['superChat', 'superSticker', 'membership', 'milestone', 'membershipGift', 'giftRecipients']
+    const SC_COLOR_TIERS = [
+      { key: 'blue', label: '藍色', color: '#2962ff' },
+      { key: 'cyan', label: '淺藍', color: '#00e5ff' },
+      { key: 'green', label: '綠色', color: '#00e676' },
+      { key: 'yellow', label: '黃色', color: '#ffe600' },
+      { key: 'orange', label: '橙色', color: '#ff8000' },
+      { key: 'magenta', label: '洋紅', color: '#f500d6' },
+      { key: 'red', label: '紅色', color: '#e62117' },
+    ]
+    const SC_COLOR_KEYS = new Set(SC_COLOR_TIERS.map(tier => tier.key))
+    const EXACT_SC_TIER_COLORS = new Map([
+      ['1565c0', 'blue'], ['1e88e5', 'blue'], ['0d47a1', 'blue'], ['1976d2', 'blue'], ['2196f3', 'blue'], ['2962ff', 'blue'], ['0000ff', 'blue'],
+      ['00b8d4', 'cyan'], ['00e5ff', 'cyan'], ['0097a7', 'cyan'], ['00acc1', 'cyan'], ['00838f', 'cyan'], ['00ffff', 'cyan'],
+      ['00897b', 'green'], ['00bfa5', 'green'], ['1de9b6', 'green'], ['0f9d58', 'green'], ['00e676', 'green'], ['00796b', 'green'], ['00c853', 'green'], ['00ff00', 'green'],
+      ['ffb300', 'yellow'], ['ffca28', 'yellow'], ['ffc107', 'yellow'], ['ffa000', 'yellow'], ['ffd600', 'yellow'], ['ffea00', 'yellow'], ['ffe600', 'yellow'], ['ffff00', 'yellow'],
+      ['e65100', 'orange'], ['f57c00', 'orange'], ['ef6c00', 'orange'], ['ff6d00', 'orange'], ['ff9100', 'orange'], ['fb8c00', 'orange'], ['ff8000', 'orange'], ['ff8800', 'orange'],
+      ['c2185b', 'magenta'], ['e91e63', 'magenta'], ['ad1457', 'magenta'], ['d81b60', 'magenta'], ['ec407a', 'magenta'], ['880e4f', 'magenta'], ['f500d6', 'magenta'], ['ff00ff', 'magenta'],
+      ['d00000', 'red'], ['e62117', 'red'], ['c62828', 'red'], ['d32f2f', 'red'], ['b71c1c', 'red'], ['ff1744', 'red'], ['f44336', 'red'], ['ff0000', 'red'],
+    ])
+    const createDefaultSupportFilter = () => ({
+      membership: true,
+      milestone: true,
+      membershipGift: true,
+      giftRecipients: true,
+      colors: Object.fromEntries(SC_COLOR_TIERS.map(tier => [tier.key, true])),
+    })
     const histories = new Map()
     const profiles = new Map()
     const profileRequests = new Map()
@@ -916,12 +944,171 @@
         }
       }
     }
+    const treeSearchText = (tree, depth = 0) => {
+      if (!tree || depth > 20) return ''
+      const alt = (Array.isArray(tree.attributes) ? tree.attributes : [])
+        .filter(attr => Array.isArray(attr) && attr[0] === 'alt').map(attr => attr[1])
+      return [typeof tree.text === 'string' ? tree.text : '', ...alt,
+        ...(Array.isArray(tree.children) ? tree.children : []).map(child => treeSearchText(child, depth + 1))].join('')
+    }
+    const parseCssRgb = value => {
+      const raw = typeof value === 'string' ? value.trim().toLowerCase() : ''
+      if (!raw || raw === 'transparent') return null
+      const hex = raw.match(/^#([0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/i)?.[1]
+      if (hex) {
+        if (hex.length <= 4) {
+          if (hex.length === 4 && hex[3] === '0') return null
+          const hex6 = `${hex[0]}${hex[0]}${hex[1]}${hex[1]}${hex[2]}${hex[2]}`
+          return { r: parseInt(hex6.slice(0, 2), 16), g: parseInt(hex6.slice(2, 4), 16), b: parseInt(hex6.slice(4, 6), 16), hex6 }
+        }
+        if (hex.length === 8 && hex.slice(6) === '00') return null
+        const hex6 = hex.slice(0, 6)
+        return { r: parseInt(hex6.slice(0, 2), 16), g: parseInt(hex6.slice(2, 4), 16), b: parseInt(hex6.slice(4, 6), 16), hex6 }
+      }
+      const rgb = raw.match(/^rgba?\(\s*(\d+(?:\.\d+)?)\s*[, ]\s*(\d+(?:\.\d+)?)\s*[, ]\s*(\d+(?:\.\d+)?)(?:\s*[,/]\s*(\d+(?:\.\d+)?%?))?\s*\)$/)
+      if (!rgb) return null
+      if (rgb[4] !== undefined && parseFloat(rgb[4]) <= 0) return null
+      const clamp = n => Math.max(0, Math.min(255, Math.round(Number(n))))
+      const [r, g, b] = [clamp(rgb[1]), clamp(rgb[2]), clamp(rgb[3])]
+      const hex6 = [r, g, b].map(n => n.toString(16).padStart(2, '0')).join('')
+      return { r, g, b, hex6 }
+    }
+    const classifyRgbTier = rgb => {
+      if (!rgb) return ''
+      const exact = EXACT_SC_TIER_COLORS.get(rgb.hex6)
+      if (exact) return exact
+      const [r, g, b] = [rgb.r / 255, rgb.g / 255, rgb.b / 255]
+      const max = Math.max(r, g, b)
+      const min = Math.min(r, g, b)
+      const delta = max - min
+      if (delta < 0.08) return ''
+      let hue = delta === 0 ? 0
+        : max === r ? 60 * (((g - b) / delta) % 6)
+        : max === g ? 60 * ((b - r) / delta + 2)
+        : 60 * ((r - g) / delta + 4)
+      if (hue < 0) hue += 360
+      if (hue < 16 || hue >= 345) return 'red'
+      if (hue < 40) return 'orange'
+      if (hue < 75) return 'yellow'
+      if (hue < 175) return 'green'
+      if (hue < 200) return 'cyan'
+      if (hue < 260) return 'blue'
+      return 'magenta'
+    }
+    const classifySupportColors = colors => colors
+      ? (classifyRgbTier(parseCssRgb(colors.bodyBackground)) || classifyRgbTier(parseCssRgb(colors.headerBackground)))
+      : ''
+    const findTreeAmountBackground = (tree, depth = 0) => {
+      if (!tree || typeof tree !== 'object' || depth > 8) return ''
+      const cls = (Array.isArray(tree.attributes) ? tree.attributes : [])
+        .find(attr => Array.isArray(attr) && attr[0] === 'class')?.[1] || ''
+      if (typeof cls === 'string' && cls.split(/\s+/).includes('ytcf-amount') && tree.background) return tree.background
+      for (const child of Array.isArray(tree.children) ? tree.children : []) {
+        const found = findTreeAmountBackground(child, depth + 1)
+        if (found) return found
+      }
+      return ''
+    }
+    const getRecordColorTier = record => {
+      if (!record || (record.supportEvent !== 'superChat' && record.supportEvent !== 'superSticker')) return ''
+      if (record.scColor) return record.scColor
+      let tier = ''
+      if (!record._hasView && record._savedTree) {
+        tier = classifySupportColors({
+          bodyBackground: record._savedTree.background,
+          headerBackground: findTreeAmountBackground(record._savedTree),
+        })
+      } else {
+        const view = record._hydratedView || (!('_hasView' in record) ? record.view : null)
+        if (view) {
+          tier = classifySupportColors({
+            bodyBackground: view.style.backgroundColor,
+            headerBackground: $('.ytcf-amount', view)?.style.backgroundColor || '',
+          })
+        }
+      }
+      if (tier) record.scColor = tier
+      return tier
+    }
+    const escapeRegExp = value => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const parseGiftCount = (texts = [], author = '') => {
+      const raw = texts.filter(Boolean).join(' ').trim()
+      if (!raw) return 1
+      let cleaned = raw
+      for (const name of [author, String(author || '').replace(/^@/, '')].filter(Boolean)) {
+        cleaned = cleaned.replace(new RegExp(`^\\s*@?${escapeRegExp(name)}\\b\\s*`, 'i'), '')
+      }
+      for (const source of [cleaned, raw]) {
+        const contextual = source.match(/(\d{1,4})\s*(?:memberships?|gift memberships?|sponsorships?|個|份|人|件|개)/i) ||
+          source.match(/(?:gifted|sent|送出了?|贈送了?|赠送了?|贈りました)\D{0,6}?(\d{1,4})(?!\d)/i)
+        if (contextual) {
+          const count = parseInt(contextual[1], 10)
+          if (Number.isSafeInteger(count) && count >= 1) return count
+        }
+      }
+      const fallback = cleaned.match(/(?:^|\s)(\d{1,4})(?:\s|$)/)
+      if (fallback) {
+        const count = parseInt(fallback[1], 10)
+        if (Number.isSafeInteger(count) && count >= 1) return count
+      }
+      return 1
+    }
+    const getRecordGiftCount = record => {
+      if (!record || record.supportEvent !== 'membershipGift') return 0
+      if (Number.isSafeInteger(record.giftCount) && record.giftCount >= 1) return record.giftCount
+      let detailText = ''
+      if (!record._hasView && record._savedTree) detailText = treeSearchText(record._savedTree)
+      else {
+        const view = record._hydratedView || (!('_hasView' in record) ? record.view : null)
+        if (view) detailText = $$('.ytcf-event-details', view).map(node => node.textContent).join(' ')
+      }
+      return (record.giftCount = parseGiftCount([detailText], record.authorName || record.user))
+    }
+    const matchesSupportFilter = (record, filter = null) => {
+      if (!record?.supportEvent) return false
+      if (!filter) return true
+      if (record.supportEvent === 'superChat' || record.supportEvent === 'superSticker') {
+        const colors = filter.colors || {}
+        const tier = getRecordColorTier(record)
+        return tier ? Boolean(colors[tier]) : Object.values(colors).every(Boolean)
+      }
+      return filter[record.supportEvent] !== false
+    }
+    const summarizeSupportEvents = history => {
+      const summary = {
+        membership: 0,
+        milestone: 0,
+        membershipGiftFrom: 0,
+        membershipGiftTo: 0,
+        giftRecipients: 0,
+        superchat: 0,
+        colors: Object.fromEntries(SC_COLOR_TIERS.map(tier => [tier.key, 0])),
+      }
+      for (const record of history?.messages || []) {
+        if (!record.retained || !record.supportEvent) continue
+        if (record.supportEvent === 'membership') summary.membership++
+        else if (record.supportEvent === 'milestone') summary.milestone++
+        else if (record.supportEvent === 'membershipGift') {
+          summary.membershipGiftFrom++
+          summary.membershipGiftTo += getRecordGiftCount(record)
+        } else if (record.supportEvent === 'giftRecipients') summary.giftRecipients++
+        else if (record.supportEvent === 'superChat' || record.supportEvent === 'superSticker') {
+          summary.superchat++
+          const tier = getRecordColorTier(record)
+          if (tier && tier in summary.colors) summary.colors[tier]++
+        }
+      }
+      return summary
+    }
     const archiveRecord = (history, record) => ({
       scope: history.scope, storageId: record.storageId, createdAt: record.createdAt,
       order: record.order,
       expiresAt: record.createdAt + RETENTION_MS, id: record.id, user: record.user, channelId: record.channelId,
       moderator: record.moderator, broadcaster: record.broadcaster, verified: record.verified,
-      superChat: record.superChat, supportEvent: record.supportEvent, fingerprint: record.fingerprint,
+      superChat: record.superChat, supportEvent: record.supportEvent,
+      scColor: getRecordColorTier(record),
+      giftCount: record.supportEvent === 'membershipGift' ? getRecordGiftCount(record) : 0,
+      fingerprint: record.fingerprint,
       authorName: record.authorName, authorHandle: record.authorHandle,
       profileName: record.profileName, profileHandle: record.profileHandle,
       tree: !record._hasView && record._savedTree ? record._savedTree : archiveTree(record.view),
@@ -937,7 +1124,9 @@
         user: saved.user, channelId: typeof saved.channelId === 'string' ? saved.channelId : '',
         moderator: saved.moderator === true, broadcaster: saved.broadcaster === true, verified: saved.verified === true,
         superChat: saved.superChat === true,
-        supportEvent: ['superChat', 'superSticker', 'membership', 'milestone', 'membershipGift'].includes(saved.supportEvent) ? saved.supportEvent : '',
+        supportEvent: SUPPORT_EVENTS.includes(saved.supportEvent) ? saved.supportEvent : '',
+        scColor: SC_COLOR_KEYS.has(saved.scColor) ? saved.scColor : '',
+        giftCount: Number.isSafeInteger(saved.giftCount) && saved.giftCount >= 1 ? saved.giftCount : 0,
         authorName: typeof saved.authorName === 'string' ? saved.authorName : '',
         authorHandle: typeof saved.authorHandle === 'string' ? saved.authorHandle : '',
         profileName: typeof saved.profileName === 'string' ? saved.profileName : '',
@@ -1255,6 +1444,7 @@
         history = {
           channel, settings: loadSettings(channel), messages: [], nodes: new WeakMap(), ids: new Map(),
           byStorageId: new Map(), enabled: false, supportOnly: false, supportSearch: '',
+          supportFilter: createDefaultSupportFilter(),
           follow: true, dirty: new Set(), removed: new Set(),
           scope, saveQueue: new Map(), archiveReady: false, archiveError: false,
         }
@@ -1300,7 +1490,13 @@
     }
 
     const textValue = value => value?.simpleText || value?.runs?.map(run => run.text || '').join('') || ''
-    const EVENT_LABELS = { superSticker: '超級貼圖', membership: '會員加入', milestone: '會員里程碑', membershipGift: '會員贈禮' }
+    const EVENT_LABELS = {
+      superSticker: '超級貼圖',
+      membership: '會員加入',
+      milestone: '會員里程碑',
+      membershipGift: '會員贈禮',
+      giftRecipients: '獲贈會員',
+    }
 
     const readMessage = (line, shouldKeep = null) => {
       let author = $('#author-name', line)
@@ -1361,6 +1557,10 @@
             .map(textValue).filter(Boolean).map(text => element('span', {}, [text]))
         }
       }
+      if (!message && supportEvent === 'giftRecipients' && !details.length && data.message) {
+        const text = textValue(data.message)
+        if (text) message = element('span', {}, [text])
+      }
       // Low-tier SC, welcome announcements and gifts may have no comment.
       if (!message && supportEvent) message = document.createElement('span')
       if (!message) message = $('#header-subtext', line)
@@ -1370,7 +1570,10 @@
         message = document.createElement('span')
         message.textContent = $('#deleted-state', line)?.textContent?.trim() || '訊息已刪除'
       }
-      return { user, channelId, moderator, broadcaster, verified, superChat, supportEvent, amount, sticker, author, body: message, details, badges, deleted,
+      const giftCount = supportEvent === 'membershipGift'
+        ? parseGiftCount(details.map(node => node.textContent), originalName || author.textContent)
+        : 0
+      return { user, channelId, moderator, broadcaster, verified, superChat, supportEvent, giftCount, amount, sticker, author, body: message, details, badges, deleted,
         authorHandle: [originalName, author.textContent].find(name => typeof name === 'string' && name.trim().startsWith('@') && normalizeAccount(name))?.trim() || '',
         colors: supportEvent ? readEventColors(line, data) : null,
         id, time: $('#timestamp', line)?.textContent?.trim() || textValue(data.timestampText),
@@ -1995,18 +2198,21 @@
         return false
       }
       const view = makeMessageView(message)
+      const scColor = classifySupportColors(message.colors)
       let record
       if (previous?.retained) {
         view.firstChild.textContent = previous.view.firstChild.textContent
         record = Object.assign(previous, { user: message.user, channelId: message.channelId, moderator: message.moderator,
           authorName: message.author.textContent.trim(), authorHandle: message.authorHandle,
           broadcaster: message.broadcaster, verified: message.verified, superChat: message.superChat, supportEvent: message.supportEvent,
+          scColor, giftCount: message.giftCount,
           _searchText: '', view, fingerprint })
       } else {
         record = { id: message.id, user: message.user, channelId: message.channelId, moderator: message.moderator,
           authorName: message.author.textContent.trim(), authorHandle: message.authorHandle,
           profileName: '', profileHandle: '',
           broadcaster: message.broadcaster, verified: message.verified, superChat: message.superChat, supportEvent: message.supportEvent,
+          scColor, giftCount: message.giftCount,
           storageId: message.id || `${pageKey}-${++anonymousMessage}`,
           createdAt: Date.now(), order: ++messageOrder,
           _searchText: '', view, fingerprint, retained: true }
@@ -2071,13 +2277,6 @@
     }
 
     const normalizeSearch = value => String(value || '').normalize('NFKC').toLowerCase().trim()
-    const treeSearchText = (tree, depth = 0) => {
-      if (!tree || depth > 20) return ''
-      const alt = (Array.isArray(tree.attributes) ? tree.attributes : [])
-        .filter(attr => Array.isArray(attr) && attr[0] === 'alt').map(attr => attr[1])
-      return [typeof tree.text === 'string' ? tree.text : '', ...alt,
-        ...(Array.isArray(tree.children) ? tree.children : []).map(child => treeSearchText(child, depth + 1))].join('')
-    }
     const supportSearchText = record => {
       if (record._searchText) return record._searchText
       const useTree = !record._hasView && record._savedTree
@@ -2108,15 +2307,46 @@
       }
       return null
     }
+    const updateSupportFilterUI = state => {
+      if (!state?.panel || !state.supportFilterUI) return
+      const filter = state.history.supportFilter || (state.history.supportFilter = createDefaultSupportFilter())
+      const summary = summarizeSupportEvents(state.history)
+      const ui = state.supportFilterUI
+      for (const key of ['membership', 'milestone', 'membershipGift', 'giftRecipients']) {
+        const item = ui.types[key]
+        if (!item) continue
+        item.input.checked = filter[key] !== false
+        item.count.textContent = key === 'membershipGift'
+          ? `(from：${summary.membershipGiftFrom}、to：${summary.membershipGiftTo})`
+          : `(${summary[key]})`
+      }
+      let checkedColors = 0
+      for (const tier of SC_COLOR_TIERS) {
+        const item = ui.colors[tier.key]
+        if (!item) continue
+        const active = filter.colors?.[tier.key] !== false
+        if (active) checkedColors++
+        item.input.checked = active
+        item.count.textContent = `(${summary.colors[tier.key]})`
+      }
+      if (ui.superchat) {
+        ui.superchat.count.textContent = `(${summary.superchat})`
+        ui.superchat.input.checked = checkedColors === SC_COLOR_TIERS.length
+        ui.superchat.input.indeterminate = checkedColors > 0 && checkedColors < SC_COLOR_TIERS.length
+      }
+    }
     const renderSupportSearch = (state, query) => {
       const { history, list, empty, count, latest } = state
+      const filter = history.supportFilter || (history.supportFilter = createDefaultSupportFilter())
+      updateSupportFilterUI(state)
       if (!state.inSearchMode) {
         releaseMessageViews(state)
         state.inSearchMode = true
       }
       const words = query.split(/\s+/u)
       const hits = history.messages
-        .filter(record => record.retained && record.supportEvent && words.every(word => supportSearchText(record).includes(word)))
+        .filter(record => record.retained && matchesSupportFilter(record, filter) &&
+          words.every(word => supportSearchText(record).includes(word)))
         .sort((a, b) => a.createdAt - b.createdAt || (a.order || 0) - (b.order || 0))
       const shown = new Set(hits)
       for (const record of state.searchShown || []) if (!shown.has(record)) unmountRecordView(state, record)
@@ -2169,9 +2399,15 @@
       const query = history.supportOnly ? normalizeSearch(history.supportSearch) : ''
       if (query) { renderSupportSearch(state, query); return }
       if (state.inSearchMode) releaseMessageViews(state)
-      empty.textContent = history.supportOnly ? '尚未收到 SC 或會員事件。'
-        : '尚無符合條件的發言。新增目標帳號後開始收集。'
-      const filterKey = JSON.stringify([history.settings, history.supportOnly])
+      if (history.supportOnly) {
+        history.supportFilter ||= createDefaultSupportFilter()
+        updateSupportFilterUI(state)
+        const hasAnySupport = history.messages.some(record => record.retained && record.supportEvent)
+        empty.textContent = hasAnySupport ? '找不到符合篩選條件的 SC 或會員紀錄。' : '尚未收到 SC 或會員事件。'
+      } else {
+        empty.textContent = '尚無符合條件的發言。新增目標帳號後開始收集。'
+      }
+      const filterKey = JSON.stringify([history.settings, history.supportOnly, history.supportOnly ? history.supportFilter : null])
       const full = rebuild || state.renderedHistory !== history || state.filterKey !== filterKey
       if (full) state.visibleCount = 0
       for (const record of history.removed) {
@@ -2184,7 +2420,7 @@
       for (const record of full ? history.messages : history.dirty) {
         const oldView = record.renderedView
         const wasVisible = oldView?.parentElement === list && record.visible
-        const show = history.supportOnly ? !!record.supportEvent : matchesFilter(record, history.settings)
+        const show = history.supportOnly ? matchesSupportFilter(record, history.supportFilter) : matchesFilter(record, history.settings)
         state.visibleCount += Number(show) - (full ? 0 : Number(!!wasVisible))
         if (!show) {
           unmountRecordView(state, record)
@@ -2297,6 +2533,15 @@
       const record = history.byStorageId?.get(storageId) ||
         history.messages.find(row => row.storageId === storageId)
       if (!record || !record.retained || !record.supportEvent || record.createdAt + RETENTION_MS <= Date.now()) return false
+      history.supportFilter ||= createDefaultSupportFilter()
+      if (!matchesSupportFilter(record, history.supportFilter)) {
+        if (record.supportEvent === 'superChat' || record.supportEvent === 'superSticker') {
+          const tier = getRecordColorTier(record)
+          if (tier) history.supportFilter.colors[tier] = true
+          else for (const item of SC_COLOR_TIERS) history.supportFilter.colors[item.key] = true
+        } else history.supportFilter[record.supportEvent] = true
+        updateSupportFilterUI(state)
+      }
       history.supportSearch = ''
       if (state.supportSearch) state.supportSearch.value = ''
       history.follow = false
@@ -2471,6 +2716,7 @@
         state.supportSearch.parentElement.hidden = !supportOnly
         state.supportSearch.value = state.history.supportSearch || ''
       }
+      if (supportOnly) updateSupportFilterUI(state)
       if (supportOnly) {
         const targets = $('.ytcf-targets', state.panel)
         if (targets) targets.hidden = true
@@ -2606,6 +2852,38 @@
       const panel = document.createElement('section')
       panel.className = 'ytcf-panel'
       panel.setAttribute('aria-label', '指定用戶聊天室')
+      const makeScCheckbox = ({ id, attrName, attrValue, text = '', initialCount = '(0)', swatch = null }) => {
+        const input = element('input', { type: 'checkbox', id, [attrName]: attrValue })
+        const count = element('span', { class: 'ytcf-sc-count' }, [initialCount])
+        const label = element('label', { for: id, ...(swatch ? { title: `Super Chat ${swatch.label}` } : {}) }, swatch
+          ? [
+              element('span', { class: `ytcf-sc-swatch ytcf-sc-swatch--${swatch.key}`, 'aria-hidden': 'true' }),
+              element('span', { class: 'ytcf-visually-hidden' }, [`${swatch.label} `]),
+              count,
+            ]
+          : [text, count])
+        const option = element('span', { class: 'ytcf-sc-option' }, [input, label])
+        return { option, input, count }
+      }
+      const supportTypes = {
+        membership: makeScCheckbox({ id: 'ytcf-sc-filter-membership', attrName: 'data-sc-type', attrValue: 'membership', text: 'membership' }),
+        milestone: makeScCheckbox({ id: 'ytcf-sc-filter-milestone', attrName: 'data-sc-type', attrValue: 'milestone', text: 'milestone' }),
+        membershipGift: makeScCheckbox({ id: 'ytcf-sc-filter-membership-gift', attrName: 'data-sc-type', attrValue: 'membershipGift', text: 'membershipGift', initialCount: '(from：0、to：0)' }),
+        giftRecipients: makeScCheckbox({ id: 'ytcf-sc-filter-gift-recipients', attrName: 'data-sc-type', attrValue: 'giftRecipients', text: 'giftRecipients' }),
+      }
+      const superchatToggle = makeScCheckbox({ id: 'ytcf-sc-filter-superchat', attrName: 'data-sc-type', attrValue: 'superchat', text: 'superchat' })
+      const supportColors = Object.fromEntries(SC_COLOR_TIERS.map(tier => [tier.key, makeScCheckbox({
+        id: `ytcf-sc-color-${tier.key}`, attrName: 'data-sc-color', attrValue: tier.key, swatch: tier,
+      })]))
+      const supportFilterFieldset = element('fieldset', { class: 'ytcf-sc-filters' }, [
+        element('legend', { class: 'ytcf-visually-hidden' }, ['篩選事件類型與金額顏色']),
+        element('div', { class: 'ytcf-sc-filter-row' }, [supportTypes.membership.option, supportTypes.milestone.option]),
+        element('div', { class: 'ytcf-sc-filter-row' }, [supportTypes.membershipGift.option, supportTypes.giftRecipients.option]),
+        element('div', { class: 'ytcf-sc-filter-row ytcf-sc-filter-row--colors' }, [
+          superchatToggle.option,
+          ...SC_COLOR_TIERS.map(tier => supportColors[tier.key].option),
+        ]),
+      ])
       panel.appendChild(element('div', { class: 'ytcf-toolbar' }, [
         element('div', { class: 'ytcf-options' }, [
           element('button', { type: 'button', class: 'ytcf-target-summary',
@@ -2618,6 +2896,7 @@
           element('input', { id: 'ytcf-input-search-support', type: 'search', name: 'search-support',
             placeholder: '搜尋頻道名稱、@帳號或留言', autocomplete: 'off', autocorrect: 'off',
             autocapitalize: 'none', spellcheck: 'false' }),
+          supportFilterFieldset,
         ]),
         element('div', { class: 'ytcf-targets', id: 'ytcf-target-settings', hidden: '' }, [
           element('div', { class: 'ytcf-roles' }, [
@@ -2682,6 +2961,34 @@
       state.count = $('.ytcf-count', panel)
       state.latest = $('.ytcf-latest', panel)
       state.supportSearch = $('[name="search-support"]', panel)
+      state.supportFilterUI = { types: supportTypes, superchat: superchatToggle, colors: supportColors }
+      const applySupportFilterChange = () => {
+        clearLocatedRecord(state)
+        updateSupportFilterUI(state)
+        if (state.history.enabled && state.history.supportOnly) renderMessages(state, true)
+      }
+      for (const [key, item] of Object.entries(supportTypes)) {
+        item.input.addEventListener('change', () => {
+          state.history.supportFilter ||= createDefaultSupportFilter()
+          state.history.supportFilter[key] = Boolean(item.input.checked)
+          applySupportFilterChange()
+        })
+      }
+      superchatToggle.input.addEventListener('change', () => {
+        const filter = state.history.supportFilter ||= createDefaultSupportFilter()
+        const checked = Boolean(superchatToggle.input.checked)
+        superchatToggle.input.indeterminate = false
+        for (const tier of SC_COLOR_TIERS) filter.colors[tier.key] = checked
+        applySupportFilterChange()
+      })
+      for (const tier of SC_COLOR_TIERS) {
+        supportColors[tier.key].input.addEventListener('change', () => {
+          const filter = state.history.supportFilter ||= createDefaultSupportFilter()
+          filter.colors[tier.key] = Boolean(supportColors[tier.key].input.checked)
+          applySupportFilterChange()
+        })
+      }
+      updateSupportFilterUI(state)
       state.supportSearch.addEventListener('input', () => {
         clearLocatedRecord(state)
         state.history.supportSearch = state.supportSearch.value
@@ -2919,7 +3226,17 @@
       .ytcf-roles input { width: 13px; height: 13px; margin: 0; accent-color: var(--yt-live-chat-button-default-text-color, #065fd4); }
       .ytcf-count { margin-left: auto; flex-shrink: 0; white-space: nowrap; color: var(--yt-live-chat-secondary-text-color, #606060); }
       .ytcf-sc-search { display: block; margin-top: 8px; }
-      .ytcf-sc-search input { box-sizing: border-box; width: 100%; min-width: 0; height: 30px; padding: 5px 8px; border: 1px solid var(--yt-live-chat-message-input-border-color, #8886); border-radius: 4px; color: inherit; background: var(--yt-live-chat-background-color, #fff); font: inherit; }
+      .ytcf-sc-search input[type="search"] { box-sizing: border-box; width: 100%; min-width: 0; height: 30px; padding: 5px 8px; border: 1px solid var(--yt-live-chat-message-input-border-color, #8886); border-radius: 4px; color: inherit; background: var(--yt-live-chat-background-color, #fff); font: inherit; }
+      .ytcf-sc-filters { display: flex; flex-direction: column; gap: 2px; border: 0; margin: 6px 0 0; padding: 0; min-width: 0; font-size: 12px; }
+      .ytcf-sc-filter-row { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 10px; }
+      .ytcf-sc-filter-row--colors { gap: 2px 6px; }
+      .ytcf-sc-option { display: inline-flex; align-items: center; gap: 3px; min-block-size: 24px; white-space: nowrap; }
+      .ytcf-sc-option input[type="checkbox"] { width: 13px; height: 13px; margin: 0; flex: none; accent-color: var(--yt-live-chat-link-text-color, var(--yt-live-chat-button-default-text-color, #065fd4)); cursor: pointer; }
+      .ytcf-sc-option input[type="checkbox"]:focus-visible { outline: 2px solid var(--yt-live-chat-button-default-text-color, #065fd4); outline-offset: 1px; }
+      .ytcf-sc-option label { display: inline-flex; align-items: center; gap: 2px; min-block-size: 24px; cursor: pointer; }
+      .ytcf-sc-swatch { display: inline-block; width: 13px; height: 13px; flex: none; box-sizing: border-box; border: 1px solid color-mix(in srgb, var(--yt-live-chat-primary-text-color, #0f0f0f) 32%, transparent); border-radius: 2px; forced-color-adjust: none; }
+      ${SC_COLOR_TIERS.map(tier => `.ytcf-sc-swatch--${tier.key} { background-color: ${tier.color}; }`).join(' ')}
+      .ytcf-panel:not(.ytcf-managing) > .ytcf-toolbar { max-height: 52%; overflow-y: auto; }
       .ytcf-users { display: flex; align-items: center; gap: 6px; }
       .ytcf-users label { white-space: nowrap; }
       .ytcf-users input { display: block; box-sizing: border-box; flex: 1; min-width: 0; width: 100%; padding: 5px 8px; border: 1px solid var(--yt-live-chat-message-input-border-color, #8886); border-radius: 4px; color: inherit; background: var(--yt-live-chat-background-color, #fff); font-size: 12px; }
@@ -2929,10 +3246,11 @@
       .ytcf-users button[type="submit"]:hover { filter: brightness(1.2); }
       .ytcf-empty { padding: 16px 12px; color: var(--yt-live-chat-secondary-text-color, #606060); }
       .ytcf-history-status { margin: 0; padding: 8px 12px; color: var(--yt-live-chat-secondary-text-color, #606060); font-size: 12px; }
-      .ytcf-list, .ytcf-target-list, .ytcf-managing > .ytcf-toolbar { --ytcf-scrollbar-thumb: color-mix(in srgb, var(--yt-live-chat-primary-text-color, #0f0f0f) 42%, transparent); --ytcf-scrollbar-track: transparent; scrollbar-color: var(--ytcf-scrollbar-thumb) var(--ytcf-scrollbar-track); scrollbar-width: auto; overscroll-behavior: contain; }
+      .ytcf-list, .ytcf-target-list, .ytcf-panel > .ytcf-toolbar { --ytcf-scrollbar-thumb: color-mix(in srgb, var(--yt-live-chat-primary-text-color, #0f0f0f) 42%, transparent); --ytcf-scrollbar-track: transparent; scrollbar-color: var(--ytcf-scrollbar-thumb) var(--ytcf-scrollbar-track); scrollbar-width: auto; overscroll-behavior: contain; }
       @media (prefers-contrast: more) {
-        .ytcf-list, .ytcf-target-list, .ytcf-managing > .ytcf-toolbar { --ytcf-scrollbar-thumb: var(--yt-live-chat-primary-text-color, #0f0f0f); --ytcf-scrollbar-track: var(--yt-live-chat-background-color, #fff); }
+        .ytcf-list, .ytcf-target-list, .ytcf-panel > .ytcf-toolbar { --ytcf-scrollbar-thumb: var(--yt-live-chat-primary-text-color, #0f0f0f); --ytcf-scrollbar-track: var(--yt-live-chat-background-color, #fff); }
         #yt-chat-tweaks-filter-button:focus-visible, #yt-chat-tweaks-sc-button:focus-visible, .ytcf-panel button:focus-visible, .ytcf-panel input:focus-visible { outline: 2px solid currentColor; }
+        .ytcf-sc-swatch { border-color: var(--yt-live-chat-primary-text-color, #0f0f0f); }
       }
       .ytcf-list { flex: 1; min-height: 0; overflow: auto; overflow-anchor: none; padding: 6px 0; }
       .ytcf-message { padding: 5px 10px; overflow-wrap: anywhere; line-height: 1.6; content-visibility: auto; contain-intrinsic-size: auto none auto 36px; }

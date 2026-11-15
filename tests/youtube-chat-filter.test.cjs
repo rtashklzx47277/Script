@@ -191,6 +191,7 @@ function boot({ saved, savedProfiles, storage: customStorage, blocked = false, t
   vm.runInContext(source.replace('    // End YouTube chat filtering.', `
     globalThis.api = { TARGET_PROFILES_KEY, normalizeAccount, getChannel, getHistory, loadSettings, saveSettings,
       readMessage, matchesFilter, captureLine, captureTree, captureMutations, renderMessages, changeTargetUsers,
+      SC_COLOR_TIERS, classifySupportColors, parseGiftCount, matchesSupportFilter, summarizeSupportEvents, updateSupportFilterUI,
       scheduleMessageRender, releaseMessageViews, handleMessageVisibility,
       archiveTree, restoreTree, archiveRecord, restoreRecord, restoreHistory, flushHistory, pruneHistories, pruneArchive,
       applySupportAuthor, resolveSupportAuthor, locateSupportRecord,
@@ -935,7 +936,7 @@ test('YouTube membership events: retain welcome and milestone details plus comme
   assert.equal(row.querySelector('.ytcf-event-details').textContent, 'Member for 12 months')
 })
 
-test('YouTube membership events: capture gifts with nested donor identities and ignore gift redemptions', () => {
+test('YouTube membership events: capture gifts with nested donor identities and gift redemptions', () => {
   const env = boot()
   const history = env.api.getHistory('channel:@host')
   const root = new env.Element()
@@ -951,21 +952,29 @@ test('YouTube membership events: capture gifts with nested donor identities and 
   for (const tag of ['ytd-sponsorships-live-chat-gift-redemption-announcement-renderer',
     'yt-live-chat-sponsorships-gift-redemption-announcement-renderer']) {
     const gift = membershipMessage(env, { tag, id: tag, text: 'Received a gift membership from @donor' })
-    assert.equal(env.api.captureLine(gift.line, history), false)
     root.appendChild(gift.line)
   }
   assert.equal(env.api.captureTree(root, history), true)
-  assert.equal(history.messages.length, 2)
-  for (const record of history.messages) {
+  assert.equal(history.messages.length, 4)
+  for (const record of history.messages.slice(0, 2)) {
     assert.equal(record.supportEvent, 'membershipGift')
+    assert.equal(record.giftCount, 10)
     assert.equal(record.user, '@donor')
     assert.equal(record.channelId, 'UCAbCdEfGhIjKlMnOpQrStUv')
     assert.equal(record.view.querySelector('.ytcf-amount').textContent, '會員贈禮')
     assert.equal(record.view.querySelector('.ytcf-event-details').textContent, 'Gifted 10 memberships')
   }
+  for (const record of history.messages.slice(2)) {
+    assert.equal(record.supportEvent, 'giftRecipients')
+    assert.equal(record.view.querySelector('.ytcf-amount').textContent, '獲贈會員')
+    assert.equal(record.view.children.at(-1).textContent, 'Received a gift membership from @donor')
+  }
   history.supportOnly = true
   const state = { history, list: new env.Element(), empty: {}, count: {}, latest: {} }
   env.api.renderMessages(state)
+  assert.equal(state.count.textContent, '4 則')
+  history.supportFilter.giftRecipients = false
+  env.api.renderMessages(state, true)
   assert.equal(state.count.textContent, '2 則')
 })
 
@@ -2491,4 +2500,204 @@ test('YouTube panel accessibility and restoreHistory yielding: explicit labels, 
   envErr.api.refresh()
   await envErr.api.mounted.history.restorePromise
   assert.equal(envErr.api.mounted.panel.querySelector('.ytcf-history-status').getAttribute('role'), 'status')
+})
+
+test('YouTube SC type & color filters: default checked state, screenshot labels, (from：X、to：Y) aggregation, and 7-color indeterminate selection', () => {
+  const env = boot({ trustedTypes: true })
+  const header = env.document.body.appendChild(new env.Element('yt-live-chat-header-renderer'))
+  header.appendChild(new env.Element('button')).id = 'live-chat-header-context-menu'
+  const scroller = env.document.body.appendChild(new env.Element('div')).appendChild(new env.Element('div'))
+  scroller.id = 'item-scroller'
+  scroller.appendChild(new env.Element('div')).id = 'items'
+  env.api.refresh()
+  const state = env.api.mounted
+  const { history, panel } = state
+
+  // 1. Seed events: membership(1), milestone(1), membershipGift(2 gifts -> 15 total, including digit in handle), giftRecipients(2), 7 SC colors
+  env.api.captureLine(membershipMessage(env, { id: 'm-1', subtext: 'Welcome!' }).line, history)
+  env.api.captureLine(membershipMessage(env, { id: 'ms-1', primary: 'Member for 6 months', text: 'yay' }).line, history)
+  const giftA = membershipMessage(env, { tag: 'ytd-sponsorships-live-chat-gift-purchase-announcement-renderer', id: 'g-1' })
+  giftA.author.textContent = '@donor99'
+  giftA.line.data = { primaryText: { simpleText: '@donor99 gifted 10 memberships' } }
+  const giftB = membershipMessage(env, { tag: 'ytd-sponsorships-live-chat-gift-purchase-announcement-renderer', id: 'g-2' })
+  giftB.line.data = { primaryText: { simpleText: '送出了 5 個會籍' } }
+  env.api.captureLine(giftA.line, history)
+  env.api.captureLine(giftB.line, history)
+  const rcpt1 = membershipMessage(env, { tag: 'ytd-sponsorships-live-chat-gift-redemption-announcement-renderer', id: 'r-1', text: 'received' })
+  const rcpt2 = membershipMessage(env, { tag: 'yt-live-chat-sponsorships-gift-redemption-announcement-renderer', id: 'r-2' })
+  rcpt2.line.data = { authorName: { simpleText: '@rcpt2' }, message: { simpleText: 'Received a gift from @donor' } }
+  env.api.captureLine(rcpt1.line, history)
+  env.api.captureLine(rcpt2.line, history)
+
+  const tiers = [
+    ['blue', '1565c0', '1e88e5'],
+    ['cyan', '00b8d4', '00e5ff'],
+    ['green', '00bfa5', '1de9b6'],
+    ['yellow', 'ffb300', 'ffca28'],
+    ['orange', 'e65100', 'f57c00'],
+    ['magenta', 'c2185b', 'e91e63'],
+    ['red', 'd00000', 'e62117'],
+  ]
+  for (const [key, headerHex, bodyHex] of tiers) {
+    const paid = superChatMessage(env, '@donor', `msg-${key}`, 'NT$150', `sc-${key}`)
+    paid.line.data = { headerBackgroundColor: parseInt(`ff${headerHex}`, 16), bodyBackgroundColor: parseInt(`ff${bodyHex}`, 16) }
+    env.api.captureLine(paid.line, history)
+  }
+
+  // Open SC mode and check default UI state
+  env.api.setEnabled(state, true, true)
+  const scSearch = panel.querySelector('.ytcf-sc-search')
+  const fieldset = panel.querySelector('.ytcf-sc-filters')
+  assert.equal(scSearch.hidden, false)
+  assert.equal(fieldset.tagName, 'fieldset')
+  assert.equal(fieldset.querySelector('legend')?.textContent, '篩選事件類型與金額顏色')
+
+  const typeBox = type => panel.querySelector(`[data-sc-type="${type}"]`)
+  const colorBox = key => panel.querySelector(`[data-sc-color="${key}"]`)
+  const labelFor = input => panel.querySelectorAll('label').find(l => l.getAttribute('for') === input.getAttribute('id'))
+
+  assert.equal(labelFor(typeBox('membership')).textContent, 'membership(1)')
+  assert.equal(labelFor(typeBox('milestone')).textContent, 'milestone(1)')
+  assert.equal(labelFor(typeBox('membershipGift')).textContent, 'membershipGift(from：2、to：15)')
+  assert.equal(labelFor(typeBox('giftRecipients')).textContent, 'giftRecipients(2)')
+  assert.equal(labelFor(typeBox('superchat')).textContent, 'superchat(7)')
+  for (const [key] of tiers) {
+    const input = colorBox(key)
+    const label = labelFor(input)
+    assert.equal(input.checked, true)
+    assert.equal(input.indeterminate, undefined)
+    const swatch = label.querySelector('.ytcf-sc-swatch')
+    assert.ok(swatch)
+    assert.equal(swatch.getAttribute('aria-hidden'), 'true')
+    assert.equal(swatch.getAttribute('style'), null, 'swatch avoids inline style attributes for strict CSP')
+    assert.ok(label.textContent.endsWith('(1)'), `color label ${label.textContent} includes accessible color name + count`)
+  }
+  assert.equal(typeBox('superchat').checked, true)
+  assert.equal(typeBox('superchat').indeterminate, false)
+  assert.equal(state.count.textContent, '13 則')
+
+  // Uncheck membership and giftRecipients; counts stay unchanged while rows hide
+  typeBox('membership').checked = false
+  typeBox('membership').listeners.get('change')()
+  typeBox('giftRecipients').checked = false
+  typeBox('giftRecipients').listeners.get('change')()
+  assert.equal(state.count.textContent, '10 則')
+  assert.equal(labelFor(typeBox('membership')).textContent, 'membership(1)')
+  assert.equal(labelFor(typeBox('giftRecipients')).textContent, 'giftRecipients(2)')
+
+  // Uncheck one color -> superchat parent becomes indeterminate (checked=false, indeterminate=true)
+  colorBox('blue').checked = false
+  colorBox('blue').listeners.get('change')()
+  assert.equal(typeBox('superchat').checked, false)
+  assert.equal(typeBox('superchat').indeterminate, true)
+  assert.equal(state.count.textContent, '9 則')
+
+  // Click superchat while indeterminate -> checks all 7 colors again
+  typeBox('superchat').checked = true
+  typeBox('superchat').listeners.get('change')()
+  assert.equal(typeBox('superchat').indeterminate, false)
+  assert.equal(colorBox('blue').checked, true)
+  assert.equal(state.count.textContent, '10 則')
+
+  // Click superchat to uncheck all 7 colors -> 1 more click on red isolates red SC cleanly
+  typeBox('superchat').checked = false
+  typeBox('superchat').listeners.get('change')()
+  for (const [key] of tiers) assert.equal(colorBox(key).checked, false)
+  assert.equal(state.count.textContent, '3 則') // milestone(1) + membershipGift(2)
+
+  colorBox('red').checked = true
+  colorBox('red').listeners.get('change')()
+  assert.equal(typeBox('superchat').checked, false)
+  assert.equal(typeBox('superchat').indeterminate, true)
+  assert.equal(state.count.textContent, '4 則')
+  assert.ok(state.list.children.some(row => row.textContent.includes('msg-red')))
+  assert.ok(!state.list.children.some(row => row.textContent.includes('msg-blue')))
+
+  // Switching to target-user filter hides SC filters and never leaks SC filter exclusions into target chat
+  history.settings.users = ['@donor']
+  env.api.setEnabled(state, true, false)
+  assert.equal(scSearch.hidden, true)
+  assert.equal(state.list.children.filter(row => row.textContent.includes('msg-')).length, 7)
+  // Switching back to SC preserves temporary per-page selections
+  env.api.setEnabled(state, true, true)
+  assert.equal(scSearch.hidden, false)
+  assert.equal(state.count.textContent, '4 則')
+  assert.equal(colorBox('blue').checked, false)
+  assert.equal(colorBox('red').checked, true)
+})
+
+test('YouTube SC type & color filters: classify Super Stickers, search/locate together, inspect archived trees lazily, and reset across reloads', async () => {
+  const database = fakeIndexedDB()
+  const seed = boot({ database, trustedTypes: true })
+  seed.location.href = 'https://www.youtube.com/live_chat?v=sc-filter-persist'
+  const seedHistory = seed.api.getHistory(seed.api.getChannel())
+  await seedHistory.restorePromise
+
+  // Super Sticker (#00bfa5 body -> green, not cyan!)
+  seed.api.captureLine(superStickerMessage(seed, { id: 'st-green' }).line, seedHistory)
+  const orangeSc = superChatMessage(seed, '@donor', 'orange needle', 'NT$750', 'sc-orange')
+  orangeSc.line.data = { headerBackgroundColor: 0xffe65100, bodyBackgroundColor: 0xfff57c00 }
+  seed.api.captureLine(orangeSc.line, seedHistory)
+  const gift = membershipMessage(seed, { tag: 'ytd-sponsorships-live-chat-gift-purchase-announcement-renderer', id: 'g-saved' })
+  gift.line.data = { primaryText: { simpleText: 'Gifted 3 memberships' } }
+  seed.api.captureLine(gift.line, seedHistory)
+  await seed.api.flushHistory(seedHistory)
+
+  // Simulate pre-existing IndexedDB records lacking new scColor/giftCount fields
+  for (const [key, item] of database.records) {
+    const legacy = { ...item }
+    delete legacy.scColor
+    delete legacy.giftCount
+    database.records.set(key, legacy)
+  }
+
+  // Fresh boot (simulates reload): nothing stored in localStorage, resets to all checked, classifies lazily without hydrating offscreen views
+  const fresh = boot({ database, trustedTypes: true })
+  assert.equal(fresh.storage.get('youtube-live-chat-tweaks-settings-v1'), undefined)
+  const h = fresh.document.body.appendChild(new fresh.Element('yt-live-chat-header-renderer'))
+  h.appendChild(new fresh.Element('button')).id = 'live-chat-header-context-menu'
+  const s = fresh.document.body.appendChild(new fresh.Element('div')).appendChild(new fresh.Element('div'))
+  s.id = 'item-scroller'
+  s.appendChild(new fresh.Element('div')).id = 'items'
+  fresh.location.href = 'https://www.youtube.com/live_chat?v=sc-filter-persist'
+  const restored = fresh.api.getHistory(fresh.api.getChannel())
+  await restored.restorePromise
+
+  // Verify lazy summary didn't hydrate any views before opening
+  const summary = fresh.api.summarizeSupportEvents(restored)
+  assert.equal(summary.superchat, 2)
+  assert.equal(summary.colors.green, 1)
+  assert.equal(summary.colors.cyan, 0)
+  assert.equal(summary.colors.orange, 1)
+  assert.equal(summary.membershipGiftFrom, 1)
+  assert.equal(summary.membershipGiftTo, 3)
+  assert.equal(restored.messages.every(r => r._hasView === false), true)
+
+  fresh.api.refresh()
+  const state = fresh.api.mounted
+  fresh.api.setEnabled(state, true, true)
+  const colorBox = key => state.panel.querySelector(`[data-sc-color="${key}"]`)
+  const typeBox = type => state.panel.querySelector(`[data-sc-type="${type}"]`)
+  assert.equal(typeBox('superchat').checked, true)
+  assert.equal(colorBox('green').checked, true)
+  assert.equal(state.count.textContent, '3 則')
+
+  // Exclude green (hides Super Sticker), search "needle" matches orange SC
+  colorBox('green').checked = false
+  colorBox('green').listeners.get('change')()
+  assert.equal(state.count.textContent, '2 則')
+  state.supportSearch.value = '拍手'
+  state.supportSearch.listeners.get('input')()
+  assert.equal(state.count.textContent, '0 則符合')
+  assert.equal(state.empty.hidden, false)
+  state.supportSearch.value = 'needle'
+  state.supportSearch.listeners.get('input')()
+  assert.equal(state.count.textContent, '1 則符合')
+
+  // Locate re-enables filter cleanly if called for a filtered-out item
+  state.list.clientHeight = 200
+  state.list.scrollTop = 0
+  assert.equal(fresh.api.locateSupportRecord(state, 'st-green'), true)
+  assert.equal(colorBox('green').checked, true)
+  assert.equal(state.count.textContent, '3 則')
 })
