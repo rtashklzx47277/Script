@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name        Twitch Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.7.2
+// @version     0.7.3
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
-// @description 依頻道主、管理員、VIP 與帳號包含／排除名單篩選 Twitch 聊天，支援頻道／全域設定、7 天紀錄與自動跟隨。
+// @description 依頻道主、管理員、VIP 與全域帳號包含／排除名單篩選 Twitch 聊天，保留最近 100 則／7 天紀錄並支援自動跟隨。
 // @author      Derek
 // @match       *://www.twitch.tv/*
 // @run-at      document-idle
@@ -18,10 +18,9 @@
   const MESSAGE_SELECTOR = '[data-a-target="chat-line-message"]'
   const USER_SELECTOR = '[data-a-target="chat-message-username"]'
   const STORAGE_KEY = 'twitch-live-chat-tweaks-settings-v1'
-  const MAX_MESSAGES = 2000
+  const MAX_MESSAGES = 100
   const MAX_CHANNELS = 5
   const RETENTION_MS = 7 * 24 * 60 * 60 * 1000
-  const OLDER_BATCH = 200
   const ARCHIVE_DB = 'twitch-live-chat-tweaks-history-v1'
   const pageKey = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`
   let archiveDatabase = null
@@ -30,7 +29,8 @@
   const MODERATOR_BADGE = '3267646d-33f0-4b17-b3df-f923a41db1d0'
   const VIP_BADGE = 'b817aba4-fad8-49e2-b88a-7cc744dfa6ec'
   const histories = new Map()
-  let globalTargets = { users: [], excludedUsers: [] }
+  const defaultSettings = () => ({ moderators: true, broadcaster: true, vip: true, users: [], excludedUsers: [] })
+  let globalSettings = defaultSettings()
   let mounted = null
   let refreshTimer = 0
 
@@ -78,48 +78,66 @@
     } catch (_) { return Object.create(null) }
   }
 
-  const loadSettings = (channel) => {
+  const cloneSettings = settings => ({
+    moderators: settings.moderators !== false,
+    broadcaster: settings.broadcaster !== false,
+    vip: settings.vip !== false,
+    users: [...(settings.users || [])],
+    excludedUsers: [...(settings.excludedUsers || [])],
+  })
+
+  const loadSettings = (channel = '') => {
     try {
       const stored = readSavedSettings()
-      const saved = stored[channel]
-      const global = stored['@global'] || globalTargets
-      globalTargets = {
-        users: normalizeUsers(Array.isArray(global.users) ? global.users.join(' ') : ''),
-        excludedUsers: normalizeUsers(Array.isArray(global.excludedUsers) ? global.excludedUsers.join(' ') : ''),
+      const flat = 'moderators' in stored || 'broadcaster' in stored || 'vip' in stored ||
+        Array.isArray(stored.users) || Array.isArray(stored.excludedUsers)
+      if (flat) {
+        globalSettings = {
+          moderators: stored.moderators !== false,
+          broadcaster: stored.broadcaster !== false,
+          vip: stored.vip !== false,
+          users: normalizeUsers(Array.isArray(stored.users) ? stored.users.join(' ') : ''),
+          excludedUsers: normalizeUsers(Array.isArray(stored.excludedUsers) ? stored.excludedUsers.join(' ') : ''),
+        }
+        return cloneSettings(globalSettings)
       }
-      return {
-        moderators: saved?.moderators !== false,
-        broadcaster: saved?.broadcaster !== false,
-        vip: saved?.vip !== false,
-        users: normalizeUsers(Array.isArray(saved?.users) ? saved.users.join(' ') : ''),
-        excludedUsers: normalizeUsers(Array.isArray(saved?.excludedUsers) ? saved.excludedUsers.join(' ') : ''),
-        globalUsers: globalTargets.users, globalExcludedUsers: globalTargets.excludedUsers,
+      const entries = Object.values(stored).filter(entry => entry && typeof entry === 'object' && !Array.isArray(entry))
+      if (!entries.length) return cloneSettings(globalSettings)
+      const legacyGlobal = stored['@global'] && typeof stored['@global'] === 'object' ? stored['@global'] : null
+      const legacyChannel = channel && stored[channel] && typeof stored[channel] === 'object' ? stored[channel] : null
+      globalSettings = {
+        moderators: legacyGlobal?.moderators ?? legacyChannel?.moderators ?? !entries.some(entry => entry.moderators === false),
+        broadcaster: legacyGlobal?.broadcaster ?? legacyChannel?.broadcaster ?? !entries.some(entry => entry.broadcaster === false),
+        vip: legacyGlobal?.vip ?? legacyChannel?.vip ?? !entries.some(entry => entry.vip === false),
+        users: normalizeUsers(entries.flatMap(entry => Array.isArray(entry.users) ? entry.users : []).join(' ')),
+        excludedUsers: normalizeUsers(entries.flatMap(entry => Array.isArray(entry.excludedUsers) ? entry.excludedUsers : []).join(' ')),
       }
+      return cloneSettings(globalSettings)
     } catch (_) {
-      return { moderators: true, broadcaster: true, vip: true, users: [], excludedUsers: [],
-        globalUsers: globalTargets.users, globalExcludedUsers: globalTargets.excludedUsers }
+      return cloneSettings(globalSettings)
     }
   }
 
-  const saveSettings = (history, global = false) => {
-    const { moderators, broadcaster, vip, users, excludedUsers = [], globalUsers = [], globalExcludedUsers = [] } = history.settings
-    if (global) {
-      globalTargets = { users: globalUsers, excludedUsers: globalExcludedUsers }
-      for (const item of histories.values()) Object.assign(item.settings, { globalUsers, globalExcludedUsers })
+  const saveSettings = (history) => {
+    const next = {
+      moderators: history.settings.moderators !== false,
+      broadcaster: history.settings.broadcaster !== false,
+      vip: history.settings.vip !== false,
+      users: normalizeUsers((history.settings.users || []).join(' ')),
+      excludedUsers: normalizeUsers((history.settings.excludedUsers || []).join(' ')),
     }
+    globalSettings = cloneSettings(next)
+    for (const item of histories.values()) item.settings = cloneSettings(next)
     try {
-      const saved = readSavedSettings()
-      if (global) saved['@global'] = globalTargets
-      else saved[history.channel] = { moderators, broadcaster, vip, users, excludedUsers }
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(saved))
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(next))
       return true
     } catch (_) { return false }
   }
 
-  const changeTargetUsers = (settings, input, remove = false, exclude = false, global = false) => {
+  const changeTargetUsers = (settings, input, remove = false, exclude = false) => {
     const user = String(input || '').trim().toLowerCase().replace(/^@/, '')
     if (!/^[a-z0-9_]{1,25}$/.test(user)) return null
-    const key = global ? exclude ? 'globalExcludedUsers' : 'globalUsers' : exclude ? 'excludedUsers' : 'users'
+    const key = exclude ? 'excludedUsers' : 'users'
     const users = settings[key] || []
     return { ...settings, [key]: remove
       ? users.filter(name => name !== user)
@@ -153,8 +171,9 @@
     const database = await openArchive()
     const transaction = database.transaction('messages', 'readwrite')
     const done = transactionDone(transaction)
-    const request = transaction.objectStore('messages').index('expiresAt').openCursor()
     const now = Date.now()
+    const range = typeof IDBKeyRange !== 'undefined' ? IDBKeyRange.upperBound(now) : undefined
+    const request = transaction.objectStore('messages').index('expiresAt').openCursor(range)
     request.onsuccess = () => {
       const cursor = request.result
       if (!cursor || cursor.value.expiresAt > now) return
@@ -268,27 +287,6 @@
     status.textContent = history.archiveError ? '此瀏覽器無法保存紀錄；目前僅暫存於本次頁面。'
       : history.archiveReady ? '' : '正在載入已保存的紀錄…'
   }
-  const loadOlderRecords = state => {
-    const { history, list } = state
-    const saved = [...history.older.values()].slice(-OLDER_BATCH)
-    const restored = []
-    const beforeHeight = list.scrollHeight
-    const beforeTop = list.scrollTop
-    for (const item of saved) {
-      history.older.delete(item.storageId)
-      if (!validArchiveRecord(item, history.scope)) continue
-      const record = restoreRecord(item)
-      if (!record) continue
-      restored.push(record)
-      if (record.id) history.ids.set(record.id, record)
-    }
-    history.displayLimit += restored.length
-    history.messages.push(...restored)
-    history.messages.sort((a, b) => a.createdAt - b.createdAt || a.order - b.order)
-    history.follow = false
-    renderMessages(state, true)
-    list.scrollTop = beforeTop + list.scrollHeight - beforeHeight
-  }
 
   const flushHistory = async history => {
     if (!history.archiveReady || history.archiveError) return
@@ -296,14 +294,17 @@
       try { await history.writePromise } catch (_) {}
       return flushHistory(history)
     }
-    if (!history.saveQueue.size) return
+    if (!history.saveQueue.size && !history.deleteQueue.size) return
     const batch = [...history.saveQueue.values()]
+    const deletes = [...history.deleteQueue].filter(id => !history.saveQueue.has(id))
     history.saveQueue.clear()
+    history.deleteQueue.clear()
     history.writePromise = (async () => {
       const database = await openArchive()
       const transaction = database.transaction('messages', 'readwrite')
       const done = transactionDone(transaction)
       const store = transaction.objectStore('messages')
+      for (const storageId of deletes) store.delete([history.scope, storageId])
       for (const saved of batch) {
         const request = store.get([saved.scope, saved.storageId])
         request.onsuccess = () => {
@@ -318,9 +319,8 @@
             current.createdAt = Math.min(current.createdAt, saved.createdAt)
             current.order = saved.order
           }
-          const older = history.older.get(saved.storageId)
-          if (older) older.createdAt = Math.min(older.createdAt, saved.createdAt)
           if (saved.expiresAt > Date.now()) store.put(saved)
+          else store.delete([saved.scope, saved.storageId])
         }
       }
       await done
@@ -334,16 +334,17 @@
   const saveRecord = (history, record) => {
     if (history.archiveError) return
     const saved = archiveRecord(history, record)
-    if (history.older.has(record.storageId)) history.older.set(record.storageId, saved)
+    history.deleteQueue.delete(record.storageId)
     history.saveQueue.set(record.storageId, saved)
     if (history.saveScheduled) return
     history.saveScheduled = true
     Promise.resolve().then(() => { history.saveScheduled = false; return flushHistory(history) })
   }
   const trimHistory = history => {
-    while (history.messages.length > history.displayLimit) {
+    while (history.messages.length > MAX_MESSAGES) {
       const oldest = history.messages.shift()
-      if (!history.archiveError) history.older.set(oldest.storageId, archiveRecord(history, oldest))
+      history.saveQueue.delete(oldest.storageId)
+      history.deleteQueue.add(oldest.storageId)
       forgetRecord(history, oldest)
     }
   }
@@ -366,6 +367,7 @@
       const [saved] = await Promise.all([read, done])
       const records = saved.filter(item => validArchiveRecord(item, history.scope))
         .sort((a, b) => a.createdAt - b.createdAt || (a.order || 0) - (b.order || 0))
+      const restored = []
       for (const item of records) {
         const current = item.id ? history.ids.get(item.id) : null
         if (current) {
@@ -373,21 +375,17 @@
           current.order = Number.isSafeInteger(item.order) ? item.order : current.order
           current.view.firstChild.textContent = restoreTree(item.tree)?.firstChild?.textContent || current.view.firstChild.textContent
           saveRecord(history, current)
-        } else history.older.set(item.storageId, item)
-      }
-      const take = Math.max(0, history.displayLimit - history.messages.length)
-      const latest = take ? [...history.older.values()].slice(-take) : []
-      const restored = []
-      for (const item of latest) {
-        history.older.delete(item.storageId)
-        const record = restoreRecord(item)
-        if (!record) continue
-        restored.push(record)
-        if (record.id) history.ids.set(record.id, record)
-        history.dirty.add(record)
+        } else {
+          const record = restoreRecord(item)
+          if (!record) continue
+          restored.push(record)
+          if (record.id) history.ids.set(record.id, record)
+          history.dirty.add(record)
+        }
       }
       history.messages.unshift(...restored)
       history.messages.sort((a, b) => a.createdAt - b.createdAt || a.order - b.order)
+      trimHistory(history)
       history.archiveReady = true
       await flushHistory(history)
       if (mounted?.history === history && history.enabled) renderMessages(mounted, true)
@@ -396,16 +394,19 @@
   }
   const pruneHistories = () => {
     const cutoff = Date.now() - RETENTION_MS
+    let changed = false
     for (const history of histories.values()) {
+      const before = history.messages.length
       history.messages = history.messages.filter(record => {
         if (record.createdAt > cutoff) return true
         forgetRecord(history, record)
         history.saveQueue.delete(record.storageId)
+        history.deleteQueue.delete(record.storageId)
         return false
       })
-      for (const [key, saved] of history.older) if (saved.createdAt <= cutoff) history.older.delete(key)
+      if (history.messages.length !== before) changed = true
     }
-    if (mounted?.history.enabled) renderMessages(mounted)
+    if (changed && mounted?.history.enabled) renderMessages(mounted)
     pruneArchive().catch(() => {})
   }
 
@@ -414,7 +415,7 @@
     if (!history) {
       history = {
         channel, settings: loadSettings(channel), messages: [], nodes: new WeakMap(),
-        scope: channel, ids: new Map(), older: new Map(), saveQueue: new Map(), displayLimit: MAX_MESSAGES,
+        scope: channel, ids: new Map(), saveQueue: new Map(), deleteQueue: new Set(),
         archiveReady: false, archiveError: false,
         enabled: false, follow: true, dirty: new Set(), removed: new Set(),
       }
@@ -426,7 +427,7 @@
       const oldest = histories.keys().next().value
       const evicted = histories.get(oldest)
       histories.delete(oldest)
-      if (evicted?.saveQueue?.size) {
+      if (evicted?.saveQueue?.size || evicted?.deleteQueue?.size) {
         Promise.resolve(evicted.restorePromise).then(() => flushHistory(evicted)).catch(() => {})
       }
     }
@@ -455,11 +456,11 @@
   }
 
   const matchesFilter = (message, settings) =>
-    !(settings.excludedUsers || []).includes(message.user) && !(settings.globalExcludedUsers || []).includes(message.user) && Boolean(
+    !(settings.excludedUsers || []).includes(message.user) && Boolean(
       (settings.moderators && message.moderator) ||
       (settings.broadcaster && message.broadcaster) ||
       (settings.vip && message.vip) ||
-      settings.users.includes(message.user) || (settings.globalUsers || []).includes(message.user)
+      settings.users.includes(message.user)
     )
 
   const makeMessageView = (message) => {
@@ -500,11 +501,9 @@
     const message = readMessage(line, history.channel)
     if (!message) return false
     const previous = message.id ? history.ids.get(message.id) : history.nodes.get(line)
-    const archived = message.id ? history.older.get(message.id) : null
     // Keep all roles even when unchecked so turning a role back on restores its history.
     if (!(previous?.retained && previous.user === message.user) && !message.moderator && !message.broadcaster &&
-      !message.vip && !history.settings.users.includes(message.user) &&
-      !(history.settings.globalUsers || []).includes(message.user)) return false
+      !message.vip && !history.settings.users.includes(message.user)) return false
     const fingerprint = `${message.user}\n${message.moderator}\n${message.broadcaster}\n${message.vip}\n${message.author.textContent}\n${message.body.innerHTML}`
     if (previous?.fingerprint === fingerprint) { history.nodes.set(line, previous); return false }
     const view = makeMessageView(message)
@@ -518,11 +517,7 @@
       record = { id: message.id, user: message.user, moderator: message.moderator,
         broadcaster: message.broadcaster, vip: message.vip, view, fingerprint, retained: true,
         storageId: message.id || `${pageKey}-${++anonymousMessage}`,
-        createdAt: archived?.createdAt || Date.now(), order: archived?.order || ++messageOrder }
-      if (archived) {
-        view.firstChild.textContent = restoreTree(archived.tree)?.firstChild?.textContent || view.firstChild.textContent
-        history.older.delete(message.id)
-      }
+        createdAt: Date.now(), order: ++messageOrder }
       history.messages.push(record)
       trimHistory(history)
     }
@@ -598,7 +593,10 @@
     const { history, list, empty, count, latest } = state
     const filterKey = JSON.stringify(history.settings)
     const full = rebuild || state.renderedHistory !== history || state.filterKey !== filterKey
-    if (full) state.visibleCount = 0
+    if (full) {
+      state.visibleCount = 0
+      state.mountedTailOrder = 0
+    }
     for (const record of history.removed) {
       if (record.renderedView) state.messageResizeObserver?.unobserve(record.renderedView)
       if (!full && record.renderedView?.parentElement === list && record.visible) state.visibleCount--
@@ -607,33 +605,43 @@
       record.visible = false
     }
     history.removed.clear()
+    let needsReorder = false
     for (const record of full ? history.messages : history.dirty) {
       const oldView = record.renderedView
       const wasVisible = oldView?.parentElement === list && record.visible
       const show = matchesFilter(record, history.settings)
       state.visibleCount += Number(show) - (full ? 0 : Number(!!wasVisible))
-      if (record.view.hidden !== !show) record.view.hidden = !show
+      if (!show) {
+        if (oldView) {
+          state.messageResizeObserver?.unobserve(oldView)
+          oldView.remove()
+        }
+        record.renderedView = null
+        record.visible = false
+        continue
+      }
+      record.view.hidden = false
       if (oldView && oldView !== record.view) {
         state.messageResizeObserver?.unobserve(oldView)
         if (oldView.parentElement === list) oldView.replaceWith(record.view)
         else oldView.remove()
       }
-      if (full || record.view.parentElement !== list) list.appendChild(record.view)
+      if (full || record.view.parentElement !== list) {
+        if (!full && state.mountedTailOrder && record.order <= state.mountedTailOrder) needsReorder = true
+        list.appendChild(record.view)
+      }
+      if (!state.mountedTailOrder || record.order > state.mountedTailOrder) state.mountedTailOrder = record.order
       record.renderedView = record.view
-      record.visible = show
-      if (show) state.messageResizeObserver?.observe(record.view)
-      else state.messageResizeObserver?.unobserve(record.view)
+      record.visible = true
+      state.messageResizeObserver?.observe(record.view)
     }
     history.dirty.clear()
     state.renderedHistory = history
     state.filterKey = filterKey
+    if (needsReorder) { renderMessages(state, true); return }
     empty.hidden = state.visibleCount > 0
     const countText = `${state.visibleCount} 則`
     if (count.textContent !== countText) count.textContent = countText
-    if (state.older) {
-      state.older.hidden = !history.older.size
-      state.older.textContent = `載入較早紀錄（${history.older.size}）`
-    }
     // All row writes finish before the one layout read needed for following.
     if (history.follow) {
       list.scrollTop = list.scrollHeight
@@ -725,15 +733,10 @@
     if (enabled) renderMessages(state, true)
   }
 
-  const targetSettings = state => state.targetScope === 'global'
-    ? { users: state.history.settings.globalUsers || [], excludedUsers: state.history.settings.globalExcludedUsers || [] }
-    : state.history.settings
-
   const renderTargets = (state) => {
     const { panel, history } = state
     const exclude = state.targetMode === 'exclude'
-    const global = state.targetScope === 'global'
-    const settings = targetSettings(state)
+    const settings = history.settings
     const targets = exclude ? settings.excludedUsers || [] : settings.users
     const includeButton = $('.ttc-mode-include', panel)
     const excludeButton = $('.ttc-mode-exclude', panel)
@@ -755,8 +758,8 @@
       remove.textContent = '移除'
       remove.setAttribute('aria-label', `移除 ${user}`)
       remove.addEventListener('click', () => {
-        state.updateSettings(changeTargetUsers(history.settings, user, true, exclude, global),
-          exclude ? `已取消排除 ${user}。` : `已移除 ${user}。`, global)
+        state.updateSettings(changeTargetUsers(history.settings, user, true, exclude),
+          exclude ? `已取消排除 ${user}。` : `已移除 ${user}。`)
       })
       row.appendChild(name)
       row.appendChild(remove)
@@ -796,13 +799,6 @@
             element('label', {}, [element('input', { type: 'checkbox', name: 'moderators' }), ' Moderator']),
             element('label', {}, [element('input', { type: 'checkbox', name: 'vip' }), ' VIP']),
           ]),
-          element('label', { class: 'ttc-target-scope' }, [
-            '名單範圍',
-            element('select', { name: 'target-scope' }, [
-              element('option', { value: 'channel' }, ['目前頻道']),
-              element('option', { value: 'global' }, ['全域']),
-            ]),
-          ]),
           element('div', { class: 'ttc-target-modes', role: 'group', 'aria-label': '帳號篩選方式' }, [
             element('button', { type: 'button', class: 'ttc-mode-include', 'aria-label': '＋ 包含' }, ['＋ 包含']),
             element('button', { type: 'button', class: 'ttc-mode-exclude', 'aria-label': '－ 排除' }, ['－ 排除']),
@@ -831,7 +827,6 @@
       ]),
       element('p', { class: 'ttc-history-status', role: 'status' }),
       element('p', { class: 'ttc-empty' }, ['尚無符合條件的發言。新增目標帳號後開始收集。']),
-      element('button', { class: 'ttc-older', type: 'button', hidden: '' }, ['載入較早紀錄']),
       element('div', { class: 'ttc-list', role: 'log', 'aria-label': '篩選後的聊天訊息', 'aria-live': 'off' }),
       element('button', { class: 'ttc-latest', type: 'button', hidden: '' }, ['回到最新訊息']),
     ])
@@ -847,8 +842,6 @@
     state.empty = $('.ttc-empty', panel)
     state.count = $('.ttc-count', panel)
     state.latest = $('.ttc-latest', panel)
-    state.older = $('.ttc-older', panel)
-    state.older.addEventListener('click', () => loadOlderRecords(state))
     const moderators = $('[name="moderators"]', panel)
     const broadcaster = $('[name="broadcaster"]', panel)
     const vip = $('[name="vip"]', panel)
@@ -858,10 +851,9 @@
     vip.checked = state.history.settings.vip
     state.status = $('.ttc-target-status', panel)
     state.targetMode = 'include'
-    state.targetScope = 'channel'
-    state.updateSettings = (settings, message = '', global = false) => {
+    state.updateSettings = (settings, message = '') => {
       state.history.settings = settings
-      const saved = saveSettings(state.history, global)
+      const saved = saveSettings(state.history)
       showTargetStatus(state, saved ? message : '此瀏覽器無法儲存設定；設定僅保留至本次頁面結束。')
       renderTargets(state)
       captureTree(state.scroller, state.history)
@@ -875,9 +867,8 @@
     $('.ttc-users', panel).addEventListener('submit', event => {
       event.preventDefault()
       const exclude = state.targetMode === 'exclude'
-      const global = state.targetScope === 'global'
-      const key = global ? exclude ? 'globalExcludedUsers' : 'globalUsers' : exclude ? 'excludedUsers' : 'users'
-      const nextSettings = changeTargetUsers(state.history.settings, users.value, false, exclude, global)
+      const key = exclude ? 'excludedUsers' : 'users'
+      const nextSettings = changeTargetUsers(state.history.settings, users.value, false, exclude)
       if (!nextSettings) {
         showTargetStatus(state, '請輸入一個英文帳號。')
         return
@@ -885,7 +876,7 @@
       const added = nextSettings[key].length - (state.history.settings[key] || []).length
       state.updateSettings(nextSettings, added
         ? exclude ? '已排除帳號。' : '已新增帳號。'
-        : '此帳號已在名單中。', global)
+        : '此帳號已在名單中。')
       users.value = ''
     })
     const setTargetMode = mode => {
@@ -895,11 +886,6 @@
     }
     $('.ttc-mode-include', panel).addEventListener('click', () => setTargetMode('include'))
     $('.ttc-mode-exclude', panel).addEventListener('click', () => setTargetMode('exclude'))
-    $('[name="target-scope"]', panel).addEventListener('change', event => {
-      state.targetScope = event.target.value === 'global' ? 'global' : 'channel'
-      showTargetStatus(state)
-      renderTargets(state)
-    })
     $('[name="search-users"]', panel).addEventListener('input', () => renderTargets(state))
     const targetSettings = $('.ttc-targets', panel)
     const targetButton = $('.ttc-target-summary', panel)
@@ -1000,7 +986,7 @@
   }
 
   const syncSettings = () => {
-    globalTargets = { users: [], excludedUsers: [] }
+    globalSettings = defaultSettings()
     for (const history of histories.values()) history.settings = loadSettings(history.channel)
     if (!mounted) return
     const { panel, history } = mounted
@@ -1031,29 +1017,26 @@
     .ttc-users { display: flex; align-items: center; gap: 6px; }
     .ttc-users label { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; white-space: nowrap; }
     .ttc-users input { display: block; box-sizing: border-box; flex: 1; min-width: 0; width: 100%; padding: 5px 8px; border: 1px solid var(--color-border-base, #ffffff44); border-radius: 4px; color: inherit; background: var(--color-background-input, #ffffff11); font-size: 12px; }
-    .ttc-toolbar button, .ttc-latest, .ttc-older { padding: 6px 10px; border: 0; border-radius: 4px; color: #fff; background: #9147ff; cursor: pointer; }
+    .ttc-toolbar button, .ttc-latest { padding: 6px 10px; border: 0; border-radius: 4px; color: #fff; background: #9147ff; cursor: pointer; }
     .ttc-users input, .ttc-users button[type="submit"] { box-sizing: border-box; height: 30px; font: inherit; }
     .ttc-users button[type="submit"] { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; padding: 0 10px; border: 1px solid transparent; border-radius: 4px; font-weight: 600; line-height: 1; }
     .ttc-empty { padding: 16px 12px; color: var(--color-text-alt-2, #adadb8); }
     .ttc-history-status { margin: 0; padding: 8px 12px; color: var(--color-text-alt-2, #adadb8); font-size: 12px; }
-    .ttc-older { align-self: center; flex-shrink: 0; margin: 6px; }
     .ttc-list { flex: 1; min-height: 0; overflow: auto; overflow-anchor: none; padding: 6px 0; }
-    .ttc-message { padding: 5px 10px; overflow-wrap: anywhere; line-height: 1.6; }
+    .ttc-message { padding: 5px 10px; overflow-wrap: anywhere; line-height: 1.6; content-visibility: auto; contain-intrinsic-size: auto 30px; }
     .ttc-message:hover { background: var(--color-background-button-text-hover, #ffffff11); }
     .ttc-time { margin-right: 6px; color: var(--color-text-alt-2, #adadb8); font-size: 10px; }
     .ttc-message > img { width: 18px; height: 18px; margin-right: 3px; vertical-align: middle; }
     .ttc-message .chat-image { max-height: 28px; vertical-align: middle; }
     .ttc-latest { position: absolute; bottom: 8px; align-self: center; }
     .ttc-managing > .ttc-toolbar { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow-y: auto; }
-    .ttc-managing > .ttc-empty, .ttc-managing > .ttc-list, .ttc-managing > .ttc-latest, .ttc-managing > .ttc-older { display: none !important; }
+    .ttc-managing > .ttc-empty, .ttc-managing > .ttc-list, .ttc-managing > .ttc-latest { display: none !important; }
     .ttc-options { flex-shrink: 0; }
     .ttc-panel .ttc-target-summary { display: inline-flex; align-items: center; gap: 3px; flex-shrink: 0; padding: 0; color: var(--color-text-link, #bf94ff); background: transparent; white-space: nowrap; font: inherit; cursor: pointer; }
     .ttc-target-summary::before { content: '▸'; }
     .ttc-target-summary[aria-expanded="true"]::before { content: '▾'; }
     .ttc-targets { margin-top: 12px; flex: 1; min-height: 0; display: flex; flex-direction: column; }
     .ttc-targets > :not(.ttc-target-list) { flex-shrink: 0; }
-    .ttc-target-scope { display: flex; align-items: center; gap: 6px; margin-bottom: 12px; }
-    .ttc-target-scope select { flex: 1; min-width: 0; height: 30px; padding: 4px 8px; border: 1px solid var(--color-border-input, #8886); border-radius: 4px; color: inherit; background: var(--color-background-input, #18181b); font: inherit; }
     .ttc-target-modes { display: flex; gap: 6px; margin-bottom: 8px; }
     .ttc-target-modes button { flex: 1; padding: 4px 8px; color: inherit; background: var(--color-background-button-text-hover, #ffffff22); font-size: 12px; }
     .ttc-target-modes button[aria-pressed="true"] { color: #fff; background: #9147ff; }
@@ -1073,6 +1056,8 @@
   window.addEventListener('resize', schedulePanelPosition)
   window.addEventListener('scroll', schedulePanelPosition, true)
   const observer = new MutationObserver(mutations => {
+    if (mounted?.button.isConnected && mounted.panel.isConnected &&
+      mounted.scroller.isConnected && getChannel() === mounted.history.channel) return
     if (mutations.some(mutation => {
       const element = mutation.target.nodeType === 1 ? mutation.target : mutation.target.parentElement
       return !element?.closest('.ttc-panel, .ttc-toggle, [data-a-target="chat-scroller"]')

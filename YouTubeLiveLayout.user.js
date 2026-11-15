@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Live Layout
 // @namespace   https://tampermonkey.net/
-// @version     0.2.11
+// @version     0.2.12
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveLayout.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveLayout.user.js
 // @description 調整 YouTube 劇院模式：無聊天室時填滿視窗，有聊天室時依可用寬度切換左右或上下排列。
@@ -339,14 +339,17 @@
     // showing. Check rendered styles: the slate also exists during playback.
     if (background) {
       const slateStyle = getComputedStyle(slate)
-      const backgroundStyle = getComputedStyle(background)
       if (
         slateStyle.display !== 'none' &&
-        slateStyle.visibility === 'visible' &&
-        backgroundStyle.display !== 'none' &&
-        backgroundStyle.visibility === 'visible'
+        slateStyle.visibility === 'visible'
       ) {
-        return FALLBACK_ASPECT_RATIO
+        const backgroundStyle = getComputedStyle(background)
+        if (
+          backgroundStyle.display !== 'none' &&
+          backgroundStyle.visibility === 'visible'
+        ) {
+          return FALLBACK_ASPECT_RATIO
+        }
       }
     }
 
@@ -471,7 +474,7 @@
       document.head.appendChild(styleElement)
     }
 
-    styleElement.textContent = css
+    if (styleElement.textContent !== css) styleElement.textContent = css
   }
 
   const removeStyle = (id) => {

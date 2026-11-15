@@ -1179,3 +1179,82 @@ test('YouTube player lookup & initial response: scope player queries to #movie_p
   moviePlayer.queries.set('video', new env.Element('video'))
   assert.equal(env.api.collectPlayerElements(), true)
 })
+
+
+test('YouTube Shorts: metadata layout batches all reads before writes, skips unchanged CSS writes and filters mutations', () => {
+  const env = boot(scripts[0], 'worker', '/shorts/example')
+  const { shorts, reel, video, container, overlay } = addShortsLayout(env)
+  env.render()
+
+  let styleWrites = 0
+  const origSetProperty = reel.style.setProperty.bind(reel.style)
+  const origRemoveProperty = reel.style.removeProperty.bind(reel.style)
+  reel.style.setProperty = (name, value) => {
+    styleWrites++
+    return origSetProperty(name, value)
+  }
+  reel.style.removeProperty = name => {
+    styleWrites++
+    return origRemoveProperty(name)
+  }
+
+  // Re-running with identical geometry must skip redundant style writes.
+  env.resizeObservers[0].callback()
+  env.render()
+  assert.equal(styleWrites, 0)
+
+  // Moving the player must perform all rect reads before any style write.
+  const ops = []
+  for (const [label, node] of [['overlay', overlay], ['container', container], ['video', video]]) {
+    const origRect = node.getBoundingClientRect.bind(node)
+    node.getBoundingClientRect = () => {
+      ops.push(`read:${label}`)
+      return origRect()
+    }
+  }
+  reel.style.setProperty = (name, value) => {
+    ops.push(`write:${name}`)
+    return origSetProperty(name, value)
+  }
+  video.rect.left = 500
+  env.resizeObservers[0].callback()
+  env.render()
+  const firstWrite = ops.findIndex(op => op.startsWith('write:'))
+  assert.notEqual(firstWrite, -1)
+  assert.equal(ops.slice(firstWrite).some(op => op.startsWith('read:')), false, `reads happened after writes: ${ops.join(',')}`)
+
+  // Unrelated DOM churn outside Shorts must not schedule layout frames.
+  shorts.nodeType = 1
+  const unrelated = Object.assign(new env.Element('div'), { nodeType: 1 })
+  const span = Object.assign(new env.Element('span'), { nodeType: 1 })
+  env.observers[0].callback([{ type: 'childList', target: unrelated, addedNodes: [span], removedNodes: [] }])
+  assert.equal(env.animationFrames.size, 0)
+
+  env.observers[0].callback([{ type: 'attributes', attributeName: 'is-fullscreen', target: shorts }])
+  assert.equal(env.animationFrames.size, 1)
+})
+
+test('Twitch: body MutationObserver ignores chat subtree churn without querying players', () => {
+  const env = boot(scripts[1])
+  env.timers.clear()
+  let playerQueries = 0
+  const origGet = env.selectors.get.bind(env.selectors)
+  env.selectors.get = selector => {
+    if (selector === '[data-a-target="video-player"]') playerQueries++
+    return origGet(selector)
+  }
+
+  const chat = Object.assign(new env.Element('div'), { className: 'stream-chat', nodeType: 1 })
+  const line = chat.appendChild(Object.assign(new env.Element('div'), { nodeType: 1 }))
+  const span = Object.assign(new env.Element('span'), { nodeType: 1 })
+  env.observers[0].callback([{ type: 'childList', target: line, addedNodes: [span], removedNodes: [] }])
+  assert.equal(env.timers.size, 0)
+  assert.equal(playerQueries, 0)
+
+  const stage = Object.assign(new env.Element('div'), { className: 'video-player', nodeType: 1 })
+  const inner = Object.assign(new env.Element('div'), { nodeType: 1 })
+  env.observers[0].callback([{ type: 'childList', target: stage, addedNodes: [inner], removedNodes: [] }])
+  assert.equal(env.timers.size, 1)
+  for (const timer of [...env.timers.values()]) timer.fn()
+  assert.ok(playerQueries >= 1)
+})

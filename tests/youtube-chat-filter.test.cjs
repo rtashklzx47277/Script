@@ -387,7 +387,7 @@ test('YouTube SC search: match names, Unicode handles, amounts and membership te
   assert.equal(state.count.textContent, '1 則', 'SC search must not filter the ordinary user list')
 })
 
-test('YouTube SC search: search all archived rows, page matching results and clear without changing retained history', async () => {
+test('YouTube SC search: search all archived rows directly and clear without changing retained history', async () => {
   const database = fakeIndexedDB()
   const first = boot({ database })
   const history = first.api.getHistory('video:sample_video')
@@ -406,27 +406,23 @@ test('YouTube SC search: search all archived rows, page matching results and cle
   scroller.appendChild(new Element('div')).id = 'items'
   api.refresh()
   const state = api.mounted
-  state.history.displayLimit = 1
   await state.history.restorePromise
+  assert.equal(state.panel.querySelector('.ytcf-older'), null)
+  assert.equal(state.panel.querySelector('[name="target-scope"]'), null)
+  assert.equal(state.history.messages.length, 4)
+  assert.equal(state.history.older, undefined)
   api.setEnabled(state, true, true)
   assert.equal(state.supportSearch.parentElement.hidden, false)
+  assert.equal(state.list.children.length, 3)
+  assert.equal(state.history.messages[3]._hasView, false, 'non-support messages stay un-hydrated in SC view')
   state.supportSearch.value = 'needle'
   state.supportSearch.listeners.get('input')()
-  state.history.searchLimit = 1
-  api.renderMessages(state)
   assert.equal(state.count.textContent, '2 則符合')
-  assert.equal(state.list.children.length, 1)
-  assert.equal(state.older.hidden, false)
-  state.older.listeners.get('click')()
   assert.equal(state.list.children.length, 2)
-  assert.equal(state.older.hidden, true)
-  assert.equal(state.history.messages.length, 1, 'archived search results do not expand the ordinary viewport')
-  assert.equal(state.history.older.size, 3)
   state.supportSearch.value = ''
   state.supportSearch.listeners.get('input')()
-  assert.equal(state.count.textContent, '0 則')
-  assert.equal(state.list.children.length, 1)
-  assert.equal(state.older.hidden, false)
+  assert.equal(state.count.textContent, '3 則')
+  assert.equal(state.list.children.length, 3)
   api.setEnabled(state, true)
   assert.equal(state.supportSearch.parentElement.hidden, true)
   assert.equal(state.count.textContent, '1 則')
@@ -502,36 +498,40 @@ test('YouTube SC locate: leave search, center the selected row, pause following 
   assert.equal(state.locationPinned, true, 'highlight expiry must not resume following')
 })
 
-test('YouTube SC locate: restore an older result and surrounding support events without renewing expiry or losing order', async () => {
+test('YouTube SC locate: locate a restored result and all support events without renewing expiry or losing order', async () => {
   const database = fakeIndexedDB()
   let now = Date.now()
+  const first = boot({ database, now: () => now })
+  const initial = first.api.getHistory('video:locate-older')
+  await initial.restorePromise
+  for (let i = 0; i < 5; i++) {
+    first.api.captureLine(superChatMessage(first, '@donor', i === 1 ? 'needle' : `context ${i}`, 'NT$150', `locate-old-${i}`).line, initial)
+    first.api.captureLine(first.message('@mod', `ordinary ${i}`, 'moderator', `locate-mod-${i}`).line, initial)
+  }
+  await first.api.flushHistory(initial)
+  const expiry = [...database.records.values()].map(row => row.expiresAt)
   const env = boot({ database, now: () => now })
   const history = env.api.getHistory('video:locate-older')
   await history.restorePromise
-  history.displayLimit = 1
-  for (let i = 0; i < 5; i++) {
-    env.api.captureLine(superChatMessage(env, '@donor', i === 1 ? 'needle' : `context ${i}`, 'NT$150', `locate-old-${i}`).line, history)
-    env.api.captureLine(env.message('@mod', `ordinary ${i}`, 'moderator', `locate-mod-${i}`).line, history)
-  }
-  await env.api.flushHistory(history)
-  const expiry = [...database.records.values()].map(row => row.expiresAt)
+  assert.equal(history.messages.length, 10)
+  assert.equal(history.messages.every(row => !row._hasView), true)
   history.enabled = history.supportOnly = true
   history.supportSearch = 'needle'
   const state = { history, list: new env.Element(), empty: {}, count: {}, latest: {} }
   state.list.clientHeight = 400
   state.list.scrollTop = 0
   env.api.renderMessages(state)
-  const oldResult = [...state.searchShown][0]
-  assert.ok(oldResult.view.querySelector('.ytcf-locate'))
-  assert.equal(env.api.locateSupportRecord(state, oldResult.storageId), true)
-  assert.equal(oldResult.retained, false, 'transient search views are released on navigation')
+  const searchResult = [...state.searchShown][0]
+  assert.ok(searchResult.view.querySelector('.ytcf-locate'))
+  assert.equal(history.ids.get('locate-mod-0')._hasView, false, 'non-matching archived rows remain un-hydrated')
+  assert.equal(env.api.locateSupportRecord(state, searchResult.storageId), true)
+  assert.equal(searchResult.view.querySelector('.ytcf-locate'), null)
   assert.equal(state.count.textContent, '5 則')
-  assert.deepEqual(Array.from(history.messages).filter(row => row.supportEvent).map(row => row.id),
-    Array.from({ length: 5 }, (_, i) => `locate-old-${i}`))
+  assert.deepEqual(state.list.children.map(node => node),
+    Array.from({ length: 5 }, (_, i) => history.ids.get(`locate-old-${i}`).view))
   const target = history.ids.get('locate-old-1')
   assert.equal(target.retained, true)
   assert.equal(target.view.hasAttribute('data-ytcf-located'), true)
-  assert.equal(history.older.has(target.storageId), false)
   await env.api.flushHistory(history)
   assert.deepEqual([...database.records.values()].map(row => row.expiresAt), expiry)
   now += 7 * 24 * 60 * 60 * 1000 + 1
@@ -731,21 +731,20 @@ test('YouTube archive: messages received during startup merge with saved history
   assert.equal([...database.records.values()][0].id, 'new-id')
 })
 
-test('YouTube archive: isolate videos, retain evicted history on disk and merge concurrent writers', async () => {
+test('YouTube archive: isolate videos, merge concurrent writers and restore full seven-day history directly', async () => {
   const database = fakeIndexedDB()
   const first = boot({ database })
   const second = boot({ database })
   const a = first.api.getHistory('channel:@host')
   const b = second.api.getHistory('channel:@host')
   await Promise.all([a.restorePromise, b.restorePromise])
-  a.displayLimit = 2
   for (let index = 0; index < 3; index++) first.api.captureLine(first.message('@mod', `message ${index}`, 'moderator', `id-${index}`).line, a)
   second.api.captureLine(second.message('@mod', 'other tab', 'moderator', 'id-other').line, b)
   first.api.captureLine(first.message('@mod', 'same message', 'moderator', 'shared-id').line, a)
   second.api.captureLine(second.message('@mod', 'same message', 'moderator', 'shared-id').line, b)
   await Promise.all([first.api.flushHistory(a), second.api.flushHistory(b)])
-  assert.equal(a.messages.length, 2)
-  assert.equal(a.older.size, 2)
+  assert.equal(a.messages.length, 4)
+  assert.equal(a.older, undefined)
   assert.equal(database.records.size, 5)
   const fresh = boot({ database })
   const restored = fresh.api.getHistory('channel:@host')
@@ -778,12 +777,17 @@ test('YouTube archive: write failures keep the page history and unsafe saved mar
   assert.equal(link.textContent, 'untrusted text')
 })
 
-test('YouTube archive: older saved messages remain accessible beyond the initial view limit', async () => {
+test('YouTube archive: restore >2000 messages directly, hydrate views lazily, search/locate all SC results and binary-search reader anchor', async () => {
   const database = fakeIndexedDB()
   const first = boot({ database })
   const history = first.api.getHistory('video:sample_video')
   await history.restorePromise
-  for (let index = 0; index < 3; index++) first.api.captureLine(first.message('@mod', `old ${index}`, 'moderator', `older-${index}`).line, history)
+  for (let index = 0; index < 2005; index++) {
+    first.api.captureLine(superChatMessage(first, '@donor', index === 12 ? 'early needle' : `sc ${index}`, 'NT$150', `sc-${index}`).line, history)
+  }
+  for (let index = 0; index < 20; index++) {
+    first.api.captureLine(first.message('@mod', `mod ${index}`, 'moderator', `mod-${index}`).line, history)
+  }
   await first.api.flushHistory(history)
   const fresh = boot({ database })
   const { document, Element } = fresh
@@ -794,17 +798,42 @@ test('YouTube archive: older saved messages remain accessible beyond the initial
   scroller.appendChild(new Element('div')).id = 'items'
   fresh.api.refresh()
   const state = fresh.api.mounted
-  state.history.displayLimit = 2
   await state.history.restorePromise
+  assert.equal(state.history.messages.length, 2025)
+  assert.equal(state.history.older, undefined)
+  assert.equal(state.history.messages.every(row => !row._hasView), true, 'restored views stay lazy until mounted')
   fresh.api.setEnabled(state, true)
-  assert.equal(state.count.textContent, '2 則')
-  assert.equal(state.older.hidden, false)
-  state.list.scrollHeight = 100
-  state.list.scrollTop = 0
-  state.older.listeners.get('click')()
-  assert.equal(state.count.textContent, '3 則')
-  assert.equal(state.older.hidden, true)
-  assert.equal(state.list.firstChild.children.at(-1).textContent, 'old 0')
+  assert.equal(state.count.textContent, '20 則')
+  assert.equal(state.list.children.length, 20)
+  assert.equal(state.history.messages.slice(0, 2005).every(row => !row._hasView), true, 'unmounted SC rows remain un-hydrated')
+  fresh.api.setEnabled(state, true, true)
+  assert.equal(state.count.textContent, '2005 則')
+  assert.equal(state.list.children.length, 2005)
+  assert.equal(state.list.firstChild.children.at(-1).textContent, 'sc 0')
+  state.supportSearch.value = 'early needle'
+  state.supportSearch.listeners.get('input')()
+  assert.equal(state.count.textContent, '1 則符合')
+  assert.equal(state.list.children.length, 1)
+  assert.equal(fresh.api.locateSupportRecord(state, state.history.ids.get('sc-12').storageId), true)
+  assert.equal(state.count.textContent, '2005 則')
+  assert.equal(state.list.children.length, 2005)
+  assert.equal(state.history.ids.get('sc-12').view.hasAttribute('data-ytcf-located'), true)
+  // Verify rememberReaderPosition uses O(log N) binary search over mounted rows.
+  let rectReads = 0
+  state.list.getBoundingClientRect = () => ({ top: 100, bottom: 500, height: 400 })
+  for (const [index, row] of state.list.children.entries()) {
+    row.getBoundingClientRect = () => {
+      rectReads++
+      return { top: index * 30 - 500, bottom: (index + 1) * 30 - 500, height: 30 }
+    }
+  }
+  state.list.scrollHeight = 60150
+  state.list.clientHeight = 400
+  state.list.scrollTop = 600
+  state.list.listeners.get('pointerdown')()
+  state.list.listeners.get('scroll')()
+  assert.equal(rectReads < 40, true, `expected logarithmic layout reads, got ${rectReads}`)
+  assert.equal(state.history.readerPositions.support.anchor, 'sc-20')
 })
 
 test('YouTube verified users: recognize native badge types and renderer icons while exclusions still take priority', () => {
@@ -839,8 +868,7 @@ test('YouTube verified users: recognize native badge types and renderer icons wh
   history.settings.verified = true
   env.api.renderMessages(state)
   assert.equal(state.count.textContent, '4 則')
-  history.settings.excludedUsers = ['@verified0']
-  history.settings.globalExcludedUsers = ['@verified1']
+  history.settings.excludedUsers = ['@verified0', '@verified1']
   env.api.renderMessages(state)
   assert.equal(state.count.textContent, '2 則')
   history.supportOnly = true
@@ -1282,9 +1310,11 @@ test('YouTube filters: mount, toggle and remount when Trusted Types rejects HTML
   const savedSettings = env.storage.get('youtube-live-chat-tweaks-settings-v1')
   const fresh = boot({ saved: savedSettings })
   assert.equal(fresh.api.loadSettings(state.history.channel).verified, false)
-  assert.equal(fresh.api.loadSettings('channel:@another').verified, true)
+  assert.equal(fresh.api.loadSettings('channel:@another').verified, false)
+  assert.equal(state.panel.querySelector('[name="target-scope"]'), null)
+  assert.equal(state.panel.querySelector('.ytcf-older'), null)
   const syncedSettings = JSON.parse(savedSettings)
-  syncedSettings[state.history.channel].verified = true
+  syncedSettings.verified = true
   env.storage.set('youtube-live-chat-tweaks-settings-v1', JSON.stringify(syncedSettings))
   env.listeners.get('storage')({ key: 'youtube-live-chat-tweaks-settings-v1' })
   assert.equal(verifiedOption.checked, true)
@@ -1513,21 +1543,22 @@ test('YouTube filters: native deletion hides the old body and clones remain inde
   assert.equal('body' in history.messages[0], false)
 })
 
-test('YouTube filters: cap IDs and retained messages without forcing a paused reader to the bottom', () => {
+test('YouTube filters: retain >2000 messages without count cap and keep paused reader position', () => {
   const env = boot()
   const history = env.api.getHistory('channel:@host')
   for (let i = 0; i < 2002; i++) env.api.captureLine(env.message('@mod', String(i), 'moderator', String(i)).line, history)
-  assert.equal(history.messages.length, 2000)
-  assert.equal(history.ids.size, 2000)
-  assert.equal(history.ids.has('0'), false)
+  assert.equal(history.messages.length, 2002)
+  assert.equal(history.ids.size, 2002)
+  assert.equal(history.ids.has('0'), true)
   const state = { history, list: new env.Element(), empty: {}, count: {}, latest: {} }
   state.list.scrollTop = 123
   history.follow = false
   env.api.renderMessages(state)
   assert.equal(state.list.scrollTop, 123)
+  assert.equal(state.count.textContent, '2002 則')
 })
 
-test('YouTube filters: embedded streams and popouts share channel settings through the video alias', () => {
+test('YouTube filters: embedded streams and popouts share channel identity via the video alias and global settings', () => {
   const env = boot()
   const owner = new env.Element('a')
   owner.setAttribute('href', '/@Host')
@@ -1542,7 +1573,7 @@ test('YouTube filters: embedded streams and popouts share channel settings throu
   env.window.parent = env.window
   assert.equal(env.api.getChannel(), 'channel:@host')
   assert.equal(env.api.loadSettings(env.api.getChannel()).excludedUsers.join(','), '@bot')
-  assert.equal(env.api.loadSettings('channel:@other').excludedUsers.length, 0)
+  assert.equal(env.api.loadSettings('channel:@other').excludedUsers.join(','), '@bot')
   env.location.href = 'https://www.youtube.com/live_chat?v=other_video'
   assert.equal(env.api.getChannel(), 'video:other_video')
 })
@@ -2001,50 +2032,46 @@ test('YouTube user cards: Enter and Space open the author card; Escape returns f
 })
 
 
-test('YouTube scopes: preserve legacy channel lists and share global lists without copying them into channels', () => {
-  const env = boot({ saved: JSON.stringify({ 'channel:@host': { users: ['@chosen'], moderators: false } }) })
+test('YouTube scopes: migrate legacy channel and @global lists into flat global settings', () => {
+  const env = boot({ saved: JSON.stringify({
+    '@global': { users: ['@g_user'], excludedUsers: ['@g_bad'] },
+    'channel:@host': { users: ['@chosen'], moderators: false },
+    'channel:@other': { users: ['@chosen', '@extra'], excludedUsers: ['@c_bad'] },
+  }) })
   const first = env.api.getHistory('channel:@host')
   const second = env.api.getHistory('channel:@other')
-  assert.equal(first.settings.users.join(','), '@chosen')
+  assert.equal(first.settings.users.join(','), '@g_user,@chosen,@extra')
+  assert.equal(second.settings.users.join(','), '@g_user,@chosen,@extra')
+  assert.equal(first.settings.excludedUsers.join(','), '@g_bad,@c_bad')
   assert.equal(first.settings.moderators, false)
-  assert.equal(second.settings.users.length, 0)
-  first.settings = env.api.changeTargetUsers(first.settings, '@chosen', false, false, true)
-  assert.equal(env.api.saveSettings(first, true), true)
-  assert.equal(second.settings.globalUsers.join(','), '@chosen')
-  assert.equal(second.settings.users.length, 0)
-  second.settings.users = ['@chosen']
-  env.api.saveSettings(second)
+  assert.equal(env.api.saveSettings(first), true)
   const saved = JSON.parse(env.storage.get('youtube-live-chat-tweaks-settings-v1'))
-  assert.equal(saved['@global'].users.join(','), '@chosen')
-  assert.equal(saved['channel:@other'].globalUsers, undefined)
+  assert.equal(saved['@global'], undefined)
+  assert.equal(saved['channel:@host'], undefined)
+  assert.equal(saved.users.join(','), '@g_user,@chosen,@extra')
+  assert.equal(saved.excludedUsers.join(','), '@g_bad,@c_bad')
+  assert.equal(saved.moderators, false)
   const fresh = boot({ saved: env.storage.get('youtube-live-chat-tweaks-settings-v1') })
-  assert.equal(fresh.api.loadSettings('channel:@host').globalUsers.join(','), '@chosen')
-  assert.equal(fresh.api.loadSettings('channel:@host').moderators, false)
-  first.settings = env.api.changeTargetUsers(first.settings, '@chosen', true, false, true)
-  env.api.saveSettings(first, true)
-  assert.equal(second.settings.globalUsers.length, 0)
-  assert.equal(second.settings.users.join(','), '@chosen')
+  assert.equal(fresh.api.loadSettings('channel:@other').users.join(','), '@g_user,@chosen,@extra')
+  assert.equal(fresh.api.loadSettings('channel:@other').moderators, false)
 })
 
-test('YouTube scopes: capture global targets in every channel and let either exclusion list override includes and roles', () => {
+test('YouTube scopes: apply global targets in every channel and let exclusions override includes and roles', () => {
   const env = boot()
   const first = env.api.getHistory('channel:@host')
   const second = env.api.getHistory('channel:@other')
-  first.settings = env.api.changeTargetUsers(first.settings, '@chosen', false, false, true)
-  env.api.saveSettings(first, true)
+  first.settings = env.api.changeTargetUsers(first.settings, '@chosen', false, false)
+  env.api.saveSettings(first)
   const a = env.message('@chosen', 'global in first')
   const b = env.message('@chosen', 'global in second')
   assert.equal(env.api.captureLine(a.line, first), true)
   assert.equal(env.api.captureLine(b.line, second), true)
   assert.equal(env.api.matchesFilter(second.messages[0], second.settings), true)
   second.settings = env.api.changeTargetUsers(second.settings, '@chosen', false, true)
+  env.api.saveSettings(second)
+  assert.equal(env.api.matchesFilter(first.messages[0], first.settings), false)
   assert.equal(env.api.matchesFilter(second.messages[0], second.settings), false)
-  assert.equal(env.api.matchesFilter(first.messages[0], first.settings), true)
-  first.settings.users = ['@chosen']
-  first.settings = env.api.changeTargetUsers(first.settings, '@chosen', false, true, true)
-  env.api.saveSettings(first, true)
   assert.equal(env.api.matchesFilter({ user: '@chosen', moderator: true, broadcaster: true }, first.settings), false)
-  assert.equal(env.api.matchesFilter(second.messages[0], second.settings), false)
   assert.equal(first.messages.length, 1)
 })
 
@@ -2052,37 +2079,37 @@ test('YouTube scopes: global channel IDs keep matching renamed handles in differ
   const env = boot()
   const first = env.api.getHistory('channel:@host')
   const second = env.api.getHistory('channel:@other')
-  first.settings = env.api.changeTargetUsers(first.settings, channelA, false, false, true)
-  env.api.saveSettings(first, true)
+  first.settings = env.api.changeTargetUsers(first.settings, channelA, false, false)
+  env.api.saveSettings(first)
   const a = env.message('@old_handle', 'first stream')
   const b = env.message('@new_handle', 'second stream')
   a.line.data = b.line.data = { authorExternalChannelId: channelA }
   assert.equal(env.api.captureLine(a.line, first), true)
   assert.equal(env.api.captureLine(b.line, second), true)
   assert.equal(env.api.matchesFilter(second.messages[0], second.settings), true)
-  first.settings = env.api.changeTargetUsers(first.settings, channelA, false, true, true)
-  env.api.saveSettings(first, true)
+  first.settings = env.api.changeTargetUsers(first.settings, channelA, false, true)
+  env.api.saveSettings(first)
   assert.equal(env.api.matchesFilter(first.messages[0], first.settings), false)
   assert.equal(env.api.matchesFilter(second.messages[0], second.settings), false)
 })
 
-test('YouTube scopes: sync global edits across stored histories and keep globals for the page when storage is blocked', () => {
+test('YouTube scopes: sync global edits across stored histories and keep settings for the page when storage is blocked', () => {
   const env = boot()
   const first = env.api.getHistory('channel:@host')
   const second = env.api.getHistory('channel:@other')
-  env.storage.set('youtube-live-chat-tweaks-settings-v1', JSON.stringify({ '@global': { users: ['@chosen'], excludedUsers: ['@chosen'] } }))
+  env.storage.set('youtube-live-chat-tweaks-settings-v1', JSON.stringify({ users: ['@chosen'], excludedUsers: ['@chosen'] }))
   env.listeners.get('storage')({ key: 'youtube-live-chat-tweaks-settings-v1' })
-  assert.equal(first.settings.globalUsers.join(','), '@chosen')
-  assert.equal(second.settings.globalExcludedUsers.join(','), '@chosen')
+  assert.equal(first.settings.users.join(','), '@chosen')
+  assert.equal(second.settings.excludedUsers.join(','), '@chosen')
   env.storage.delete('youtube-live-chat-tweaks-settings-v1')
   env.listeners.get('storage')({ key: null })
-  assert.equal(first.settings.globalUsers.length, 0)
-  assert.equal(second.settings.globalExcludedUsers.length, 0)
+  assert.equal(first.settings.users.length, 0)
+  assert.equal(second.settings.excludedUsers.length, 0)
   const blocked = boot({ blocked: true })
   const history = blocked.api.getHistory('channel:@host')
-  history.settings = blocked.api.changeTargetUsers(history.settings, '@chosen', false, false, true)
-  assert.equal(blocked.api.saveSettings(history, true), false)
-  assert.equal(blocked.api.getHistory('channel:@other').settings.globalUsers.join(','), '@chosen')
+  history.settings = blocked.api.changeTargetUsers(history.settings, '@chosen', false, false)
+  assert.equal(blocked.api.saveSettings(history), false)
+  assert.equal(blocked.api.getHistory('channel:@other').settings.users.join(','), '@chosen')
 })
 
 test('YouTube SC search: keeps exact chronological DOM order when an existing row moves ahead of later rows', () => {

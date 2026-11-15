@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name        YouTube Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.8.8
+// @version     0.8.9
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
-// @description 提供 YouTube 聊天室用戶資訊卡、獨立 SC／會員事件紀錄、角色與帳號包含／排除篩選、表情複製、重新載入與自動跟隨。
+// @description 提供 YouTube 聊天室用戶資訊卡、獨立 SC／會員事件紀錄、全域角色與帳號包含／排除篩選、表情複製、重新載入與自動跟隨。
 // @author      Derek
 // @match       *://www.youtube.com/live_chat*
 // @match       *://www.youtube.com/live_chat_replay*
@@ -586,14 +586,14 @@
 
     const MESSAGE_SELECTOR = NATIVE_MESSAGE_SELECTOR
     const STORAGE_KEY = 'youtube-live-chat-tweaks-settings-v1'
-    const MAX_MESSAGES = 2000
     const MAX_CHANNELS = 5
     const ARCHIVE_DB = 'youtube-live-chat-tweaks-history-v1'
     const RETENTION_MS = 7 * 24 * 60 * 60 * 1000
-    const OLDER_BATCH = 200
     const STREAMS_KEY = 'youtube-live-chat-tweaks-streams-v1'
+    const DEFAULT_SETTINGS = { moderators: true, broadcaster: true, verified: true, users: [], excludedUsers: [] }
     const histories = new Map()
-    let globalTargets = { users: [], excludedUsers: [] }
+    const viewRecords = new WeakMap()
+    let pageSettings = null
     let unresolvedScope = ''
     let mounted = null
     isFilteredChat = () => !!mounted?.history.enabled
@@ -629,11 +629,20 @@
     const normalizeUsers = value => [...new Set(String(value || '').split(/[\s,，;；]+/)
       .map(normalizeAccount).filter(Boolean))]
 
+    const storageObjectCache = new Map()
     const readStorageObject = key => {
       try {
-        const value = JSON.parse(localStorage.getItem(key) || '{}')
-        return value && typeof value === 'object' && !Array.isArray(value)
-          ? Object.assign(Object.create(null), value) : Object.create(null)
+        const raw = localStorage.getItem(key) || '{}'
+        let cached = storageObjectCache.get(key)
+        if (!cached || cached.raw !== raw) {
+          const value = JSON.parse(raw)
+          cached = {
+            raw,
+            data: value && typeof value === 'object' && !Array.isArray(value) ? value : null,
+          }
+          storageObjectCache.set(key, cached)
+        }
+        return cached.data ? Object.assign(Object.create(null), cached.data) : Object.create(null)
       } catch (_) { return Object.create(null) }
     }
     const readSavedSettings = () => readStorageObject(STORAGE_KEY)
@@ -665,8 +674,9 @@
       const database = await openArchive()
       const transaction = database.transaction('messages', 'readwrite')
       const done = transactionDone(transaction)
-      const request = transaction.objectStore('messages').index('expiresAt').openCursor()
       const now = Date.now()
+      const range = typeof IDBKeyRange !== 'undefined' ? IDBKeyRange.upperBound(now) : undefined
+      const request = transaction.objectStore('messages').index('expiresAt').openCursor(range)
       request.onsuccess = () => {
         const cursor = request.result
         if (!cursor || cursor.value.expiresAt > now) return
@@ -750,17 +760,14 @@
       superChat: record.superChat, supportEvent: record.supportEvent, fingerprint: record.fingerprint,
       authorName: record.authorName, authorHandle: record.authorHandle,
       profileName: record.profileName, profileHandle: record.profileHandle,
-      tree: archiveTree(record.view),
+      tree: !record._hasView && record._savedTree ? record._savedTree : archiveTree(record.view),
     })
     const validArchiveRecord = (saved, scope) => saved && saved.scope === scope &&
       typeof saved.storageId === 'string' && typeof saved.id === 'string' && typeof saved.user === 'string' &&
       Number.isFinite(saved.createdAt) && saved.createdAt <= Date.now() && saved.createdAt + RETENTION_MS > Date.now() &&
       saved.tree && typeof saved.tree === 'object'
     const restoreRecord = saved => {
-      if (saved.tree?.tag !== 'div') return null
-      const view = restoreTree(saved.tree)
-      if (!view || view.firstChild?.tagName?.toLowerCase() !== 'time') return null
-      view.classList.add('ytcf-message')
+      if (saved.tree?.tag !== 'div' || saved.tree.children?.[0]?.tag?.toLowerCase() !== 'time') return null
       const record = { id: saved.id, storageId: saved.storageId, createdAt: saved.createdAt,
         order: Number.isSafeInteger(saved.order) ? saved.order : 0,
         user: saved.user, channelId: typeof saved.channelId === 'string' ? saved.channelId : '',
@@ -771,10 +778,31 @@
         authorHandle: typeof saved.authorHandle === 'string' ? saved.authorHandle : '',
         profileName: typeof saved.profileName === 'string' ? saved.profileName : '',
         profileHandle: typeof saved.profileHandle === 'string' ? saved.profileHandle : '',
-        fingerprint: saved.fingerprint, view, retained: true }
-      applySupportAuthor(record)
-      formatSupportView(view, record.superChat)
-      bindRecordAuthor(record)
+        fingerprint: saved.fingerprint, retained: true,
+        _savedTree: saved.tree, _hydratedView: null, _hasView: false, _searchText: '' }
+      Object.defineProperty(record, 'view', {
+        configurable: true,
+        enumerable: true,
+        get() {
+          if (this._hydratedView) return this._hydratedView
+          const view = restoreTree(this._savedTree) || document.createElement('div')
+          view.classList.add('ytcf-message')
+          this._hydratedView = view
+          this._hasView = true
+          this._savedTree = null
+          viewRecords.set(view, this)
+          applySupportAuthor(this)
+          formatSupportView(view, this.superChat)
+          bindRecordAuthor(this)
+          return view
+        },
+        set(next) {
+          this._hydratedView = next
+          this._hasView = Boolean(next)
+          this._savedTree = null
+          if (next) viewRecords.set(next, this)
+        },
+      })
       return record
     }
     const updateArchiveStatus = history => {
@@ -813,8 +841,6 @@
               current.createdAt = Math.min(current.createdAt, saved.createdAt)
               current.order = saved.order
             }
-            const older = history.older.get(saved.storageId)
-            if (older) older.createdAt = Math.min(older.createdAt, saved.createdAt)
             if (saved.expiresAt > Date.now()) store.put(saved)
           }
         }
@@ -829,18 +855,10 @@
     const saveRecord = (history, record) => {
       if (history.archiveError) return
       const saved = archiveRecord(history, record)
-      if (history.older.has(record.storageId)) history.older.set(record.storageId, saved)
       history.saveQueue.set(record.storageId, saved)
       if (history.saveScheduled) return
       history.saveScheduled = true
       Promise.resolve().then(() => { history.saveScheduled = false; return flushHistory(history) })
-    }
-    const trimHistory = history => {
-      while (history.messages.length > history.displayLimit) {
-        const oldest = history.messages.shift()
-        if (!history.archiveError) history.older.set(oldest.storageId, archiveRecord(history, oldest))
-        forgetRecord(history, oldest)
-      }
     }
     const restoreHistory = async history => {
       if (typeof indexedDB === 'undefined') {
@@ -861,6 +879,7 @@
         const [saved] = await Promise.all([read, done])
         const records = saved.filter(item => validArchiveRecord(item, history.scope))
           .sort((a, b) => a.createdAt - b.createdAt || (a.order || 0) - (b.order || 0))
+        const restored = []
         for (const item of records) {
           const current = item.id ? history.ids.get(item.id) : null
           if (current) {
@@ -869,21 +888,18 @@
             if (!current.profileName && typeof item.profileName === 'string') {
               current.profileName = item.profileName
               current.profileHandle = typeof item.profileHandle === 'string' ? item.profileHandle : ''
+              current._searchText = ''
               applySupportAuthor(current)
             }
             current.view.firstChild.textContent = restoreTree(item.tree)?.firstChild?.textContent || current.view.firstChild.textContent
             saveRecord(history, current)
-          } else history.older.set(item.storageId, item)
-        }
-        const take = Math.max(0, history.displayLimit - history.messages.length)
-        const latest = take ? [...history.older.values()].slice(-take) : []
-        const restored = []
-        for (const item of latest) {
-          history.older.delete(item.storageId)
+            continue
+          }
           const record = restoreRecord(item)
           if (!record) continue
           restored.push(record)
           if (record.id) history.ids.set(record.id, record)
+          history.byStorageId.set(record.storageId, record)
           history.dirty.add(record)
         }
         history.messages.unshift(...restored)
@@ -896,16 +912,18 @@
     }
     const pruneHistories = () => {
       const cutoff = Date.now() - RETENTION_MS
+      let removedCurrent = false
       for (const history of histories.values()) {
+        const before = history.messages.length
         history.messages = history.messages.filter(record => {
           if (record.createdAt > cutoff) return true
           forgetRecord(history, record)
           history.saveQueue.delete(record.storageId)
           return false
         })
-        for (const [key, saved] of history.older) if (saved.createdAt <= cutoff) history.older.delete(key)
+        if (mounted?.history === history && history.messages.length !== before) removedCurrent = true
       }
-      if (mounted?.history.enabled) renderMessages(mounted)
+      if (removedCurrent && mounted?.history.enabled) renderMessages(mounted)
       pruneArchive().catch(() => {})
     }
 
@@ -959,48 +977,79 @@
       return unresolvedScope
     }
 
-    const loadSettings = (channel) => {
+    const isFlatSettings = saved => saved && typeof saved === 'object' && (
+      typeof saved.moderators === 'boolean' ||
+      typeof saved.broadcaster === 'boolean' ||
+      typeof saved.verified === 'boolean' ||
+      Array.isArray(saved.users) ||
+      Array.isArray(saved.excludedUsers)
+    )
+
+    const loadSettings = (channel = '') => {
+      if (pageSettings) {
+        return { ...pageSettings, users: [...pageSettings.users], excludedUsers: [...pageSettings.excludedUsers] }
+      }
       try {
         const stored = readSavedSettings()
-        const saved = stored[channel]
-        const global = stored['@global'] || globalTargets
-        globalTargets = {
-          users: normalizeUsers(Array.isArray(global.users) ? global.users.join(' ') : ''),
-          excludedUsers: normalizeUsers(Array.isArray(global.excludedUsers) ? global.excludedUsers.join(' ') : ''),
+        if (isFlatSettings(stored)) {
+          return {
+            moderators: stored.moderators !== false,
+            broadcaster: stored.broadcaster !== false,
+            verified: stored.verified !== false,
+            users: normalizeUsers(Array.isArray(stored.users) ? stored.users.join(' ') : ''),
+            excludedUsers: normalizeUsers(Array.isArray(stored.excludedUsers) ? stored.excludedUsers.join(' ') : ''),
+          }
+        }
+        const preferred = channel && stored[channel] && typeof stored[channel] === 'object' ? stored[channel] : null
+        let moderators = preferred?.moderators
+        let broadcaster = preferred?.broadcaster
+        let verified = preferred?.verified
+        const users = []
+        const excludedUsers = []
+        for (const [key, entry] of Object.entries(stored)) {
+          if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue
+          if (key !== '@global') {
+            if (typeof moderators !== 'boolean' && typeof entry.moderators === 'boolean') moderators = entry.moderators
+            if (typeof broadcaster !== 'boolean' && typeof entry.broadcaster === 'boolean') broadcaster = entry.broadcaster
+            if (typeof verified !== 'boolean' && typeof entry.verified === 'boolean') verified = entry.verified
+          }
+          if (Array.isArray(entry.users)) users.push(...entry.users)
+          if (Array.isArray(entry.globalUsers)) users.push(...entry.globalUsers)
+          if (Array.isArray(entry.excludedUsers)) excludedUsers.push(...entry.excludedUsers)
+          if (Array.isArray(entry.globalExcludedUsers)) excludedUsers.push(...entry.globalExcludedUsers)
         }
         return {
-          moderators: saved?.moderators !== false,
-          broadcaster: saved?.broadcaster !== false,
-          verified: saved?.verified !== false,
-          users: normalizeUsers(Array.isArray(saved?.users) ? saved.users.join(' ') : ''),
-          excludedUsers: normalizeUsers(Array.isArray(saved?.excludedUsers) ? saved.excludedUsers.join(' ') : ''),
-          globalUsers: globalTargets.users, globalExcludedUsers: globalTargets.excludedUsers,
+          moderators: moderators !== false,
+          broadcaster: broadcaster !== false,
+          verified: verified !== false,
+          users: normalizeUsers(users.join(' ')),
+          excludedUsers: normalizeUsers(excludedUsers.join(' ')),
         }
       } catch (_) {
-        return { moderators: true, broadcaster: true, verified: true, users: [], excludedUsers: [],
-          globalUsers: globalTargets.users, globalExcludedUsers: globalTargets.excludedUsers }
+        return { ...DEFAULT_SETTINGS, users: [], excludedUsers: [] }
       }
     }
 
-    const saveSettings = (history, global = false) => {
-      const { moderators, broadcaster, verified, users, excludedUsers = [], globalUsers = [], globalExcludedUsers = [] } = history.settings
-      if (global) {
-        globalTargets = { users: globalUsers, excludedUsers: globalExcludedUsers }
-        for (const item of histories.values()) Object.assign(item.settings, { globalUsers, globalExcludedUsers })
+    const saveSettings = (history) => {
+      const { moderators, broadcaster, verified, users, excludedUsers = [] } = history.settings
+      const settings = { moderators, broadcaster, verified, users: [...users], excludedUsers: [...excludedUsers] }
+      for (const item of histories.values()) {
+        item.settings = { ...settings, users: [...settings.users], excludedUsers: [...settings.excludedUsers] }
       }
       try {
-        const saved = readSavedSettings()
-        if (global) saved['@global'] = globalTargets
-        else saved[history.channel] = { moderators, broadcaster, verified, users, excludedUsers }
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(saved))
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(settings))
+        pageSettings = null
         return true
-      } catch (_) { return false }
+      } catch (_) {
+        pageSettings = settings
+        return false
+      }
     }
 
-    const changeTargetUsers = (settings, input, remove = false, exclude = false, global = false) => {
+    const changeTargetUsers = (settings, input, remove = false, exclude = false) => {
       const user = normalizeAccount(input)
       if (!user) return null
-      const key = global ? exclude ? 'globalExcludedUsers' : 'globalUsers' : exclude ? 'excludedUsers' : 'users'
+      const key = exclude ? 'excludedUsers' : 'users'
       const users = settings[key] || []
       return { ...settings, [key]: remove
         ? users.filter(name => name !== user)
@@ -1015,30 +1064,24 @@
       if (pending && !history) {
         history = pending
         histories.delete(unresolvedScope)
-        const saved = readSavedSettings()
         history.channel = channel
-        if (saved[channel]) history.settings = loadSettings(channel)
-        else if (saved[unresolvedScope]) saveSettings(history)
       } else if (pending && pending !== history) {
-        for (const [key, saved] of pending.older) {
-          if (!saved.id || !history.ids.has(saved.id)) history.older.set(key, saved)
-        }
         for (const record of pending.messages) {
           if (record.id && history.ids.has(record.id)) continue
           history.messages.push(record)
           history.dirty.add(record)
           if (record.id) history.ids.set(record.id, record)
+          history.byStorageId.set(record.storageId, record)
         }
-        trimHistory(history)
+        history.messages.sort((a, b) => a.createdAt - b.createdAt || a.order - b.order)
         histories.delete(unresolvedScope)
       }
       if (!history) {
         history = {
           channel, settings: loadSettings(channel), messages: [], nodes: new WeakMap(), ids: new Map(),
-          enabled: false, supportOnly: false, supportSearch: '', searchLimit: MAX_MESSAGES,
+          byStorageId: new Map(), enabled: false, supportOnly: false, supportSearch: '',
           follow: true, dirty: new Set(), removed: new Set(),
-          scope, older: new Map(), saveQueue: new Map(), displayLimit: MAX_MESSAGES,
-          archiveReady: false, archiveError: false,
+          scope, saveQueue: new Map(), archiveReady: false, archiveError: false,
         }
         history.restorePromise = restoreHistory(history)
       }
@@ -1084,7 +1127,7 @@
     const textValue = value => value?.simpleText || value?.runs?.map(run => run.text || '').join('') || ''
     const EVENT_LABELS = { superSticker: '超級貼圖', membership: '會員加入', milestone: '會員里程碑', membershipGift: '會員贈禮' }
 
-    const readMessage = (line) => {
+    const readMessage = (line, shouldKeep = null) => {
       let author = $('#author-name', line)
       const data = rendererData(line)
       const identity = data.header?.sponsorshipsLiveChatHeaderRenderer || data
@@ -1093,17 +1136,29 @@
       const paid = superChat || superSticker
       let supportEvent = superSticker ? 'superSticker' : superChat ? 'superChat' : Object.entries(MEMBERSHIP_EVENT_SELECTORS)
         .find(([, selector]) => line.matches(selector))?.[0] || ''
-      if (supportEvent === 'membership' && (textValue(data.headerPrimaryText) || $('#header-primary-text', line)?.textContent?.trim())) {
-        supportEvent = 'milestone'
-      }
       // Other name-restoring scripts may change the DOM. Keep identity based
       // on YouTube's original author handle and stable channel ID.
       const originalName = textValue(identity.authorName) || textValue(data.authorName)
       if (!author && supportEvent && originalName) author = element('span', {}, [originalName])
       const user = normalizeAccount(originalName || author?.textContent)
+      if (!author || !user) return null
       // The renderer retains the sender's stable ID even when its DOM shows a handle.
       const rawId = identity.authorExternalChannelId || data.authorExternalChannelId || line.getAttribute('author-external-channel-id')
       const channelId = typeof rawId === 'string' && /^UC[\w-]{22}$/.test(rawId) ? rawId : ''
+      const id = line.id || data.id || ''
+      const chip = author.closest('yt-live-chat-author-chip') || line
+      const badges = $$('yt-live-chat-author-badge-renderer', chip)
+      const type = line.getAttribute('author-type') || author.getAttribute('type') || ''
+      const classes = (author.getAttribute('class') || '').split(/\s+/)
+      const moderator = type === 'moderator' || classes.includes('moderator') || badges.some(b => b.getAttribute('type') === 'moderator')
+      const broadcaster = type === 'owner' || classes.includes('owner') || badges.some(b => b.getAttribute('type') === 'owner')
+      const verified = type === 'verified' || badges.some(b => b.getAttribute('type') === 'verified' ||
+        rendererData(b).icon?.iconType === 'VERIFIED') ||
+        (identity.authorBadges || data.authorBadges || []).some(b => b?.liveChatAuthorBadgeRenderer?.icon?.iconType === 'VERIFIED')
+      if (shouldKeep && !shouldKeep({ id, user, channelId, moderator, broadcaster, verified, supportEvent })) return null
+      if (supportEvent === 'membership' && (textValue(data.headerPrimaryText) || $('#header-primary-text', line)?.textContent?.trim())) {
+        supportEvent = 'milestone'
+      }
       const amount = paid ? ($('#purchase-amount', line)?.textContent?.trim() ||
         textValue(data.purchaseAmountText)) : ''
       // Membership headers and the optional milestone comment are separate
@@ -1134,16 +1189,7 @@
       // Low-tier SC, welcome announcements and gifts may have no comment.
       if (!message && supportEvent) message = document.createElement('span')
       if (!message) message = $('#header-subtext', line)
-      if (!author || !user || !message) return null
-      const chip = author.closest('yt-live-chat-author-chip') || line
-      const badges = $$('yt-live-chat-author-badge-renderer', chip)
-      const type = line.getAttribute('author-type') || author.getAttribute('type') || ''
-      const classes = (author.getAttribute('class') || '').split(/\s+/)
-      const moderator = type === 'moderator' || classes.includes('moderator') || badges.some(b => b.getAttribute('type') === 'moderator')
-      const broadcaster = type === 'owner' || classes.includes('owner') || badges.some(b => b.getAttribute('type') === 'owner')
-      const verified = type === 'verified' || badges.some(b => b.getAttribute('type') === 'verified' ||
-        rendererData(b).icon?.iconType === 'VERIFIED') ||
-        (identity.authorBadges || data.authorBadges || []).some(b => b?.liveChatAuthorBadgeRenderer?.icon?.iconType === 'VERIFIED')
+      if (!message) return null
       const deleted = line.hasAttribute('is-deleted')
       if (deleted) {
         message = document.createElement('span')
@@ -1152,7 +1198,7 @@
       return { user, channelId, moderator, broadcaster, verified, superChat, supportEvent, amount, sticker, author, body: message, details, badges, deleted,
         authorHandle: [originalName, author.textContent].find(name => typeof name === 'string' && name.trim().startsWith('@') && normalizeAccount(name))?.trim() || '',
         colors: supportEvent ? readEventColors(line, data) : null,
-        id: line.id || data.id || '', time: $('#timestamp', line)?.textContent?.trim() || textValue(data.timestampText),
+        id, time: $('#timestamp', line)?.textContent?.trim() || textValue(data.timestampText),
         avatar: safeArchiveUrl($('#author-photo img', line)?.getAttribute('src') || identity.authorPhoto?.thumbnails?.[0]?.url || ''),
         contextMenuEndpoint: data.contextMenuEndpoint || identity.contextMenuEndpoint }
     }
@@ -1182,13 +1228,14 @@
       member: 'var(--yt-live-chat-sponsor-color, #2ba640)',
     }
     const authorNameColor = message => {
+      if ('_authorColor' in message) return message._authorColor
       if (!message.author.closest('yt-live-chat-author-chip')?.hasAttribute('is-highlighted')) {
-        return getComputedStyle(message.author).color
+        return (message._authorColor = getComputedStyle(message.author).color)
       }
       // Custom cards and filtered rows do not retain the chip's light background.
       const role = message.broadcaster ? 'owner' : message.moderator ? 'moderator'
         : message.badges.some(badge => badge.getAttribute('type') === 'member') ? 'member' : ''
-      return CARD_ROLE_COLORS[role] || ''
+      return (message._authorColor = CARD_ROLE_COLORS[role] || '')
     }
     const authorSnapshot = message => {
       const highlighted = message.supportEvent || message.author.closest('yt-live-chat-author-chip')?.hasAttribute('is-highlighted')
@@ -1268,6 +1315,8 @@
     const displayHandle = value => typeof value === 'string' && value.trim().startsWith('@') && normalizeAccount(value) ? value.trim() : ''
     const applySupportAuthor = record => {
       if (!record.supportEvent) return
+      record._searchText = ''
+      if ('_hasView' in record && !record._hasView) return
       const author = $('.ytcf-author', record.view) || $('strong', record.view)
       if (!author) return
       author.classList.add('ytcf-author')
@@ -1587,11 +1636,11 @@
       (!!message.channelId && users.includes(message.channelId))
 
     const matchesFilter = (message, settings) =>
-      !includesAuthor(settings.excludedUsers || [], message) && !includesAuthor(settings.globalExcludedUsers || [], message) && (
+      !includesAuthor(settings.excludedUsers || [], message) && (
         (settings.moderators && message.moderator) ||
         (settings.broadcaster && message.broadcaster) ||
         (settings.verified && message.verified) ||
-        includesAuthor(settings.users, message) || includesAuthor(settings.globalUsers || [], message)
+        includesAuthor(settings.users, message)
       )
 
     const clonePresentation = source => {
@@ -1704,12 +1753,17 @@
         if (author.getAttribute('tabindex') !== '0') author.setAttribute('tabindex', '0')
         if (author.getAttribute('aria-label') !== '查看用戶資訊') author.setAttribute('aria-label', '查看用戶資訊')
       }
-      const message = readMessage(line)
+      const message = readMessage(line, candidate => {
+        if (candidate.id && history.ids.get(candidate.id)?.retained) return true
+        if (!candidate.id && history.nodes.get(line)?.retained) return true
+        return Boolean(
+          candidate.supportEvent || candidate.moderator || candidate.broadcaster || candidate.verified ||
+          includesAuthor(history.settings.users, candidate)
+        )
+      })
       if (!message) return false
       const previous = message.id ? history.ids.get(message.id) : history.nodes.get(line)
-      const archived = message.id ? history.older.get(message.id) : null
-      if (!previous?.retained && (!message.supportEvent && !message.moderator && !message.broadcaster && !message.verified && !includesAuthor(history.settings.users, message) &&
-        !includesAuthor(history.settings.globalUsers || [], message))) return false
+      if (!previous?.retained && (!message.supportEvent && !message.moderator && !message.broadcaster && !message.verified && !includesAuthor(history.settings.users, message))) return false
       const fingerprint = `${message.user}\n${message.channelId}\n${message.deleted}\n${message.moderator}\n${message.broadcaster}\n${message.verified}\n${message.supportEvent}\n${message.amount}\n${JSON.stringify(message.sticker)}\n${JSON.stringify(message.colors)}\n${message.details.map(node => node.innerHTML || node.textContent).join('\n')}\n${message.author.textContent}\n${message.body.innerHTML}`
       if (previous?.fingerprint === fingerprint) {
         history.nodes.set(line, previous)
@@ -1721,22 +1775,20 @@
         view.firstChild.textContent = previous.view.firstChild.textContent
         record = Object.assign(previous, { user: message.user, channelId: message.channelId, moderator: message.moderator,
           authorName: message.author.textContent.trim(), authorHandle: message.authorHandle,
-          broadcaster: message.broadcaster, verified: message.verified, superChat: message.superChat, supportEvent: message.supportEvent, view, fingerprint })
+          broadcaster: message.broadcaster, verified: message.verified, superChat: message.superChat, supportEvent: message.supportEvent,
+          _searchText: '', view, fingerprint })
       } else {
         record = { id: message.id, user: message.user, channelId: message.channelId, moderator: message.moderator,
           authorName: message.author.textContent.trim(), authorHandle: message.authorHandle,
-          profileName: archived?.profileName || '', profileHandle: archived?.profileHandle || '',
+          profileName: '', profileHandle: '',
           broadcaster: message.broadcaster, verified: message.verified, superChat: message.superChat, supportEvent: message.supportEvent,
           storageId: message.id || `${pageKey}-${++anonymousMessage}`,
-          createdAt: archived?.createdAt || Date.now(), order: archived?.order || ++messageOrder,
-          view, fingerprint, retained: true }
-        if (archived) {
-          view.firstChild.textContent = restoreTree(archived.tree)?.firstChild?.textContent || view.firstChild.textContent
-          history.older.delete(message.id)
-        }
+          createdAt: Date.now(), order: ++messageOrder,
+          _searchText: '', view, fingerprint, retained: true }
         history.messages.push(record)
-        trimHistory(history)
+        history.byStorageId.set(record.storageId, record)
       }
+      viewRecords.set(record.view, record)
       history.nodes.set(line, record)
       if (message.id) history.ids.set(message.id, record)
       history.dirty.add(record)
@@ -1750,8 +1802,10 @@
     // Keep these collection/render helpers in sync across both chat scripts.
     const forgetRecord = (history, record) => {
       record.retained = false
+      record._searchText = ''
       history.dirty.delete(record)
       if (record.id && history.ids?.get(record.id) === record) history.ids.delete(record.id)
+      if (history.byStorageId?.get(record.storageId) === record) history.byStorageId.delete(record.storageId)
       if (record.renderedView) history.removed.add(record)
     }
 
@@ -1791,7 +1845,6 @@
     }
 
     const normalizeSearch = value => String(value || '').normalize('NFKC').toLowerCase().trim()
-    const archivedSearchText = new WeakMap()
     const treeSearchText = (tree, depth = 0) => {
       if (!tree || depth > 20) return ''
       const alt = (Array.isArray(tree.attributes) ? tree.attributes : [])
@@ -1800,71 +1853,75 @@
         ...(Array.isArray(tree.children) ? tree.children : []).map(child => treeSearchText(child, depth + 1))].join('')
     }
     const supportSearchText = record => {
-      if (record.tree && archivedSearchText.has(record)) return archivedSearchText.get(record)
+      if (record._searchText) return record._searchText
+      const useTree = !record._hasView && record._savedTree
       const text = normalizeSearch([EVENT_LABELS[record.supportEvent], record.authorName, record.authorHandle, record.profileName,
         record.profileHandle, record.user, record.channelId,
-        record.tree ? treeSearchText(record.tree) : [...record.view.childNodes]
+        useTree ? treeSearchText(record._savedTree) : [...record.view.childNodes]
           .filter(node => !node.matches?.('.ytcf-locate')).map(node => node.textContent).join(''),
-        ...(!record.tree ? $$('img', record.view).map(image => image.getAttribute('alt') || '') : [])].join(' '))
-      if (record.tree) archivedSearchText.set(record, text)
+        ...(!useTree ? $$('img', record.view).map(image => image.getAttribute('alt') || '') : [])].join(' '))
+      record._searchText = text
       return text
+    }
+    const unmountRecordView = (state, record) => {
+      const oldView = record.renderedView
+      if (oldView) {
+        state.authorObserver?.unobserve(oldView)
+        state.messageResizeObserver?.unobserve(oldView)
+        oldView.remove()
+      }
+      record.renderedView = null
+      record.visible = false
+    }
+    const findNextMountedRecord = (history, record, list) => {
+      const start = history.messages.indexOf(record)
+      if (start < 0) return null
+      for (let i = start + 1; i < history.messages.length; i++) {
+        const next = history.messages[i]
+        if (next.visible && next.renderedView?.parentElement === list) return next
+      }
+      return null
     }
     const renderSupportSearch = (state, query) => {
       const { history, list, empty, count, latest } = state
-      if (!state.searchRecords) {
+      if (!state.inSearchMode) {
         releaseMessageViews(state)
-        state.searchRecords = new Map()
+        state.inSearchMode = true
       }
       const words = query.split(/\s+/u)
-      const matches = record => record.supportEvent && words.every(word => supportSearchText(record).includes(word))
-      const hits = [...history.messages.filter(record => record.retained && matches(record)),
-        ...[...history.older.values()].filter(record => validArchiveRecord(record, history.scope) && matches(record))]
+      const hits = history.messages
+        .filter(record => record.retained && record.supportEvent && words.every(word => supportSearchText(record).includes(word)))
         .sort((a, b) => a.createdAt - b.createdAt || (a.order || 0) - (b.order || 0))
-      const shown = new Set()
-      const archived = new Map()
-      for (const hit of hits.slice(-(history.searchLimit || MAX_MESSAGES))) {
-        const record = hit.tree ? state.searchRecords.get(hit.storageId) || restoreRecord(hit) : hit
-        if (!record) continue
-        if (hit.tree) archived.set(hit.storageId, record)
-        shown.add(record)
-      }
-      for (const record of state.searchShown || []) if (!shown.has(record)) {
-        if (record.renderedView) state.authorObserver?.unobserve(record.renderedView)
-        if (record.renderedView) state.messageResizeObserver?.unobserve(record.renderedView)
-        record.renderedView?.remove()
-        record.view.remove()
-        record.renderedView = null
-        record.visible = false
-      }
-      for (const [key, record] of state.searchRecords) if (!archived.has(key)) record.retained = false
+      const shown = new Set(hits)
+      for (const record of state.searchShown || []) if (!shown.has(record)) unmountRecordView(state, record)
       let index = 0
       const scrollTop = list.scrollTop
       for (const record of shown) {
-        if (record.renderedView && record.renderedView !== record.view) {
+        const view = record.view
+        if (record.renderedView && record.renderedView !== view) {
           state.authorObserver?.unobserve(record.renderedView)
           state.messageResizeObserver?.unobserve(record.renderedView)
           record.renderedView.remove()
         }
-        record.view.hidden = false
-        if (!$('.ytcf-locate', record.view)) {
+        view.hidden = false
+        if (!$('.ytcf-locate', view)) {
           const locate = element('button', { type: 'button', class: 'ytcf-locate',
             'aria-label': '在完整 SC／會員紀錄中定位這則訊息' }, ['定位'])
           locate.addEventListener('click', () => locateSupportRecord(state, record.storageId))
-          record.view.appendChild(locate)
+          view.appendChild(locate)
         }
         const existing = list.children[index++]
-        if (existing !== record.view) {
-          if (existing) existing.insertAdjacentElement('beforebegin', record.view)
-          else list.appendChild(record.view)
+        if (existing !== view) {
+          if (existing) existing.insertAdjacentElement('beforebegin', view)
+          else list.appendChild(view)
         }
-        record.renderedView = record.view
+        record.renderedView = view
         record.visible = true
-        state.messageResizeObserver?.observe(record.view)
-        supportAuthorViews.set(record.view, { history, record })
-        if (state.authorObserver) state.authorObserver.observe(record.view)
+        state.messageResizeObserver?.observe(view)
+        supportAuthorViews.set(view, { history, record })
+        if (state.authorObserver) state.authorObserver.observe(view)
         else queueSupportAuthor(history, record)
       }
-      state.searchRecords = archived
       state.searchShown = shown
       state.visibleCount = shown.size
       history.dirty.clear()
@@ -1873,11 +1930,6 @@
       empty.hidden = shown.size > 0
       empty.textContent = '找不到符合搜尋的 SC 或會員紀錄。'
       count.textContent = `${hits.length} 則符合`
-      if (state.older) {
-        const remaining = Math.max(0, hits.length - shown.size)
-        state.older.hidden = !remaining
-        state.older.textContent = `載入較早結果（${remaining}）`
-      }
       if (history.follow) list.scrollTop = list.scrollHeight
       else list.scrollTop = scrollTop
       latest.hidden = history.follow
@@ -1890,54 +1942,72 @@
       const { history, list, empty, count, latest } = state
       const query = history.supportOnly ? normalizeSearch(history.supportSearch) : ''
       if (query) { renderSupportSearch(state, query); return }
-      if (state.searchRecords) releaseMessageViews(state)
+      if (state.inSearchMode) releaseMessageViews(state)
       empty.textContent = history.supportOnly ? '尚未收到 SC 或會員事件。'
         : '尚無符合條件的發言。新增目標帳號後開始收集。'
       const filterKey = JSON.stringify([history.settings, history.supportOnly])
       const full = rebuild || state.renderedHistory !== history || state.filterKey !== filterKey
       if (full) state.visibleCount = 0
       for (const record of history.removed) {
-        if (record.renderedView) state.authorObserver?.unobserve(record.renderedView)
-        if (record.renderedView) state.messageResizeObserver?.unobserve(record.renderedView)
         if (!full && record.renderedView?.parentElement === list && record.visible) state.visibleCount--
-        record.renderedView?.remove()
-        record.renderedView = null
-        record.visible = false
+        unmountRecordView(state, record)
       }
       history.removed.clear()
+      let visibleIndex = 0
+      let tailOrder = full ? -Infinity : (state.mountedTailOrder ?? -Infinity)
       for (const record of full ? history.messages : history.dirty) {
         const oldView = record.renderedView
         const wasVisible = oldView?.parentElement === list && record.visible
         const show = history.supportOnly ? !!record.supportEvent : matchesFilter(record, history.settings)
         state.visibleCount += Number(show) - (full ? 0 : Number(!!wasVisible))
-        if (record.view.hidden !== !show) record.view.hidden = !show
-        if (oldView && oldView !== record.view) {
+        if (!show) {
+          unmountRecordView(state, record)
+          continue
+        }
+        const view = record.view
+        if (view.hidden) view.hidden = false
+        if (oldView && oldView !== view) {
           state.authorObserver?.unobserve(oldView)
           state.messageResizeObserver?.unobserve(oldView)
-          if (oldView.parentElement === list) oldView.replaceWith(record.view)
+          if (!full && oldView.parentElement === list) oldView.replaceWith(view)
           else oldView.remove()
         }
-        if (full || record.view.parentElement !== list) list.appendChild(record.view)
-        record.renderedView = record.view
-        record.visible = show
-        if (show) state.messageResizeObserver?.observe(record.view)
-        else state.messageResizeObserver?.unobserve(record.view)
-        if (history.supportOnly && show) {
-          supportAuthorViews.set(record.view, { history, record })
-          if (state.authorObserver) state.authorObserver.observe(record.view)
+        if (full) {
+          const existing = list.children[visibleIndex++]
+          if (existing !== view) {
+            if (existing) existing.insertAdjacentElement('beforebegin', view)
+            else list.appendChild(view)
+          }
+          tailOrder = record.order
+        } else if (view.parentElement !== list) {
+          if (record.order > tailOrder) {
+            list.appendChild(view)
+            tailOrder = record.order
+          } else {
+            const next = findNextMountedRecord(history, record, list)
+            if (next) next.renderedView.insertAdjacentElement('beforebegin', view)
+            else {
+              list.appendChild(view)
+              tailOrder = Math.max(tailOrder, record.order)
+            }
+          }
+        }
+        record.renderedView = view
+        record.visible = true
+        state.messageResizeObserver?.observe(view)
+        if (history.supportOnly) {
+          supportAuthorViews.set(view, { history, record })
+          if (state.authorObserver) state.authorObserver.observe(view)
           else queueSupportAuthor(history, record)
-        } else state.authorObserver?.unobserve(record.view)
+        } else state.authorObserver?.unobserve(view)
       }
+      state.mountedTailOrder = tailOrder
       history.dirty.clear()
       state.renderedHistory = history
       state.filterKey = filterKey
       empty.hidden = state.visibleCount > 0
       const countText = `${state.visibleCount} 則`
       if (count.textContent !== countText) count.textContent = countText
-      if (state.older) {
-        state.older.hidden = !history.older.size
-        state.older.textContent = `載入較早紀錄（${history.older.size}）`
-      }
       // All row writes finish before the one layout read needed for following.
       if (history.follow) list.scrollTop = list.scrollHeight
       latest.hidden = history.follow
@@ -1974,15 +2044,16 @@
       cancelListFollow(state)
       cancelMessageRender(state)
       for (const record of new Set([...state.history.messages, ...state.history.removed, ...(state.searchShown || [])])) {
-        $('.ytcf-locate', record.view)?.remove()
+        const view = record.renderedView || ('_hasView' in record ? record._hydratedView : record.view)
+        if (view) $('.ytcf-locate', view)?.remove()
         record.renderedView?.remove()
         record.renderedView = null
         record.visible = false
       }
-      for (const record of state.searchRecords?.values() || []) record.retained = false
-      state.searchRecords = null
+      state.inSearchMode = false
       state.searchShown = null
       state.renderedHistory = null
+      state.mountedTailOrder = -Infinity
       state.history.removed.clear()
     }
 
@@ -1997,47 +2068,27 @@
     const locateSupportRecord = (state, storageId) => {
       const { history, list } = state
       if (!history.enabled || !history.supportOnly) return false
-      let record = history.messages.find(row => row.storageId === storageId && row.retained && row.supportEvent)
-      if (record && record.createdAt + RETENTION_MS <= Date.now()) return false
-      if (!record) {
-        const saved = [...history.older.values()]
-          .filter(row => row.supportEvent && validArchiveRecord(row, history.scope))
-          .sort((a, b) => a.createdAt - b.createdAt || (a.order || 0) - (b.order || 0))
-        const index = saved.findIndex(row => row.storageId === storageId)
-        if (index < 0) return false
-        // Include preceding context and every newer support event so the
-        // full SC list stays chronological even beyond the initial viewport.
-        const restored = []
-        for (const item of saved.slice(Math.max(0, index - 20))) {
-          const row = restoreRecord(item)
-          if (!row) continue
-          history.older.delete(item.storageId)
-          if (row.id) history.ids.set(row.id, row)
-          restored.push(row)
-        }
-        history.messages.push(...restored)
-        history.messages.sort((a, b) => a.createdAt - b.createdAt || a.order - b.order)
-        history.displayLimit += restored.length
-        record = restored.find(row => row.storageId === storageId)
-        if (!record) return false
-      }
+      const record = history.byStorageId?.get(storageId) ||
+        history.messages.find(row => row.storageId === storageId)
+      if (!record || !record.retained || !record.supportEvent || record.createdAt + RETENTION_MS <= Date.now()) return false
       history.supportSearch = ''
       if (state.supportSearch) state.supportSearch.value = ''
       history.follow = false
       renderMessages(state, true)
       clearLocatedRecord(state)
       state.locationPinned = true
-      state.locatedView = record.view
-      record.view.setAttribute('data-ytcf-located', '')
-      record.view.setAttribute('tabindex', '-1')
-      record.view.focus({ preventScroll: true })
-      const rowBounds = record.view.getBoundingClientRect()
+      const view = record.view
+      state.locatedView = view
+      view.setAttribute('data-ytcf-located', '')
+      view.setAttribute('tabindex', '-1')
+      view.focus({ preventScroll: true })
+      const rowBounds = view.getBoundingClientRect()
       const listBounds = list.getBoundingClientRect()
       list.scrollTop = Math.max(0, list.scrollTop + rowBounds.top - listBounds.top - (list.clientHeight - rowBounds.height) / 2)
       rememberReaderPosition(state)
       state.locationTimer = setTimeout(() => {
-        record.view.removeAttribute('data-ytcf-located')
-        record.view.removeAttribute('tabindex')
+        view.removeAttribute('data-ytcf-located')
+        view.removeAttribute('tabindex')
         state.locatedView = null
         state.locationTimer = 0
       }, 3000)
@@ -2118,8 +2169,24 @@
       if (history.follow) state.followScrollTop = position.top
       if (!history.follow) {
         const top = list.getBoundingClientRect().top
-        const anchor = [...list.children].find(view => !view.hidden && view.getBoundingClientRect().bottom > top)
-        const record = anchor && [...history.messages, ...(state.searchShown || [])].find(row => row.view === anchor)
+        const children = list.children
+        let low = 0
+        let high = children.length
+        while (low < high) {
+          const mid = (low + high) >> 1
+          const child = children[mid]
+          if (!child.hidden && child.getBoundingClientRect().bottom > top) high = mid
+          else low = mid + 1
+        }
+        let anchor = children[low]
+        while (anchor && (anchor.hidden || anchor.getBoundingClientRect().bottom <= top)) anchor = children[++low]
+        if (!anchor && children.length) {
+          for (let i = 0; i < children.length; i++) {
+            const candidate = children[i]
+            if (!candidate.hidden && candidate.getBoundingClientRect().bottom > top) { anchor = candidate; break }
+          }
+        }
+        const record = anchor ? (viewRecords.get(anchor) || history.messages.find(row => row.renderedView === anchor)) : null
         position.anchor = record?.storageId
         position.offset = anchor ? anchor.getBoundingClientRect().top - top : 0
       }
@@ -2132,9 +2199,10 @@
       history.follow = position?.follow ?? true
       renderMessages(state, true)
       if (!history.follow) {
-        const record = [...history.messages, ...(state.searchShown || [])].find(row => row.storageId === position.anchor)
-        if (record?.view.parentElement === list && !record.view.hidden) {
-          list.scrollTop += record.view.getBoundingClientRect().top - list.getBoundingClientRect().top - position.offset
+        const record = history.byStorageId?.get(position.anchor) ||
+          history.messages.find(row => row.storageId === position.anchor)
+        if (record?.renderedView?.parentElement === list && !record.renderedView.hidden) {
+          list.scrollTop += record.renderedView.getBoundingClientRect().top - list.getBoundingClientRect().top - position.offset
         } else list.scrollTop = position.top
       }
       // Ignore the scroll event generated by restoring a paused viewport.
@@ -2197,15 +2265,10 @@
       }, 3000) : 0
     }
 
-    const targetSettings = state => state.targetScope === 'global'
-      ? { users: state.history.settings.globalUsers || [], excludedUsers: state.history.settings.globalExcludedUsers || [] }
-      : state.history.settings
-
     const renderTargets = (state) => {
       const { panel, history } = state
       const exclude = state.targetMode === 'exclude'
-      const global = state.targetScope === 'global'
-      const settings = targetSettings(state)
+      const { settings } = history
       const targets = exclude ? settings.excludedUsers || [] : settings.users
       const includeButton = $('.ytcf-mode-include', panel)
       const excludeButton = $('.ytcf-mode-exclude', panel)
@@ -2227,8 +2290,8 @@
         remove.textContent = '移除'
         remove.setAttribute('aria-label', `移除 ${user}`)
         remove.addEventListener('click', () => {
-          state.updateSettings(changeTargetUsers(history.settings, user, true, exclude, global),
-            exclude ? `已取消排除 ${user}。` : `已移除 ${user}。`, global)
+          state.updateSettings(changeTargetUsers(history.settings, user, true, exclude),
+            exclude ? `已取消排除 ${user}。` : `已移除 ${user}。`)
         })
         row.appendChild(name)
         row.appendChild(remove)
@@ -2261,10 +2324,6 @@
             element('label', {}, [element('input', { type: 'checkbox', name: 'moderators' }), ' Moderator']),
             element('label', {}, [element('input', { type: 'checkbox', name: 'verified' }), ' Verified']),
           ]),
-          element('label', { class: 'ytcf-target-scope' }, ['名單範圍', element('select', { name: 'target-scope' }, [
-            element('option', { value: 'channel' }, ['目前頻道']),
-            element('option', { value: 'global' }, ['全域']),
-          ])]),
           element('div', { class: 'ytcf-target-modes', role: 'group', 'aria-label': '帳號篩選方式' }, [
             element('button', { type: 'button', class: 'ytcf-mode-include', 'aria-label': '＋ 包含' }, ['＋ 包含']),
             element('button', { type: 'button', class: 'ytcf-mode-exclude', 'aria-label': '－ 排除' }, ['－ 排除']),
@@ -2284,7 +2343,6 @@
       ]))
       panel.appendChild(element('p', { class: 'ytcf-empty' }, ['尚無符合條件的發言。新增目標帳號後開始收集。']))
       panel.appendChild(element('p', { class: 'ytcf-history-status', role: 'status', hidden: '' }))
-      panel.appendChild(element('button', { class: 'ytcf-older', type: 'button', hidden: '' }, ['載入較早紀錄']))
       panel.appendChild(element('div', { class: 'ytcf-list', role: 'log',
         'aria-label': '篩選後的聊天訊息', 'aria-live': 'off' }))
       panel.appendChild(element('button', { class: 'ytcf-latest', type: 'button', hidden: '' }, ['回到最新訊息']))
@@ -2308,45 +2366,13 @@
       state.empty = $('.ytcf-empty', panel)
       state.count = $('.ytcf-count', panel)
       state.latest = $('.ytcf-latest', panel)
-      state.older = $('.ytcf-older', panel)
       state.supportSearch = $('[name="search-support"]', panel)
       state.supportSearch.addEventListener('input', () => {
         clearLocatedRecord(state)
         state.history.supportSearch = state.supportSearch.value
-        state.history.searchLimit = MAX_MESSAGES
         state.readerScrollIntent = false
         state.history.follow = true
         if (state.history.enabled && state.history.supportOnly) renderMessages(state, true)
-      })
-      state.older.addEventListener('click', () => {
-        const history = state.history
-        if (history.supportOnly && normalizeSearch(history.supportSearch)) {
-          const beforeHeight = state.list.scrollHeight
-          const beforeTop = state.list.scrollTop
-          history.searchLimit += OLDER_BATCH
-          history.follow = false
-          renderMessages(state)
-          state.list.scrollTop = beforeTop + state.list.scrollHeight - beforeHeight
-          return
-        }
-        const saved = [...history.older.values()].slice(-OLDER_BATCH)
-        const restored = []
-        const beforeHeight = state.list.scrollHeight
-        const beforeTop = state.list.scrollTop
-        for (const item of saved) {
-          history.older.delete(item.storageId)
-          if (!validArchiveRecord(item, history.scope)) continue
-          const record = restoreRecord(item)
-          if (!record) continue
-          restored.push(record)
-          if (record.id) history.ids.set(record.id, record)
-        }
-        history.displayLimit += restored.length
-        history.messages.unshift(...restored)
-        history.messages.sort((a, b) => a.createdAt - b.createdAt || a.order - b.order)
-        history.follow = false
-        renderMessages(state, true)
-        state.list.scrollTop = beforeTop + state.list.scrollHeight - beforeHeight
       })
       const moderators = $('[name="moderators"]', panel)
       const broadcaster = $('[name="broadcaster"]', panel)
@@ -2357,10 +2383,9 @@
       verified.checked = state.history.settings.verified
       state.status = $('.ytcf-target-status', panel)
       state.targetMode = 'include'
-      state.targetScope = 'channel'
-      state.updateSettings = (settings, message = '', global = false) => {
+      state.updateSettings = (settings, message = '') => {
         state.history.settings = settings
-        const saved = saveSettings(state.history, global)
+        const saved = saveSettings(state.history)
         showTargetStatus(state, saved ? message : '此瀏覽器無法儲存設定；設定僅保留至本次頁面結束。')
         renderTargets(state)
         captureTree(state.scroller, state.history)
@@ -2374,9 +2399,8 @@
       $('.ytcf-users', panel).addEventListener('submit', event => {
         event.preventDefault()
         const exclude = state.targetMode === 'exclude'
-        const global = state.targetScope === 'global'
-        const key = global ? exclude ? 'globalExcludedUsers' : 'globalUsers' : exclude ? 'excludedUsers' : 'users'
-        const nextSettings = changeTargetUsers(state.history.settings, users.value, false, exclude, global)
+        const key = exclude ? 'excludedUsers' : 'users'
+        const nextSettings = changeTargetUsers(state.history.settings, users.value, false, exclude)
         if (!nextSettings) {
           showTargetStatus(state, '請輸入一個頻道 ID、頻道網址或 @帳號。')
           return
@@ -2384,7 +2408,7 @@
         const added = nextSettings[key].length - (state.history.settings[key] || []).length
         state.updateSettings(nextSettings, added
           ? exclude ? '已排除帳號。' : '已新增帳號。'
-          : '此帳號已在名單中。', global)
+          : '此帳號已在名單中。')
         users.value = ''
       })
       const setTargetMode = mode => {
@@ -2394,11 +2418,6 @@
       }
       $('.ytcf-mode-include', panel).addEventListener('click', () => setTargetMode('include'))
       $('.ytcf-mode-exclude', panel).addEventListener('click', () => setTargetMode('exclude'))
-      $('[name="target-scope"]', panel).addEventListener('change', event => {
-        state.targetScope = event.target.value === 'global' ? 'global' : 'channel'
-        showTargetStatus(state)
-        renderTargets(state)
-      })
       $('[name="search-users"]', panel).addEventListener('input', () => renderTargets(state))
       const targetSettings = $('.ytcf-targets', panel)
       const targetButton = $('.ytcf-target-summary', panel)
@@ -2532,8 +2551,11 @@
     }
 
     const syncSettings = () => {
-      globalTargets = { users: [], excludedUsers: [] }
-      for (const history of histories.values()) history.settings = loadSettings(history.channel)
+      pageSettings = null
+      const settings = loadSettings()
+      for (const history of histories.values()) {
+        history.settings = { ...settings, users: [...settings.users], excludedUsers: [...settings.excludedUsers] }
+      }
       if (!mounted) return
       const { panel, history } = mounted
       $('[name="moderators"]', panel).checked = history.settings.moderators
@@ -2577,9 +2599,8 @@
       .ytcf-users button[type="submit"]:hover { filter: brightness(1.2); }
       .ytcf-empty { padding: 16px 12px; color: var(--yt-live-chat-secondary-text-color, #606060); }
       .ytcf-history-status { margin: 0; padding: 8px 12px; color: var(--yt-live-chat-secondary-text-color, #606060); font-size: 12px; }
-      .ytcf-older { align-self: center; flex-shrink: 0; margin: 6px; }
       .ytcf-list { flex: 1; min-height: 0; overflow: auto; overflow-anchor: none; padding: 6px 0; }
-      .ytcf-message { padding: 5px 10px; overflow-wrap: anywhere; line-height: 1.6; }
+      .ytcf-message { padding: 5px 10px; overflow-wrap: anywhere; line-height: 1.6; content-visibility: auto; contain-intrinsic-size: auto 36px; }
       .ytcf-message:has(> .ytcf-locate) { position: relative; padding-right: 58px; }
       .ytcf-panel .ytcf-locate { position: absolute; top: 5px; right: 6px; padding: 2px 6px; border: 1px solid currentColor; color: inherit; background: transparent; font: inherit; font-size: 11px; }
       .ytcf-message[data-ytcf-located] { outline: 2px solid #ffb300; outline-offset: -2px; box-shadow: inset 0 0 0 4px #0008; }
@@ -2650,15 +2671,13 @@
       yt-live-chat-header-renderer > #viewer-leaderboard-entry-point { order: -1 !important; margin-inline-start: 0 !important; margin-inline-end: auto !important; }
       .ytcf-latest { position: absolute; bottom: 8px; align-self: center; }
       .ytcf-managing > .ytcf-toolbar { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow-y: auto; }
-      .ytcf-managing > .ytcf-empty, .ytcf-managing > .ytcf-list, .ytcf-managing > .ytcf-latest, .ytcf-managing > .ytcf-older { display: none !important; }
+      .ytcf-managing > .ytcf-empty, .ytcf-managing > .ytcf-list, .ytcf-managing > .ytcf-latest { display: none !important; }
       .ytcf-options { flex-shrink: 0; }
       .ytcf-panel .ytcf-target-summary { display: inline-flex; align-items: center; gap: 3px; flex-shrink: 0; padding: 0; color: var(--yt-live-chat-button-default-text-color, #065fd4); background: transparent; white-space: nowrap; font: inherit; cursor: pointer; }
       .ytcf-target-summary::before { content: '▸'; }
       .ytcf-target-summary[aria-expanded="true"]::before { content: '▾'; }
       .ytcf-targets { margin-top: 12px; flex: 1; min-height: 0; display: flex; flex-direction: column; }
       .ytcf-targets > :not(.ytcf-target-list) { flex-shrink: 0; }
-      .ytcf-target-scope { display: flex; align-items: center; gap: 6px; margin-bottom: 12px; }
-      .ytcf-target-scope select { flex: 1; min-width: 0; height: 30px; padding: 4px 8px; border: 1px solid var(--yt-live-chat-message-input-border-color, #8886); border-radius: 4px; color: inherit; background: var(--yt-live-chat-background-color, #fff); font: inherit; }
       .ytcf-target-modes { display: flex; gap: 6px; margin-bottom: 8px; }
       .ytcf-target-modes button { flex: 1; padding: 4px 8px; color: inherit; background: var(--yt-live-chat-action-panel-background-color, #8882); font-size: 12px; }
       .ytcf-target-modes button[aria-pressed="true"] { color: var(--yt-live-chat-background-color, #fff); background: var(--yt-live-chat-button-default-text-color, #065fd4); }

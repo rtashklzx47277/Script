@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        Twitch Player Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.3.4
+// @version     0.3.5
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchPlayerTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchPlayerTweaks.user.js
 // @description 提供 Twitch 原解析度 PNG 截圖、滾輪音量與音量增益，隱藏剪輯按鈕及互動擴充。
@@ -756,10 +756,14 @@
 
   const observer = new MutationObserver((mutations) => {
     for (const mutation of mutations) {
-      if (mutation.addedNodes.length || mutation.removedNodes?.length) {
-        scheduleRefresh()
-        return
-      }
+      if (!mutation.addedNodes.length && !mutation.removedNodes?.length) continue
+      const target =
+        mutation.target?.nodeType === 1
+          ? mutation.target
+          : mutation.target?.parentElement
+      if (target?.closest?.('.stream-chat')) continue
+      scheduleRefresh()
+      return
     }
   })
 

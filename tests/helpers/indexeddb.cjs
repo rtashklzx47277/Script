@@ -52,6 +52,10 @@ module.exports = () => {
           records.set(key([snapshot.scope, snapshot.storageId]), snapshot)
         })
       },
+      delete: id => request(() => {
+        if (mode !== 'readwrite' || factory.failWrites) throw new Error('QuotaExceededError')
+        records.delete(key(id))
+      }),
       index(name) {
         return {
           getAll: scope => request(() => [...records.values()].filter(record => record[name] === scope).map(record => structuredClone(record))),

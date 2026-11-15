@@ -173,7 +173,7 @@ function boot({ saved, blocked = false, trustedTypes = false, withResizeObserver
     normalizeUsers, getChannel, getHistory, loadSettings, saveSettings, readMessage,
     matchesFilter, captureLine, captureTree, captureMutations, renderMessages, changeTargetUsers, showTargetStatus,
     scheduleMessageRender, releaseMessageViews, handleMessageVisibility,
-    archiveTree, restoreTree, archiveRecord, restoreRecord, flushHistory, pruneHistories, pruneArchive, loadOlderRecords,
+    archiveTree, restoreTree, archiveRecord, restoreRecord, flushHistory, pruneHistories, pruneArchive,
     setPanelLayer, positionFilterPanel, createPanel, setEnabled, refresh, unmount, releaseMessageViews,
     get mounted() { return mounted },
     setMounted: state => { mounted = state }
@@ -288,7 +288,7 @@ test('Twitch archive: edits and DOM rebuilds do not renew expiry, and records ex
   assert.equal(database.records.size, 0)
 })
 
-test('Twitch archive: isolate channels, merge concurrent writers and retain earlier rows beyond the display limit', async () => {
+test('Twitch archive: isolate channels, merge concurrent writers, restore directly and cap at 100 in memory and IndexedDB', async () => {
   const database = fakeIndexedDB()
   const a = boot({ database })
   const b = boot({ database })
@@ -296,27 +296,28 @@ test('Twitch archive: isolate channels, merge concurrent writers and retain earl
   const h2 = b.api.getHistory('sample_channel')
   const other = a.api.getHistory('another_channel')
   await Promise.all([h1.restorePromise, h2.restorePromise, other.restorePromise])
-  h1.displayLimit = 1
-  for (let i = 0; i < 3; i++) a.api.captureLine(a.message('mod', `old ${i}`, 'moderator', `older-${i}`).line, h1)
+  for (let i = 0; i < 102; i++) a.api.captureLine(a.message('mod', `old ${i}`, 'moderator', `msg-${i}`).line, h1)
   b.api.captureLine(b.message('mod', 'another tab', 'moderator', 'another-tab').line, h2)
   a.api.captureLine(a.message('mod', 'another channel', 'moderator', 'another-channel').line, other)
+  assert.equal(h1.messages.length, 100)
+  assert.equal(h1.ids.has('msg-0'), false)
+  assert.equal(h1.ids.has('msg-1'), false)
+  assert.equal(h1.ids.has('msg-2'), true)
   await Promise.all([a.api.flushHistory(h1), b.api.flushHistory(h2), a.api.flushHistory(other)])
-  assert.equal(database.records.size, 5)
+  assert.equal(database.records.has(JSON.stringify(['sample_channel', 'msg-0'])), false)
+  assert.equal(database.records.has(JSON.stringify(['sample_channel', 'msg-1'])), false)
+  assert.equal(database.records.has(JSON.stringify(['sample_channel', 'another-tab'])), true)
+  assert.equal(database.records.has(JSON.stringify(['another_channel', 'another-channel'])), true)
   const fresh = boot({ database })
   const restored = fresh.api.getHistory('sample_channel')
-  restored.displayLimit = 1
   await restored.restorePromise
-  assert.equal(restored.messages.length, 1)
-  assert.equal(restored.older.size, 3)
-  const state = { history: restored, list: new fresh.Element(), empty: {}, count: {}, latest: {}, older: {} }
-  state.list.scrollTop = 0
-  state.list.scrollHeight = 100
+  assert.equal(restored.messages.length, 100)
+  assert.equal(restored.older, undefined)
+  assert.equal(database.records.has(JSON.stringify(['sample_channel', 'msg-2'])), false)
+  const state = { history: restored, list: new fresh.Element(), empty: {}, count: {}, latest: {} }
   fresh.api.renderMessages(state)
-  assert.equal(state.older.hidden, false)
-  fresh.api.loadOlderRecords(state)
-  assert.equal(state.count.textContent, '4 則')
-  assert.equal(state.older.hidden, true)
-  assert.equal(state.list.children[0].children.at(-1).textContent, 'old 0')
+  assert.equal(state.count.textContent, '100 則')
+  assert.equal(state.list.children[0].children.at(-1).textContent, 'old 3')
   assert.equal(restored.ids.has('another-channel'), false)
 })
 
@@ -435,8 +436,7 @@ test('Twitch VIP users: recognize badge alt, asset UUID and srcset, preserve his
   history.settings.vip = true
   env.api.renderMessages(state)
   assert.equal(state.count.textContent, '4 則')
-  history.settings.excludedUsers = ['vip_alt']
-  history.settings.globalExcludedUsers = ['vip_tw']
+  history.settings.excludedUsers = ['vip_alt', 'vip_tw']
   env.api.renderMessages(state)
   assert.equal(state.count.textContent, '2 則')
   await env.api.flushHistory(history)
@@ -538,7 +538,7 @@ test('Twitch chat: clone emotes, remove inactive hooks and preserve safe link be
   assert.equal(copiedBody.getAttribute('data-a-target'), null)
 })
 
-test('Twitch chat: channel-specific settings survive reload when archive storage is unavailable', () => {
+test('Twitch chat: global settings survive reload across channels when archive storage is unavailable', () => {
   const env = boot()
   const history = env.api.getHistory('sample_channel')
   history.settings.users = ['chosen']
@@ -547,26 +547,36 @@ test('Twitch chat: channel-specific settings survive reload when archive storage
   const fresh = boot({ saved: env.storage.get('twitch-live-chat-tweaks-settings-v1') })
   assert.equal(fresh.api.getHistory('sample_channel').settings.users[0], 'chosen')
   assert.equal(fresh.api.getHistory('sample_channel').messages.length, 0)
-  assert.equal(fresh.api.getHistory('other_channel').settings.users.length, 0)
+  assert.equal(fresh.api.getHistory('other_channel').settings.users[0], 'chosen')
   env.location.pathname = '/popout/sample_channel/chat'
   assert.equal(env.api.getChannel(), 'sample_channel')
   env.location.pathname = '/directory'
   assert.equal(env.api.getChannel(), '')
 })
 
-test('Twitch chat: cap history and update visible count without forcing a reader to the bottom', () => {
-  const env = boot()
+test('Twitch chat: cap history at 100 in memory and IndexedDB without forcing a reader to the bottom', async () => {
+  const database = fakeIndexedDB()
+  const env = boot({ database })
   const history = env.api.getHistory('sample_channel')
-  for (let i = 0; i < 2002; i++) env.api.captureLine(env.message('mod', String(i), 'Moderator').line, history)
-  assert.equal(history.messages.length, 2000)
-  assert.equal(history.messages[0].view.children.at(-1).innerHTML, '2')
+  await history.restorePromise
+  for (let i = 0; i < 105; i++) {
+    env.api.captureLine(env.message('mod', String(i), 'Moderator', `id-${i}`).line, history)
+    if (i === 100) await env.api.flushHistory(history)
+  }
+  await env.api.flushHistory(history)
+  assert.equal(history.messages.length, 100)
+  assert.equal(history.messages[0].view.children.at(-1).innerHTML, '5')
+  assert.equal(database.records.size, 100)
+  assert.equal(database.records.has(JSON.stringify(['sample_channel', 'id-0'])), false)
+  assert.equal(database.records.has(JSON.stringify(['sample_channel', 'id-4'])), false)
+  assert.equal(database.records.has(JSON.stringify(['sample_channel', 'id-5'])), true)
   const state = { history, list: new env.Element(), empty: {}, count: {}, latest: {} }
   state.list.scrollTop = 123
   state.list.scrollHeight = 9999
   history.follow = false
   env.api.renderMessages(state)
   assert.equal(state.list.scrollTop, 123)
-  assert.equal(state.count.textContent, '2000 則')
+  assert.equal(state.count.textContent, '100 則')
   assert.equal(state.latest.hidden, false)
   history.follow = true
   env.api.renderMessages(state)
@@ -575,7 +585,7 @@ test('Twitch chat: cap history and update visible count without forcing a reader
 
 test('Twitch targets: accept one login, reject multiple logins, remove only the selected account', () => {
   const env = boot()
-  const initial = { moderators: false, broadcaster: true, users: ['alice'] }
+  const initial = { moderators: false, broadcaster: true, vip: true, users: ['alice'], excludedUsers: [] }
   const duplicate = env.api.changeTargetUsers(initial, ' @ALICE ')
   assert.equal(duplicate.users.join(','), 'alice')
   const withBob = env.api.changeTargetUsers(initial, '@Bob')
@@ -591,9 +601,8 @@ test('Twitch targets: accept one login, reject multiple logins, remove only the 
   const removed = env.api.changeTargetUsers(added, '@BOB', true)
   assert.equal(removed.users.join(','), 'alice,carol')
   env.api.saveSettings({ channel: 'sample_channel', settings: removed })
-  env.api.saveSettings({ channel: 'other_channel', settings: initial })
   assert.equal(env.api.loadSettings('sample_channel').users.join(','), 'alice,carol')
-  assert.equal(env.api.loadSettings('other_channel').users.join(','), 'alice')
+  assert.equal(env.api.loadSettings('other_channel').users.join(','), 'alice,carol')
 })
 
 test('Twitch targets: remote edits update mounted filters and start capturing the newly added account', () => {
@@ -653,7 +662,7 @@ test('Twitch exclusions: override both roles and explicit inclusion, and restore
   assert.equal(history.settings.excludedUsers.join(','), 'sample_channel,alice')
 })
 
-test('Twitch exclusions: preserve legacy targets and save normalized exclusions per channel', () => {
+test('Twitch exclusions: preserve legacy targets and save normalized exclusions globally', () => {
   const env = boot({ saved: JSON.stringify({ sample_channel: { users: ['alice'] } }) })
   const history = env.api.getHistory('sample_channel')
   assert.equal(history.settings.vip, true)
@@ -665,86 +674,84 @@ test('Twitch exclusions: preserve legacy targets and save normalized exclusions 
   env.api.saveSettings(history)
   const fresh = boot({ saved: env.storage.get('twitch-live-chat-tweaks-settings-v1') })
   assert.equal(fresh.api.loadSettings('sample_channel').vip, false)
-  assert.equal(fresh.api.loadSettings('other_channel').vip, true)
+  assert.equal(fresh.api.loadSettings('other_channel').vip, false)
   assert.equal(fresh.api.loadSettings('sample_channel').excludedUsers.join(','), 'mod_bot')
   assert.equal(fresh.api.loadSettings('sample_channel').users.join(','), 'alice')
-  assert.equal(fresh.api.loadSettings('other_channel').excludedUsers.length, 0)
+  assert.equal(fresh.api.loadSettings('other_channel').excludedUsers.join(','), 'mod_bot')
 })
 
 
-test('Twitch scopes: preserve legacy channel lists and share global lists without copying them into channels', () => {
-  const env = boot({ saved: JSON.stringify({ 'sample_channel': { users: ['chosen'], moderators: false } }) })
+test('Twitch scopes: migrate legacy channel and @global lists into single global settings', () => {
+  const env = boot({ saved: JSON.stringify({
+    '@global': { users: ['g_user'], excludedUsers: ['g_bad'] },
+    sample_channel: { users: ['chosen'], moderators: false },
+    other_channel: { users: ['chosen', 'extra'], excludedUsers: ['c_bad'] },
+  }) })
   const first = env.api.getHistory('sample_channel')
   const second = env.api.getHistory('other_channel')
-  assert.equal(first.settings.users.join(','), 'chosen')
+  assert.equal(first.settings.users.join(','), 'g_user,chosen,extra')
+  assert.equal(second.settings.users.join(','), 'g_user,chosen,extra')
+  assert.equal(first.settings.excludedUsers.join(','), 'g_bad,c_bad')
   assert.equal(first.settings.moderators, false)
-  assert.equal(second.settings.users.length, 0)
-  first.settings = env.api.changeTargetUsers(first.settings, 'chosen', false, false, true)
-  assert.equal(env.api.saveSettings(first, true), true)
-  assert.equal(second.settings.globalUsers.join(','), 'chosen')
-  assert.equal(second.settings.users.length, 0)
-  second.settings.users = ['chosen']
-  env.api.saveSettings(second)
+  assert.equal(env.api.saveSettings(first), true)
   const saved = JSON.parse(env.storage.get('twitch-live-chat-tweaks-settings-v1'))
-  assert.equal(saved['@global'].users.join(','), 'chosen')
-  assert.equal(saved['other_channel'].globalUsers, undefined)
+  assert.equal(saved['@global'], undefined)
+  assert.equal(saved.sample_channel, undefined)
+  assert.equal(saved.users.join(','), 'g_user,chosen,extra')
+  assert.equal(saved.excludedUsers.join(','), 'g_bad,c_bad')
+  assert.equal(saved.moderators, false)
   const fresh = boot({ saved: env.storage.get('twitch-live-chat-tweaks-settings-v1') })
-  assert.equal(fresh.api.loadSettings('sample_channel').globalUsers.join(','), 'chosen')
-  assert.equal(fresh.api.loadSettings('sample_channel').moderators, false)
-  first.settings = env.api.changeTargetUsers(first.settings, 'chosen', true, false, true)
-  env.api.saveSettings(first, true)
-  assert.equal(second.settings.globalUsers.length, 0)
-  assert.equal(second.settings.users.join(','), 'chosen')
+  assert.equal(fresh.api.loadSettings('other_channel').users.join(','), 'g_user,chosen,extra')
+  assert.equal(fresh.api.loadSettings('other_channel').moderators, false)
 })
 
-test('Twitch scopes: capture global targets in every channel and let either exclusion list override includes and roles', () => {
+test('Twitch scopes: capture global targets in every channel and let exclusions override includes and roles', () => {
   const env = boot()
   const first = env.api.getHistory('sample_channel')
   const second = env.api.getHistory('other_channel')
-  first.settings = env.api.changeTargetUsers(first.settings, 'chosen', false, false, true)
-  env.api.saveSettings(first, true)
+  first.settings = env.api.changeTargetUsers(first.settings, 'chosen', false, false)
+  env.api.saveSettings(first)
   const a = env.message('chosen', 'global in first')
   const b = env.message('chosen', 'global in second')
   assert.equal(env.api.captureLine(a.line, first), true)
   assert.equal(env.api.captureLine(b.line, second), true)
   assert.equal(env.api.matchesFilter(second.messages[0], second.settings), true)
   second.settings = env.api.changeTargetUsers(second.settings, 'chosen', false, true)
+  env.api.saveSettings(second)
+  assert.equal(env.api.matchesFilter(first.messages[0], first.settings), false)
   assert.equal(env.api.matchesFilter(second.messages[0], second.settings), false)
-  assert.equal(env.api.matchesFilter(first.messages[0], first.settings), true)
-  first.settings.users = ['chosen']
-  first.settings = env.api.changeTargetUsers(first.settings, 'chosen', false, true, true)
-  env.api.saveSettings(first, true)
   assert.equal(env.api.matchesFilter({ user: 'chosen', moderator: true, broadcaster: true }, first.settings), false)
-  assert.equal(env.api.matchesFilter(second.messages[0], second.settings), false)
   assert.equal(first.messages.length, 1)
 })
 
-test('Twitch scopes: sync global edits across stored histories and keep globals for the page when storage is blocked', () => {
+test('Twitch scopes: sync global edits across stored histories and keep settings for the page when storage is blocked', () => {
   const env = boot()
   const first = env.api.getHistory('sample_channel')
   const second = env.api.getHistory('other_channel')
-  env.storage.set('twitch-live-chat-tweaks-settings-v1', JSON.stringify({ '@global': { users: ['chosen'], excludedUsers: ['chosen'] } }))
+  env.storage.set('twitch-live-chat-tweaks-settings-v1', JSON.stringify({ users: ['chosen'], excludedUsers: ['bad'] }))
   env.listeners.get('storage')({ key: 'twitch-live-chat-tweaks-settings-v1' })
-  assert.equal(first.settings.globalUsers.join(','), 'chosen')
-  assert.equal(second.settings.globalExcludedUsers.join(','), 'chosen')
+  assert.equal(first.settings.users.join(','), 'chosen')
+  assert.equal(second.settings.excludedUsers.join(','), 'bad')
   env.storage.delete('twitch-live-chat-tweaks-settings-v1')
   env.listeners.get('storage')({ key: null })
-  assert.equal(first.settings.globalUsers.length, 0)
-  assert.equal(second.settings.globalExcludedUsers.length, 0)
+  assert.equal(first.settings.users.length, 0)
+  assert.equal(second.settings.excludedUsers.length, 0)
   const blocked = boot({ blocked: true })
   const history = blocked.api.getHistory('sample_channel')
-  history.settings = blocked.api.changeTargetUsers(history.settings, 'chosen', false, false, true)
-  assert.equal(blocked.api.saveSettings(history, true), false)
-  assert.equal(blocked.api.getHistory('other_channel').settings.globalUsers.join(','), 'chosen')
+  history.settings = blocked.api.changeTargetUsers(history.settings, 'chosen', false, false)
+  assert.equal(blocked.api.saveSettings(history), false)
+  assert.equal(blocked.api.getHistory('other_channel').settings.users.join(','), 'chosen')
 })
 
-test('Twitch panel: VIP role checkbox defaults to checked, toggles filtering and persists per channel', () => {
+test('Twitch panel: VIP role checkbox defaults to checked, toggles filtering and persists globally without scope or pagination UI', () => {
   const env = boot()
   const history = env.api.getHistory('sample_channel')
   const scroller = new env.Element()
   scroller.appendChild(env.message('vip_guest', 'vip hello', 'VIP', 'vip-panel-1').line)
   const state = { history, host: new env.Element(), scroller, button: new env.Element('button') }
   env.api.createPanel(state)
+  assert.equal(state.panel.querySelector('[name="target-scope"]'), null)
+  assert.equal(state.panel.querySelector('.ttc-older'), null)
   env.api.setMounted(state)
   env.api.captureTree(scroller, history)
   env.api.setEnabled(state, false)
@@ -760,7 +767,7 @@ test('Twitch panel: VIP role checkbox defaults to checked, toggles filtering and
   assert.equal(state.count.textContent, '0 則')
   const fresh = boot({ saved: env.storage.get('twitch-live-chat-tweaks-settings-v1') })
   assert.equal(fresh.api.loadSettings('sample_channel').vip, false)
-  assert.equal(fresh.api.loadSettings('other_channel').vip, true)
+  assert.equal(fresh.api.loadSettings('other_channel').vip, false)
   vipCheckbox.checked = true
   vipCheckbox.listeners.get('change')()
   assert.equal(history.settings.vip, true)

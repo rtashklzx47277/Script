@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Player Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.2.18
+// @version     0.2.19
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubePlayerTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubePlayerTweaks.user.js
 // @description 提供 YouTube 原解析度 PNG 截圖、滾輪音量與速度調整、直播追平，並擴大直播回看範圍。
@@ -27,6 +27,7 @@
 
   const MAX_DVR_SECONDS = 43200 * 14
   const DVR_WINDOW_FLAG = 'html5_max_live_dvr_window_plus_margin_secs'
+  const DVR_WINDOW_FLAG_PATTERN = new RegExp(`${DVR_WINDOW_FLAG}=[\\d.]+`)
 
   const streamRunningOver12h = (microformat) => {
     const live = microformat?.playerMicroformatRenderer?.liveBroadcastDetails
@@ -147,7 +148,7 @@
       }
 
       config.serializedExperimentFlags = config.serializedExperimentFlags.replace(
-        new RegExp(`${DVR_WINDOW_FLAG}=[\\d.]+`),
+        DVR_WINDOW_FLAG_PATTERN,
         `${DVR_WINDOW_FLAG}=${MAX_DVR_SECONDS}`
       )
       patchedPlayerConfigs.add(config)
@@ -1154,7 +1155,7 @@
   }
 
   const startShortsMetadataLayout = (signal) => {
-    const adjusted = new Set()
+    const adjusted = new Map()
     let frame = 0
     let observedContainer = null
 
@@ -1176,6 +1177,7 @@
         observedContainer = container
       }
 
+      const nextLayouts = []
       const current = new Set()
       if (container && !document.fullscreenElement &&
           !shorts.hasAttribute('is-fullscreen') &&
@@ -1198,19 +1200,39 @@
           const width = Math.min(480, Math.floor(rect.left - left - 16))
           if (width < 240) continue
           const offset = rect.left - 16 - width - overlay.getBoundingClientRect().left
-          reel.style.setProperty('--yt-side-metadata-left', `${offset}px`)
-          reel.style.setProperty('--yt-side-metadata-width', `${width}px`)
-          reel.setAttribute('data-yt-side-metadata', '')
-          adjusted.add(reel)
           current.add(reel)
+          nextLayouts.push({ reel, left: `${offset}px`, width: `${width}px` })
         }
       }
-      for (const reel of adjusted) {
+      for (const reel of adjusted.keys()) {
         if (!current.has(reel)) restore(reel)
+      }
+      for (const { reel, left, width } of nextLayouts) {
+        const prev = adjusted.get(reel)
+        if (prev && prev.left === left && prev.width === width) continue
+        reel.style.setProperty('--yt-side-metadata-left', left)
+        reel.style.setProperty('--yt-side-metadata-width', width)
+        reel.setAttribute('data-yt-side-metadata', '')
+        adjusted.set(reel, { left, width })
       }
     }
     const schedule = () => {
       if (!frame && !signal.aborted) frame = requestAnimationFrame(update)
+    }
+    const isRelevantShortsMutation = (mutations) => {
+      if (!mutations?.length) return true
+      for (const mutation of mutations) {
+        const target = mutation.target?.nodeType === 1 ? mutation.target : mutation.target?.parentElement
+        if (target?.closest?.('ytd-shorts')) return true
+        for (const list of [mutation.addedNodes, mutation.removedNodes]) {
+          for (const node of list || []) {
+            if (node?.nodeType !== 1) continue
+            if (node.matches?.('ytd-shorts, ytd-reel-video-renderer') ||
+                node.querySelector?.('ytd-shorts, ytd-reel-video-renderer')) return true
+          }
+        }
+      }
+      return false
     }
     const onLayoutTransition = (event) => {
       // Closing comments clears the mode attribute before the player's
@@ -1220,7 +1242,9 @@
           event.target?.closest?.('ytd-shorts')) schedule()
     }
     const resizeObserver = new ResizeObserver(schedule)
-    const observer = new MutationObserver(schedule)
+    const observer = new MutationObserver((mutations) => {
+      if (isRelevantShortsMutation(mutations)) schedule()
+    })
     observer.observe(document.documentElement, {
       childList: true,
       subtree: true,
@@ -1236,7 +1260,7 @@
       cancelAnimationFrame(frame)
       observer.disconnect()
       resizeObserver.disconnect()
-      for (const reel of adjusted) restore(reel)
+      for (const reel of adjusted.keys()) restore(reel)
     }, { once: true })
     schedule()
   }

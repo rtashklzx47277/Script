@@ -606,3 +606,57 @@ test('layout: stacked mode avoids 100vw, emits one resize on enter, and skips au
   assert.equal(fs.sizeButton.clickCount || 0, 0)
   assert.equal(fsBrowser.selectors.has('#yt-video-only-fullscreen'), true)
 })
+
+
+test('layout: hidden waiting slate skips background style lookup and setStyle skips unchanged CSS writes', async () => {
+  const browser = createBrowser()
+  const { flexy } = addLayoutChrome(browser, true)
+  const chat = browser.selectors.get('#chat')
+  chat.isLive = undefined
+  flexy.attrs.set('is-two-columns_', '')
+  browser.window.innerWidth = 1280
+  browser.window.innerHeight = 800
+
+  const video = browser.selectors.get('#movie_player video')
+  video.videoWidth = 1280
+  video.videoHeight = 720
+  const slate = new browser.Element()
+  const background = slate.appendChild(new browser.Element())
+  slate.computedStyle = { display: 'none' }
+  background.computedStyle = { backgroundImage: 'url(https://example.com/slate.jpg)' }
+  browser.selectors.set('#movie_player .ytp-offline-slate', slate)
+  browser.selectors.set('#movie_player .ytp-offline-slate-background', background)
+
+  const computedCalls = []
+  const origGetComputedStyle = browser.window.getComputedStyle
+  browser.window.getComputedStyle = target => {
+    computedCalls.push(target)
+    return origGetComputedStyle(target)
+  }
+
+  let cssWrites = 0
+  const origCreateElement = browser.document.createElement.bind(browser.document)
+  browser.document.createElement = tag => {
+    const el = origCreateElement(tag)
+    if (tag === 'style') {
+      let cssText = ''
+      Object.defineProperty(el, 'textContent', {
+        get() { return cssText },
+        set(value) { cssWrites++; cssText = String(value) },
+      })
+    }
+    return el
+  }
+
+  browser.run('YouTubeLiveLayout.user.js')
+  await settle()
+  assert.equal(computedCalls.includes(background), false)
+  const initialWrites = cssWrites
+  assert.ok(initialWrites > 0)
+
+  computedCalls.length = 0
+  browser.window.dispatchEvent(browser.event('resize'))
+  await settle()
+  assert.equal(computedCalls.includes(background), false)
+  assert.equal(cssWrites, initialWrites, 'unchanged CSS must not reassign style textContent')
+})
