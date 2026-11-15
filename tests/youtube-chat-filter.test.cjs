@@ -2489,7 +2489,7 @@ test('YouTube panel accessibility and restoreHistory yielding: explicit labels, 
   assert.equal(envErr.api.mounted.panel.querySelector('.ytcf-history-status').getAttribute('role'), 'status')
 })
 
-test('YouTube SC type & color filters: default checked state, plain labels without counts, gift redemption ignore, and 7-color indeterminate selection', () => {
+test('YouTube SC type & color filters: default checked state, plain labels without counts, gift redemption ignore, and independent color selection', () => {
   const env = boot({ trustedTypes: true })
   const header = env.document.body.appendChild(new env.Element('yt-live-chat-header-renderer'))
   header.appendChild(new env.Element('button')).id = 'live-chat-header-context-menu'
@@ -2544,16 +2544,18 @@ test('YouTube SC type & color filters: default checked state, plain labels witho
   const labelFor = input => panel.querySelectorAll('label').find(l => l.getAttribute('for') === input.getAttribute('id'))
 
   assert.equal(typeBox('giftRecipients'), null)
+  assert.equal(typeBox('superchat'), null)
   assert.equal(panel.querySelectorAll('.ytcf-sc-count').length, 0)
+  const colorGroup = panel.querySelector('.ytcf-sc-filter-row--colors')
+  assert.equal(colorGroup.getAttribute('role'), 'group')
+  assert.equal(colorGroup.getAttribute('aria-label'), 'Super Chat 顏色')
   assert.equal(labelFor(typeBox('membership')).textContent, 'membership')
   assert.equal(labelFor(typeBox('milestone')).textContent, 'milestone')
   assert.equal(labelFor(typeBox('membershipGift')).textContent, 'membershipGift')
-  assert.equal(labelFor(typeBox('superchat')).textContent, 'superchat')
   for (const [key] of tiers) {
     const input = colorBox(key)
     const label = labelFor(input)
     assert.equal(input.checked, true)
-    assert.equal(input.indeterminate, undefined)
     const swatch = label.querySelector('.ytcf-sc-swatch')
     assert.ok(swatch)
     assert.equal(swatch.getAttribute('aria-hidden'), 'true')
@@ -2561,8 +2563,6 @@ test('YouTube SC type & color filters: default checked state, plain labels witho
     assert.ok(!/[()]/.test(label.textContent), `color label ${label.textContent} omits parenthesized counts`)
     assert.ok(label.textContent.trim().length > 0, `color label retains accessible text name`)
   }
-  assert.equal(typeBox('superchat').checked, true)
-  assert.equal(typeBox('superchat').indeterminate, false)
   assert.equal(state.count.textContent, '11 則')
 
   // Uncheck membership
@@ -2571,30 +2571,12 @@ test('YouTube SC type & color filters: default checked state, plain labels witho
   assert.equal(state.count.textContent, '10 則')
   assert.equal(labelFor(typeBox('membership')).textContent, 'membership')
 
-  // Uncheck one color -> superchat parent becomes indeterminate (checked=false, indeterminate=true)
-  colorBox('blue').checked = false
-  colorBox('blue').listeners.get('change')()
-  assert.equal(typeBox('superchat').checked, false)
-  assert.equal(typeBox('superchat').indeterminate, true)
-  assert.equal(state.count.textContent, '9 則')
-
-  // Click superchat while indeterminate -> checks all 7 colors again
-  typeBox('superchat').checked = true
-  typeBox('superchat').listeners.get('change')()
-  assert.equal(typeBox('superchat').indeterminate, false)
-  assert.equal(colorBox('blue').checked, true)
-  assert.equal(state.count.textContent, '10 則')
-
-  // Click superchat to uncheck all 7 colors -> 1 more click on red isolates red SC cleanly
-  typeBox('superchat').checked = false
-  typeBox('superchat').listeners.get('change')()
-  for (const [key] of tiers) assert.equal(colorBox(key).checked, false)
-  assert.equal(state.count.textContent, '3 則') // milestone(1) + membershipGift(2)
-
-  colorBox('red').checked = true
-  colorBox('red').listeners.get('change')()
-  assert.equal(typeBox('superchat').checked, false)
-  assert.equal(typeBox('superchat').indeterminate, true)
+  // Uncheck all SC colors except red -> keeps milestone(1) + membershipGift(2) + red SC(1) = 4
+  for (const [key] of tiers) {
+    if (key === 'red') continue
+    colorBox(key).checked = false
+    colorBox(key).listeners.get('change')()
+  }
   assert.equal(state.count.textContent, '4 則')
   assert.ok(state.list.children.some(row => row.textContent.includes('msg-red')))
   assert.ok(!state.list.children.some(row => row.textContent.includes('msg-blue')))
@@ -2667,7 +2649,7 @@ test('YouTube SC type & color filters: classify Super Stickers, search/locate to
   fresh.api.setEnabled(state, true, true)
   const colorBox = key => state.panel.querySelector(`[data-sc-color="${key}"]`)
   const typeBox = type => state.panel.querySelector(`[data-sc-type="${type}"]`)
-  assert.equal(typeBox('superchat').checked, true)
+  assert.equal(typeBox('superchat'), null)
   assert.equal(colorBox('green').checked, true)
   assert.equal(state.count.textContent, '3 則')
 

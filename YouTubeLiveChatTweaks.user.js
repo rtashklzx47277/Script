@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.8.12
+// @version     0.8.13
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @description 提供 YouTube 聊天室用戶資訊卡、獨立 SC／會員事件紀錄與類型顏色篩選、全域角色與帳號包含／排除篩選、表情複製、重新載入與自動跟隨。
@@ -2244,17 +2244,9 @@
         const item = ui.types[key]
         if (item) item.input.checked = filter[key] !== false
       }
-      let checkedColors = 0
       for (const tier of SC_COLOR_TIERS) {
         const item = ui.colors[tier.key]
-        if (!item) continue
-        const active = filter.colors?.[tier.key] !== false
-        if (active) checkedColors++
-        item.input.checked = active
-      }
-      if (ui.superchat) {
-        ui.superchat.input.checked = checkedColors === SC_COLOR_TIERS.length
-        ui.superchat.input.indeterminate = checkedColors > 0 && checkedColors < SC_COLOR_TIERS.length
+        if (item) item.input.checked = filter.colors?.[tier.key] !== false
       }
     }
     const renderSupportSearch = (state, query) => {
@@ -2790,7 +2782,6 @@
         milestone: makeScCheckbox({ id: 'ytcf-sc-filter-milestone', attrName: 'data-sc-type', attrValue: 'milestone', text: 'milestone' }),
         membershipGift: makeScCheckbox({ id: 'ytcf-sc-filter-membership-gift', attrName: 'data-sc-type', attrValue: 'membershipGift', text: 'membershipGift' }),
       }
-      const superchatToggle = makeScCheckbox({ id: 'ytcf-sc-filter-superchat', attrName: 'data-sc-type', attrValue: 'superchat', text: 'superchat' })
       const supportColors = Object.fromEntries(SC_COLOR_TIERS.map(tier => [tier.key, makeScCheckbox({
         id: `ytcf-sc-color-${tier.key}`, attrName: 'data-sc-color', attrValue: tier.key, swatch: tier,
       })]))
@@ -2799,8 +2790,7 @@
         element('div', { class: 'ytcf-sc-filter-row' }, [
           supportTypes.membership.option, supportTypes.milestone.option, supportTypes.membershipGift.option,
         ]),
-        element('div', { class: 'ytcf-sc-filter-row ytcf-sc-filter-row--colors' }, [
-          superchatToggle.option,
+        element('div', { class: 'ytcf-sc-filter-row ytcf-sc-filter-row--colors', role: 'group', 'aria-label': 'Super Chat 顏色' }, [
           ...SC_COLOR_TIERS.map(tier => supportColors[tier.key].option),
         ]),
       ])
@@ -2881,7 +2871,7 @@
       state.count = $('.ytcf-count', panel)
       state.latest = $('.ytcf-latest', panel)
       state.supportSearch = $('[name="search-support"]', panel)
-      state.supportFilterUI = { types: supportTypes, superchat: superchatToggle, colors: supportColors }
+      state.supportFilterUI = { types: supportTypes, colors: supportColors }
       const applySupportFilterChange = () => {
         clearLocatedRecord(state)
         updateSupportFilterUI(state)
@@ -2894,13 +2884,6 @@
           applySupportFilterChange()
         })
       }
-      superchatToggle.input.addEventListener('change', () => {
-        const filter = state.history.supportFilter ||= createDefaultSupportFilter()
-        const checked = Boolean(superchatToggle.input.checked)
-        superchatToggle.input.indeterminate = false
-        for (const tier of SC_COLOR_TIERS) filter.colors[tier.key] = checked
-        applySupportFilterChange()
-      })
       for (const tier of SC_COLOR_TIERS) {
         supportColors[tier.key].input.addEventListener('change', () => {
           const filter = state.history.supportFilter ||= createDefaultSupportFilter()
