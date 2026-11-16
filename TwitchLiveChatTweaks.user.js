@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        Twitch Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.7.5
+// @version     0.7.6
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
 // @description 依頻道主、管理員、VIP 與全域帳號包含／排除名單篩選 Twitch 聊天，保留最近 100 則／7 天紀錄並支援自動跟隨。
@@ -692,7 +692,7 @@
   }
 
   let panelFramePending = false
-  const TOOLTIP_TEXT = '只看 Broadcaster、Moderator、VIP 與指定用戶'
+  const TOOLTIP_TEXT = '聊天室篩選'
   const TOOLTIP_GAP = 11
   const TOOLTIP_HOVER_GRACE = 100
   let nextTooltipId = 0
@@ -1172,6 +1172,7 @@
   const style = document.createElement('style')
   style.textContent = `
     .ttc-toggle { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 32px; width: 32px; height: 32px; padding: 0; border: 0; border-radius: 50%; color: inherit; background: transparent; cursor: pointer; }
+    .ttc-toggle:not(:last-child) { margin-right: 8px; }
     .ttc-toggle:hover { background: var(--color-background-button-text-hover, #ffffff22); }
     .ttc-toggle:active { background: var(--color-background-button-text-active, #ffffff33); }
     .ttc-toggle[aria-pressed="true"] { color: var(--color-text-link, #bf94ff); background: var(--color-background-button-text-hover, #ffffff22); }

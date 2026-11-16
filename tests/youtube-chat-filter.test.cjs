@@ -1305,6 +1305,8 @@ test('YouTube filters: mount, toggle and remount when Trusted Types rejects HTML
     'live-chat-header-context-menu,yt-chat-tweaks-filter-button,yt-chat-tweaks-sc-button,yt-chat-tweaks-reload-button,close-button')
   assert.equal(state.button.title, undefined)
   assert.equal(header.querySelector('#yt-chat-tweaks-reload-button').title, undefined)
+  const ytStyleText = env.document.head.querySelectorAll('style').map(node => node.textContent).join('\n')
+  assert.match(ytStyleText, /#yt-chat-tweaks-filter-button:hover[\s\S]*--yt-spec-button-chip-background-hover/)
   assert.ok(state.panel.isConnected)
   assert.ok(state.panel.querySelector('.ytcf-targets').querySelector('[name="broadcaster"]'))
   const verifiedOption = state.panel.querySelector('[name="verified"]')

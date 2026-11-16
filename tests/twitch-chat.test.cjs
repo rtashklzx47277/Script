@@ -764,7 +764,7 @@ test('Twitch panel: VIP role checkbox defaults to checked, toggles filtering and
   env.api.setEnabled(state, false)
   assert.equal(state.button.getAttribute('title'), null)
   assert.equal(state.button.getAttribute('aria-describedby'), state.tooltip.id)
-  assert.equal(state.tooltip.textContent.includes('VIP'), true)
+  assert.equal(state.tooltip.textContent, '聊天室篩選')
   env.api.setEnabled(state, true)
   assert.equal(state.button.getAttribute('title'), null)
   assert.equal(state.button.getAttribute('aria-describedby'), null)
@@ -1007,6 +1007,7 @@ test('Twitch toggle button & tooltip: circular style, native-style left tooltip 
   env.window.innerHeight = 720
   const styleText = env.document.head.querySelector('style').textContent
   assert.match(styleText, /\.ttc-toggle\s*\{[^}]*border-radius:\s*50%/)
+  assert.match(styleText, /\.ttc-toggle:not\(:last-child\)\s*\{[^}]*margin-right:\s*8px/)
   assert.match(styleText, /\.ttc-tooltip\s*\{[^}]*overflow:\s*visible/)
 
   const stream = env.document.body.appendChild(new env.Element('div'))
