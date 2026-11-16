@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        Twitch Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.7.4
+// @version     0.7.5
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
 // @description 依頻道主、管理員、VIP 與全域帳號包含／排除名單篩選 Twitch 聊天，保留最近 100 則／7 天紀錄並支援自動跟隨。
@@ -692,6 +692,135 @@
   }
 
   let panelFramePending = false
+  const TOOLTIP_TEXT = '只看 Broadcaster、Moderator、VIP 與指定用戶'
+  const TOOLTIP_GAP = 11
+  const TOOLTIP_HOVER_GRACE = 100
+  let nextTooltipId = 0
+  let openTooltipState = null
+  let tooltipDismissBound = false
+
+  const clamp = (value, min, max) => Math.min(max, Math.max(min, value))
+
+  const bindTooltipDismiss = () => {
+    if (tooltipDismissBound) return
+    tooltipDismissBound = true
+    document.addEventListener('keydown', event => {
+      if (event.key === 'Escape' && openTooltipState) hideTooltip(openTooltipState)
+    })
+  }
+
+  const positionTooltip = state => {
+    const { button, tooltip } = state
+    if (!state.tooltipOpen || typeof button?.getBoundingClientRect !== 'function' ||
+      typeof tooltip?.getBoundingClientRect !== 'function') return
+    const rect = button.getBoundingClientRect()
+    const viewportWidth = typeof window !== 'undefined' && Number.isFinite(window.innerWidth)
+      ? window.innerWidth : (document.documentElement?.clientWidth || 0)
+    const viewportHeight = typeof window !== 'undefined' && Number.isFinite(window.innerHeight)
+      ? window.innerHeight : (document.documentElement?.clientHeight || 0)
+    const placeLeft = rect.left >= 140
+    if (placeLeft) {
+      tooltip.setAttribute('data-placement', 'left')
+      tooltip.style.maxWidth = `${Math.max(120, Math.floor(rect.left - TOOLTIP_GAP - 8))}px`
+    } else {
+      tooltip.setAttribute('data-placement', 'bottom')
+      tooltip.style.maxWidth = viewportWidth > 0 ? `${Math.max(120, Math.floor(viewportWidth - 16))}px` : ''
+    }
+    const tipRect = tooltip.getBoundingClientRect()
+    if (placeLeft) {
+      const left = Math.max(8, Math.round(rect.left - TOOLTIP_GAP - tipRect.width))
+      const rawTop = rect.top + (rect.height - tipRect.height) / 2
+      const top = viewportHeight > 0
+        ? clamp(Math.round(rawTop), 8, Math.max(8, Math.round(viewportHeight - tipRect.height - 8)))
+        : Math.round(rawTop)
+      tooltip.style.left = `${left}px`
+      tooltip.style.top = `${top}px`
+    } else {
+      const rawLeft = rect.left + (rect.width - tipRect.width) / 2
+      const left = viewportWidth > 0
+        ? clamp(Math.round(rawLeft), 8, Math.max(8, Math.round(viewportWidth - tipRect.width - 8)))
+        : Math.round(rawLeft)
+      tooltip.style.left = `${left}px`
+      tooltip.style.top = `${Math.round(rect.bottom + TOOLTIP_GAP)}px`
+    }
+  }
+
+  const ensureTooltip = state => {
+    if (state.tooltip) return state.tooltip
+    const tooltip = element('div', {
+      id: `ttc-tooltip-${++nextTooltipId}`,
+      class: 'ttc-tooltip',
+      role: 'tooltip',
+      popover: 'hint',
+      'data-visible': 'false',
+      'data-placement': 'left',
+    }, [TOOLTIP_TEXT])
+    tooltip.addEventListener('mouseenter', () => {
+      clearTimeout(state.tooltipHideTimer)
+      state.tooltipHideTimer = 0
+    })
+    tooltip.addEventListener('mouseleave', () => {
+      scheduleHideTooltip(state)
+    })
+    ;(document.body || document.documentElement).appendChild(tooltip)
+    state.tooltip = tooltip
+    state.tooltipOpen = false
+    state.tooltipLayerOpen = false
+    state.tooltipFrame = 0
+    state.tooltipHideTimer = 0
+    return tooltip
+  }
+
+  const hideTooltip = state => {
+    clearTimeout(state.tooltipHideTimer)
+    state.tooltipHideTimer = 0
+    if (state.tooltipFrame) {
+      cancelAnimationFrame(state.tooltipFrame)
+      state.tooltipFrame = 0
+    }
+    state.tooltipOpen = false
+    if (openTooltipState === state) openTooltipState = null
+    if (!state.tooltip) return
+    state.tooltip.setAttribute('data-visible', 'false')
+    state.tooltip.style.visibility = ''
+    if (state.tooltipLayerOpen) {
+      try { state.tooltip.hidePopover() } catch (_) {}
+      state.tooltipLayerOpen = false
+    }
+  }
+
+  const scheduleHideTooltip = state => {
+    clearTimeout(state.tooltipHideTimer)
+    state.tooltipHideTimer = setTimeout(() => {
+      state.tooltipHideTimer = 0
+      hideTooltip(state)
+    }, TOOLTIP_HOVER_GRACE)
+  }
+
+  const showTooltip = state => {
+    if (state.history.enabled || state.button?.isConnected === false) return
+    const tooltip = ensureTooltip(state)
+    clearTimeout(state.tooltipHideTimer)
+    state.tooltipHideTimer = 0
+    if (state.tooltipFrame) cancelAnimationFrame(state.tooltipFrame)
+    if (openTooltipState && openTooltipState !== state) hideTooltip(openTooltipState)
+    openTooltipState = state
+    state.tooltipOpen = true
+    bindTooltipDismiss()
+    tooltip.textContent = TOOLTIP_TEXT
+    tooltip.setAttribute('data-visible', 'true')
+    tooltip.style.visibility = 'hidden'
+    if (!state.tooltipLayerOpen && typeof tooltip.showPopover === 'function') {
+      try { tooltip.showPopover(); state.tooltipLayerOpen = true } catch (_) {}
+    }
+    state.tooltipFrame = requestAnimationFrame(() => {
+      state.tooltipFrame = 0
+      if (!state.tooltipOpen || state.history.enabled || state.button?.isConnected === false) return
+      positionTooltip(state)
+      tooltip.style.visibility = ''
+    })
+  }
+
   const positionFilterPanel = state => {
     if (!state.inTopLayer) return
     const rect = state.host.getBoundingClientRect()
@@ -699,11 +828,13 @@
       left: `${rect.left}px`, top: `${rect.top}px`, width: `${rect.width}px`, height: `${rect.height}px` })
   }
   const schedulePanelPosition = () => {
-    if (!mounted?.inTopLayer || panelFramePending) return
+    if ((!mounted?.inTopLayer && !mounted?.tooltipOpen) || panelFramePending) return
     panelFramePending = true
     requestAnimationFrame(() => {
       panelFramePending = false
-      if (mounted) positionFilterPanel(mounted)
+      if (!mounted) return
+      if (mounted.inTopLayer) positionFilterPanel(mounted)
+      if (mounted.tooltipOpen) positionTooltip(mounted)
     })
   }
   const setPanelLayer = (state, enabled) => {
@@ -740,7 +871,14 @@
     state.panel.hidden = !enabled
     setPanelLayer(state, enabled)
     state.button.setAttribute('aria-pressed', String(enabled))
-    state.button.title = enabled ? '' : '只看 Broadcaster、Moderator、VIP 與指定用戶'
+    state.button.removeAttribute('title')
+    const tooltip = ensureTooltip(state)
+    if (enabled) {
+      state.button.removeAttribute('aria-describedby')
+      hideTooltip(state)
+    } else {
+      state.button.setAttribute('aria-describedby', tooltip.id)
+    }
     if (enabled) renderMessages(state, true)
   }
 
@@ -956,11 +1094,13 @@
 
   const unmount = () => {
     if (!mounted) return
+    hideTooltip(mounted)
     releaseMessageViews(mounted)
     setPanelLayer(mounted, false)
     clearTimeout(mounted.statusTimer)
     mounted.observer.disconnect()
     mounted.button.remove()
+    mounted.tooltip?.remove()
     mounted.panel.remove()
     mounted.host.classList.remove('ttc-host', 'ttc-active')
     mounted.scroller.classList.remove('ttc-source')
@@ -984,7 +1124,7 @@
       'aria-label': '切換指定用戶聊天室',
     }, [
       svgElement('svg', { width: '20', height: '20', viewBox: '0 0 24 24', 'aria-hidden': 'true' }, [
-        svgElement('path', { fill: 'currentColor', d: 'M3 4h18v2l-7 8v6l-4 2v-8L3 6V4zm3 2 6 7 6-7H6z' }),
+        svgElement('path', { fill: 'currentColor', d: 'M3 3h18v2l-7 8v6l-4 2v-8L3 5V3zm3 2 6 7 6-7H6z' }),
       ]),
     ])
     button.type = 'button'
@@ -994,6 +1134,10 @@
     if (actions && header.contains(actions)) actions.insertBefore(button, community.parentElement)
     else header.appendChild(button)
     button.addEventListener('click', () => setEnabled(state, !state.history.enabled))
+    button.addEventListener('mouseenter', () => showTooltip(state))
+    button.addEventListener('mouseleave', () => scheduleHideTooltip(state))
+    button.addEventListener('focus', () => showTooltip(state))
+    button.addEventListener('blur', () => hideTooltip(state))
     createPanel(state)
     captureTree(scroller, state.history)
     state.observer = new MutationObserver(mutations => {
@@ -1027,10 +1171,15 @@
 
   const style = document.createElement('style')
   style.textContent = `
-    .ttc-toggle { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 32px; width: 32px; height: 32px; padding: 4px; border: 0; border-radius: 4px; color: inherit; background: transparent; cursor: pointer; }
+    .ttc-toggle { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 32px; width: 32px; height: 32px; padding: 0; border: 0; border-radius: 50%; color: inherit; background: transparent; cursor: pointer; }
     .ttc-toggle:hover { background: var(--color-background-button-text-hover, #ffffff22); }
+    .ttc-toggle:active { background: var(--color-background-button-text-active, #ffffff33); }
     .ttc-toggle[aria-pressed="true"] { color: var(--color-text-link, #bf94ff); background: var(--color-background-button-text-hover, #ffffff22); }
     .ttc-toggle:focus-visible, .ttc-panel button:focus-visible, .ttc-panel input:focus-visible { outline: 2px solid #9147ff; outline-offset: -2px; }
+    .ttc-tooltip { position: fixed; inset: auto; z-index: 2147483647; display: none; overflow: visible; box-sizing: border-box; width: max-content; min-height: 27.6px; margin: 0; padding: 4px 8px; border: 0; border-radius: 4px; color: var(--color-text-tooltip, #0e0e10); background: var(--color-background-tooltip, #ffffff); font-family: Inter, "Noto Sans Arabic", Roobert, "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 14px; font-weight: 600; line-height: 19.6px; overflow-wrap: break-word; pointer-events: none; }
+    .ttc-tooltip::after { position: absolute; top: 50%; right: -4px; width: 8px; height: 8px; background: inherit; content: ''; transform: translateY(-50%) rotate(45deg); }
+    .ttc-tooltip[data-placement="bottom"]::after { top: -4px; right: auto; left: 50%; transform: translateX(-50%) rotate(45deg); }
+    .ttc-tooltip[data-visible="true"] { display: inline-block; pointer-events: auto; }
     .ttc-host { position: relative; }
     .ttc-active > .ttc-source { visibility: hidden; pointer-events: none; }
     .ttc-panel { position: absolute; inset: 0; z-index: 2147483647; display: flex; flex-direction: column; box-sizing: border-box; min-height: 0; max-width: none; max-height: none; margin: 0; padding: 0; border: 0; color: var(--color-text-base, #efeff1); background: var(--color-background-base, #18181b); font-size: 13px; }
@@ -1092,7 +1241,7 @@
       mounted.scroller.isConnected && getChannel() === mounted.history.channel) return
     if (mutations.some(mutation => {
       const element = mutation.target.nodeType === 1 ? mutation.target : mutation.target.parentElement
-      return !element?.closest('.ttc-panel, .ttc-toggle, [data-a-target="chat-scroller"]')
+      return !element?.closest('.ttc-panel, .ttc-toggle, .ttc-tooltip, [data-a-target="chat-scroller"]')
     })) scheduleRefresh()
   })
   observer.observe(document.body, { childList: true, subtree: true })

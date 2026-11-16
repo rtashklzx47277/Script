@@ -211,7 +211,7 @@ function boot({ saved, blocked = false, trustedTypes = false, withResizeObserver
     body.textContent = text
     return { line, body, authorContainer }
   }
-  return { api: context.api, message, Element, storage, timers, frames, observers, document, location: context.location, listeners,
+  return { api: context.api, message, Element, storage, timers, frames, observers, document, window: context.window, location: context.location, listeners,
     flushFrames() { const pending = [...frames.values()]; frames.clear(); for (const fn of pending) fn() } }
 }
 
@@ -762,9 +762,13 @@ test('Twitch panel: VIP role checkbox defaults to checked, toggles filtering and
   env.api.setMounted(state)
   env.api.captureTree(scroller, history)
   env.api.setEnabled(state, false)
-  assert.equal(state.button.title.includes('VIP'), true)
+  assert.equal(state.button.getAttribute('title'), null)
+  assert.equal(state.button.getAttribute('aria-describedby'), state.tooltip.id)
+  assert.equal(state.tooltip.textContent.includes('VIP'), true)
   env.api.setEnabled(state, true)
-  assert.equal(state.button.title, '')
+  assert.equal(state.button.getAttribute('title'), null)
+  assert.equal(state.button.getAttribute('aria-describedby'), null)
+  assert.equal(state.tooltip.getAttribute('data-visible'), 'false')
   const vipCheckbox = state.panel.querySelector('[name="vip"]')
   assert.equal(vipCheckbox.checked, true)
   assert.equal(state.count.textContent, '1 則')
@@ -995,4 +999,87 @@ test('Twitch accessibility, visibilitychange merge, and restoreHistory 50ms sche
   envErr.api.refresh()
   await envErr.api.mounted.history.restorePromise
   assert.equal(envErr.api.mounted.panel.querySelector('.ttc-history-status').getAttribute('role'), 'status')
+})
+
+test('Twitch toggle button & tooltip: circular style, native-style left tooltip with popover, hover bridge, Escape, and blur', () => {
+  const env = boot({ trustedTypes: true })
+  env.window.innerWidth = 1280
+  env.window.innerHeight = 720
+  const styleText = env.document.head.querySelector('style').textContent
+  assert.match(styleText, /\.ttc-toggle\s*\{[^}]*border-radius:\s*50%/)
+  assert.match(styleText, /\.ttc-tooltip\s*\{[^}]*overflow:\s*visible/)
+
+  const stream = env.document.body.appendChild(new env.Element('div'))
+  stream.className = 'stream-chat'
+  const header = stream.appendChild(new env.Element('div'))
+  header.className = 'stream-chat-header'
+  const host = stream.appendChild(new env.Element('div'))
+  const scroller = host.appendChild(new env.Element('div'))
+  scroller.setAttribute('data-a-target', 'chat-scroller')
+
+  env.api.refresh()
+  const state = env.api.mounted
+  const { button, tooltip } = state
+  assert.equal(button.getAttribute('title'), null)
+  assert.equal(tooltip.getAttribute('role'), 'tooltip')
+  assert.equal(tooltip.getAttribute('popover'), 'hint')
+  assert.equal(button.getAttribute('aria-describedby'), tooltip.id)
+
+  let popoverOpens = 0
+  let popoverCloses = 0
+  tooltip.showPopover = () => { popoverOpens++ }
+  tooltip.hidePopover = () => { popoverCloses++ }
+  button.getBoundingClientRect = () => ({ left: 1180, top: 60, width: 32, height: 32, right: 1212, bottom: 92 })
+  tooltip.getBoundingClientRect = () => ({ left: 0, top: 0, width: 240, height: 28, right: 240, bottom: 28 })
+
+  button.listeners.get('mouseenter')()
+  assert.equal(popoverOpens, 1)
+  assert.equal(tooltip.getAttribute('data-visible'), 'true')
+  env.flushFrames()
+  assert.equal(tooltip.getAttribute('data-placement'), 'left')
+  assert.equal(tooltip.style.left, '929px')
+  assert.equal(tooltip.style.top, '62px')
+  assert.equal(tooltip.style.visibility, '')
+
+  button.listeners.get('mouseleave')()
+  tooltip.listeners.get('mouseenter')()
+  for (const [id, timer] of [...env.timers.entries()]) {
+    if (timer.delay === 100) { env.timers.delete(id); timer.fn() }
+  }
+  assert.equal(tooltip.getAttribute('data-visible'), 'true')
+
+  tooltip.listeners.get('mouseleave')()
+  for (const [id, timer] of [...env.timers.entries()]) {
+    if (timer.delay === 100) { env.timers.delete(id); timer.fn() }
+  }
+  assert.equal(tooltip.getAttribute('data-visible'), 'false')
+  assert.equal(popoverCloses, 1)
+
+  button.listeners.get('focus')()
+  assert.equal(tooltip.getAttribute('data-visible'), 'true')
+  env.document.listeners.get('keydown')({ key: 'Escape' })
+  assert.equal(tooltip.getAttribute('data-visible'), 'false')
+  assert.equal(popoverCloses, 2)
+
+  button.listeners.get('focus')()
+  assert.equal(tooltip.getAttribute('data-visible'), 'true')
+  button.listeners.get('blur')()
+  assert.equal(tooltip.getAttribute('data-visible'), 'false')
+
+  button.getBoundingClientRect = () => ({ left: 80, top: 60, width: 32, height: 32, right: 112, bottom: 92 })
+  button.listeners.get('mouseenter')()
+  env.flushFrames()
+  assert.equal(tooltip.getAttribute('data-placement'), 'bottom')
+  assert.equal(tooltip.style.top, '103px')
+
+  env.api.setEnabled(state, true)
+  assert.equal(button.getAttribute('aria-describedby'), null)
+  assert.equal(tooltip.getAttribute('data-visible'), 'false')
+
+  env.api.setEnabled(state, false)
+  assert.equal(button.getAttribute('aria-describedby'), tooltip.id)
+  button.listeners.get('mouseenter')()
+  env.api.unmount()
+  assert.equal(tooltip.parentElement, null)
+  assert.equal(popoverCloses, 5)
 })
