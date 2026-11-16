@@ -1103,8 +1103,30 @@ test('Twitch toggle button & tooltip: circular style, native-style left tooltip 
   assert.equal(popoverCloses, 5)
 })
 
-test('Twitch message search: match user, display name, body, emotes and multi-word NFKC queries, update live, and locate in full history', () => {
-  const env = boot()
+test('Twitch message search: preserve both display name and login ID, match multi-word NFKC and emotes, and update live without locate', async () => {
+  const database = fakeIndexedDB()
+  const seed = boot({ database })
+  const seedHistory = seed.api.getHistory('sample_channel')
+  await seedHistory.restorePromise
+  const localized = seed.message('tommy181933', 'ＨＥＬＬＯ ＷＯＲＬＤ', 'Moderator', 's-1')
+  localized.line.querySelector('[data-a-target="chat-message-username"]').textContent = '偷米'
+  const emote = localized.body.appendChild(new seed.Element('img'))
+  emote.setAttribute('alt', 'Kappa')
+  const alreadyCombined = seed.message('alice_mod', 'combined label', 'Moderator', 's-2')
+  alreadyCombined.line.querySelector('[data-a-target="chat-message-username"]').textContent = '愛麗絲 (alice_mod)'
+  const sameName = seed.message('bob_vip', 'another message', 'VIP', 's-3')
+  sameName.line.querySelector('[data-a-target="chat-message-username"]').textContent = 'Bob_VIP'
+
+  seed.api.captureLine(localized.line, seedHistory)
+  seed.api.captureLine(alreadyCombined.line, seedHistory)
+  await seed.api.flushHistory(seedHistory)
+
+  // Verify legacy archived tree with display-name-only <strong> also restores both display name and ID
+  const legacyKey = JSON.stringify(['sample_channel', 's-1'])
+  const archived = database.records.get(legacyKey)
+  archived.tree.children[2].children[0].text = '偷米'
+
+  const env = boot({ database })
   const stream = env.document.body.appendChild(new env.Element('div'))
   stream.className = 'stream-chat'
   const header = stream.appendChild(new env.Element('div'))
@@ -1112,20 +1134,17 @@ test('Twitch message search: match user, display name, body, emotes and multi-wo
   const host = stream.appendChild(new env.Element('div'))
   const scroller = host.appendChild(new env.Element('div'))
   scroller.setAttribute('data-a-target', 'chat-scroller')
-
-  const first = env.message('alice_mod', 'ＨＥＬＬＯ ＷＯＲＬＤ', 'Moderator', 's-1')
-  const emote = first.body.appendChild(new env.Element('img'))
-  emote.setAttribute('alt', 'Kappa')
-  const second = env.message('bob_vip', 'another message', 'VIP', 's-2')
-  const third = env.message('carol_mod', 'later talk', 'Moderator', 's-3')
-  scroller.appendChild(first.line)
-  scroller.appendChild(second.line)
-  scroller.appendChild(third.line)
+  scroller.appendChild(env.message('bob_vip', 'another message', 'VIP', 's-3').line)
+  scroller.querySelector('[data-a-target="chat-message-username"]').textContent = 'Bob_VIP'
 
   env.api.refresh()
   const state = env.api.mounted
+  await state.history.restorePromise
   env.api.setEnabled(state, true)
   assert.equal(state.count.textContent, '3 則')
+  assert.equal(state.list.children[0].querySelector('strong').textContent, '偷米 (tommy181933)')
+  assert.equal(state.list.children[1].querySelector('strong').textContent, '愛麗絲 (alice_mod)')
+  assert.equal(state.list.children[2].querySelector('strong').textContent, 'Bob_VIP')
 
   // Expanding target management hides message search; collapsing restores it
   const targetBtn = state.panel.querySelector('.ttc-target-summary')
@@ -1134,48 +1153,30 @@ test('Twitch message search: match user, display name, body, emotes and multi-wo
   targetBtn.listeners.get('click')()
   assert.equal(state.panel.querySelector('.ttc-message-search').hidden, false)
 
-  // Search by full-width multi-word + emote alt + login
-  state.messageSearch.value = 'alice_mod  hello kappa'
+  // Search by display name + login ID + full-width multi-word + emote alt (no locate button)
+  state.messageSearch.value = '偷米 tommy181933 hello kappa'
   state.messageSearch.listeners.get('input')()
   assert.equal(state.count.textContent, '1 則符合')
   assert.equal(state.list.children.length, 1)
-  const locateBtn = state.list.children[0].querySelector('.ttc-locate')
-  assert.ok(locateBtn)
-  assert.equal(JSON.stringify(env.api.archiveTree(state.list.children[0])).includes('ttc-locate'), false)
+  assert.equal(state.list.querySelector('.ttc-locate'), null)
 
   // Live edit clears cached search text and updates active search results
-  first.body.innerHTML = 'edited away'
-  first.body.textContent = 'edited away'
-  env.api.captureMutations([{ target: first.body, addedNodes: [] }], state.history)
-  env.api.scheduleMessageRender(state)
-  env.flushFrames()
-  assert.equal(state.count.textContent, '0 則符合')
-  assert.equal(state.empty.hidden, false)
-  assert.equal(state.empty.textContent, '找不到符合搜尋的聊天訊息。')
-
-  // Search again for bob_vip and locate in full list
-  state.messageSearch.value = 'bob_vip'
+  const liveMsg = env.message('tommy181933', 'before edit', 'Moderator', 's-4')
+  liveMsg.line.querySelector('[data-a-target="chat-message-username"]').textContent = '偷米'
+  scroller.appendChild(liveMsg.line)
+  env.api.captureMutations([{ target: scroller, addedNodes: [liveMsg.line] }], state.history)
+  liveMsg.body.innerHTML = 'edited kappa'
+  liveMsg.body.textContent = 'edited kappa'
+  env.api.captureMutations([{ target: liveMsg.body, addedNodes: [] }], state.history)
+  state.messageSearch.value = '偷米 edited'
   state.messageSearch.listeners.get('input')()
   assert.equal(state.count.textContent, '1 則符合')
-  const bobView = state.list.children[0]
-  bobView.getBoundingClientRect = () => ({ top: 180, height: 30 })
-  state.list.getBoundingClientRect = () => ({ top: 100, height: 200 })
-  state.list.clientHeight = 200
-  state.list.scrollTop = 0
-  bobView.querySelector('.ttc-locate').listeners.get('click')()
+  assert.equal(state.list.children[0].querySelector('strong').textContent, '偷米 (tommy181933)')
 
-  assert.equal(state.history.search, '')
-  assert.equal(state.messageSearch.value, '')
-  assert.equal(state.history.follow, false)
-  assert.equal(state.count.textContent, '3 則')
+  // Clear search restores full filtered list without locate UI
+  state.messageSearch.value = ''
+  state.messageSearch.listeners.get('input')()
+  assert.equal(state.count.textContent, '4 則')
   assert.equal(state.list.querySelector('.ttc-locate'), null)
-  assert.equal(bobView.getAttribute('data-ttc-located'), 'true')
-  assert.equal(bobView.getAttribute('tabindex'), '-1')
-  assert.equal(state.list.scrollTop, 0)
-  for (const [id, timer] of [...env.timers.entries()]) {
-    if (timer.delay === 3000) { env.timers.delete(id); timer.fn() }
-  }
-  assert.equal(bobView.getAttribute('data-ttc-located'), null)
-  assert.equal(bobView.getAttribute('tabindex'), null)
   env.api.unmount()
 })

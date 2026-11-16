@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name        Twitch Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.7.8
+// @version     0.7.9
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
-// @description 依頻道主、管理員、VIP 與全域帳號包含／排除名單篩選 Twitch 聊天，保留最近 1000 則／7 天紀錄，支援搜尋、定位與自動跟隨。
+// @description 依頻道主、管理員、VIP 與全域帳號包含／排除名單篩選 Twitch 聊天，保留最近 1000 則／7 天紀錄，支援搜尋與自動跟隨。
 // @author      Derek
 // @match       *://www.twitch.tv/*
 // @run-at      document-idle
@@ -196,7 +196,7 @@
   const archiveTree = (node, depth = 0) => {
     if (depth > 20) return null
     if (node.nodeType === 3 || node.tagName === '#text') return { text: node.textContent }
-    if (node.nodeType !== 1 || node.matches?.('.ttc-locate')) return null
+    if (node.nodeType !== 1) return null
     const tag = (node.localName || node.tagName).toLowerCase()
     if (['script', 'style', 'iframe', 'object', 'embed', 'input'].includes(tag)) return null
     return { tag: ARCHIVE_TAGS.has(tag) ? tag : 'span',
@@ -273,11 +273,21 @@
     typeof saved.user === 'string' && /^[a-z0-9_]{1,25}$/.test(saved.user) &&
     Number.isFinite(saved.createdAt) && saved.createdAt <= Date.now() && saved.createdAt + RETENTION_MS > Date.now() &&
     saved.tree && typeof saved.tree === 'object'
+  const formatAuthorLabel = (displayName, user) => {
+    const name = String(displayName || '').replace(/\s+/g, ' ').trim()
+    if (!name) return user || ''
+    if (!user) return name
+    const lower = name.toLowerCase()
+    if (lower === user || lower.includes(`(${user})`)) return name
+    return `${name} (${user})`
+  }
   const restoreRecord = saved => {
     if (saved.tree?.tag !== 'div') return null
     const view = restoreTree(saved.tree)
     if (!view || view.firstChild?.tagName?.toLowerCase() !== 'time') return null
     view.className = 'ttc-message'
+    const authorNode = [...view.children].find(child => child.tagName?.toLowerCase() === 'strong')
+    if (authorNode) authorNode.textContent = formatAuthorLabel(authorNode.textContent, saved.user)
     return { id: saved.id, storageId: saved.storageId, user: saved.user, createdAt: saved.createdAt,
       order: Number.isSafeInteger(saved.order) ? saved.order : 0,
       moderator: saved.moderator === true, broadcaster: saved.broadcaster === true, vip: saved.vip === true,
@@ -389,7 +399,6 @@
           record._searchText = ''
           restored.push(record)
           if (record.id) history.ids.set(record.id, record)
-          history.byStorageId.set(record.storageId, record)
           history.dirty.add(record)
         }
         if (nowMs() >= deadline) {
@@ -429,7 +438,7 @@
     if (!history) {
       history = {
         channel, settings: loadSettings(channel), messages: [], nodes: new WeakMap(),
-        scope: channel, ids: new Map(), byStorageId: new Map(), saveQueue: new Map(), deleteQueue: new Set(),
+        scope: channel, ids: new Map(), saveQueue: new Map(), deleteQueue: new Set(),
         archiveReady: false, archiveError: false,
         enabled: false, follow: true, search: '', dirty: new Set(), removed: new Set(),
       }
@@ -492,7 +501,7 @@
       row.appendChild(copy)
     }
     const author = document.createElement('strong')
-    author.textContent = message.author.textContent
+    author.textContent = formatAuthorLabel(message.author.textContent, message.user)
     author.style.color = message.author.style.color
     row.appendChild(author)
     row.appendChild(document.createTextNode(': '))
@@ -533,7 +542,6 @@
         storageId: message.id || `${pageKey}-${++anonymousMessage}`,
         createdAt: Date.now(), order: ++messageOrder }
       history.messages.push(record)
-      history.byStorageId.set(record.storageId, record)
       trimHistory(history)
     }
     history.nodes.set(line, record)
@@ -549,7 +557,6 @@
     record._searchText = ''
     history.dirty.delete(record)
     if (record.id && history.ids?.get(record.id) === record) history.ids.delete(record.id)
-    if (history.byStorageId?.get(record.storageId) === record) history.byStorageId.delete(record.storageId)
     if (record.renderedView) history.removed.add(record)
   }
 
@@ -610,7 +617,7 @@
     const text = normalizeSearch([
       record.user,
       ...[...record.view.childNodes]
-        .filter(node => !node.matches?.('.ttc-locate, .ttc-time'))
+        .filter(node => !node.matches?.('.ttc-time'))
         .map(node => node.textContent),
       ...$$('img', record.view).map(image => image.getAttribute('alt') || ''),
     ].join(' '))
@@ -625,44 +632,6 @@
     }
     record.renderedView = null
     record.visible = false
-  }
-  const clearLocatedRecord = state => {
-    clearTimeout(state.locationTimer)
-    state.locatedView?.removeAttribute('data-ttc-located')
-    state.locatedView?.removeAttribute('tabindex')
-    state.locatedView = null
-    state.locationTimer = 0
-  }
-  const locateRecord = (state, storageId) => {
-    const { history, list } = state
-    if (!history.enabled) return false
-    const record = history.byStorageId?.get(storageId) ||
-      history.messages.find(row => row.storageId === storageId)
-    if (!record || !record.retained || !matchesFilter(record, history.settings) ||
-      record.createdAt + RETENTION_MS <= Date.now()) return false
-    history.search = ''
-    if (state.messageSearch) state.messageSearch.value = ''
-    history.follow = false
-    state.readerScrollIntent = false
-    renderMessages(state, true)
-    clearLocatedRecord(state)
-    const view = record.view
-    state.locatedView = view
-    view.setAttribute('data-ttc-located', 'true')
-    view.setAttribute('tabindex', '-1')
-    if (typeof view.focus === 'function') view.focus({ preventScroll: true })
-    if (typeof view.getBoundingClientRect === 'function' && typeof list.getBoundingClientRect === 'function') {
-      const rowBounds = view.getBoundingClientRect()
-      const listBounds = list.getBoundingClientRect()
-      list.scrollTop = Math.max(0, list.scrollTop + rowBounds.top - listBounds.top - (list.clientHeight - rowBounds.height) / 2)
-    }
-    state.locationTimer = setTimeout(() => {
-      view.removeAttribute('data-ttc-located')
-      view.removeAttribute('tabindex')
-      if (state.locatedView === view) state.locatedView = null
-      state.locationTimer = 0
-    }, 3000)
-    return true
   }
   const renderMessageSearch = (state, query) => {
     const { history, list, empty, count, latest } = state
@@ -686,15 +655,6 @@
         record.renderedView.remove()
       }
       view.hidden = false
-      if (!$('.ttc-locate', view)) {
-        const locate = element('button', {
-          type: 'button',
-          class: 'ttc-locate',
-          'aria-label': '在完整篩選紀錄中定位這則訊息',
-        }, ['定位'])
-        locate.addEventListener('click', () => locateRecord(state, record.storageId))
-        view.appendChild(locate)
-      }
       const existing = list.children[index++]
       if (existing !== view) {
         if (existing) list.insertBefore(view, existing)
@@ -798,12 +758,10 @@
   }
 
   const releaseMessageViews = state => {
-    clearLocatedRecord(state)
     state.messageResizeObserver?.disconnect()
     cancelListFollow(state)
     cancelMessageRender(state)
     for (const record of new Set([...state.history.messages, ...state.history.removed, ...(state.searchShown || [])])) {
-      if (record.view) $('.ttc-locate', record.view)?.remove()
       record.renderedView?.remove()
       record.renderedView = null
       record.visible = false
@@ -1015,8 +973,6 @@
     if (enabled) {
       if (state.messageSearch) state.messageSearch.value = state.history.search || ''
       renderMessages(state, true)
-    } else {
-      clearLocatedRecord(state)
     }
   }
 
@@ -1163,7 +1119,6 @@
     state.messageSearch = $('[name="search-messages"]', panel)
     state.messageSearch.value = state.history.search || ''
     state.messageSearch.addEventListener('input', () => {
-      clearLocatedRecord(state)
       state.history.search = state.messageSearch.value
       state.readerScrollIntent = false
       state.history.follow = true
@@ -1368,14 +1323,10 @@
     @media (prefers-contrast: more) {
       .ttc-list, .ttc-target-list, .ttc-managing > .ttc-toolbar { --ttc-scrollbar-thumb: #ffffff; --ttc-scrollbar-track: #000000; }
       .ttc-toggle:focus-visible, .ttc-panel button:focus-visible, .ttc-panel input:focus-visible { outline: 2px solid currentColor; }
-      .ttc-message[data-ttc-located] { outline-color: currentColor; }
     }
     .ttc-list { flex: 1; min-height: 0; overflow: auto; overflow-anchor: none; padding: 6px 0; }
     .ttc-message { padding: 5px 10px; overflow-wrap: anywhere; line-height: 1.6; content-visibility: auto; contain-intrinsic-size: auto none auto 30px; }
     .ttc-message:hover { background: var(--color-background-button-text-hover, #ffffff11); }
-    .ttc-message:has(> .ttc-locate) { position: relative; padding-right: 58px; }
-    .ttc-panel .ttc-locate { position: absolute; top: 5px; right: 6px; padding: 2px 6px; border: 1px solid currentColor; color: inherit; background: transparent; font: inherit; font-size: 11px; }
-    .ttc-message[data-ttc-located] { outline: 2px solid #ffb300; outline-offset: -2px; box-shadow: inset 0 0 0 4px #0008; }
     .ttc-time { margin-right: 6px; color: var(--color-text-alt-2, #adadb8); font-size: 10px; }
     .ttc-message > img { width: 18px; height: 18px; margin-right: 3px; vertical-align: middle; }
     .ttc-message .chat-image { max-height: 28px; vertical-align: middle; }
