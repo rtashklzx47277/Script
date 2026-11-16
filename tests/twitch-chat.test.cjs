@@ -110,6 +110,15 @@ function boot({ saved, blocked = false, trustedTypes = false, withResizeObserver
       child.parentElement = this
       return child
     }
+    insertBefore(child, reference) {
+      if (!reference) return this.appendChild(child)
+      child.remove()
+      const index = this.children.indexOf(reference)
+      if (index === -1) this.children.push(child)
+      else this.children.splice(index, 0, child)
+      child.parentElement = this
+      return child
+    }
     remove() {
       if (this.parentElement) {
         this.parentElement.children = this.parentElement.children.filter(child => child !== this)
@@ -926,14 +935,15 @@ test('Twitch accessibility, visibilitychange merge, and restoreHistory 50ms sche
     ['VIP', 'ttc-role-vip'],
     ['新增帳號', 'ttc-input-users'],
     ['搜尋帳號', 'ttc-input-search-users'],
+    ['搜尋聊天紀錄', 'ttc-input-search-messages'],
   ]) {
     const label = panel.querySelectorAll('label').find(node => node.textContent === labelText)
     assert.ok(label, `missing label ${labelText}`)
     assert.equal(label.getAttribute('for'), inputId)
     assert.equal(panel.querySelector(`#${inputId}`)?.tagName, 'input')
   }
-  assert.equal(panel.querySelectorAll('search').length, 1)
-  for (const name of ['users', 'search-users']) {
+  assert.equal(panel.querySelectorAll('search').length, 2)
+  for (const name of ['users', 'search-users', 'search-messages']) {
     const input = panel.querySelector(`[name="${name}"]`)
     assert.equal(input.getAttribute('autocorrect'), 'off')
     assert.equal(input.getAttribute('autocapitalize'), 'none')
@@ -1091,4 +1101,81 @@ test('Twitch toggle button & tooltip: circular style, native-style left tooltip 
   env.api.unmount()
   assert.equal(tooltip.parentElement, null)
   assert.equal(popoverCloses, 5)
+})
+
+test('Twitch message search: match user, display name, body, emotes and multi-word NFKC queries, update live, and locate in full history', () => {
+  const env = boot()
+  const stream = env.document.body.appendChild(new env.Element('div'))
+  stream.className = 'stream-chat'
+  const header = stream.appendChild(new env.Element('div'))
+  header.className = 'stream-chat-header'
+  const host = stream.appendChild(new env.Element('div'))
+  const scroller = host.appendChild(new env.Element('div'))
+  scroller.setAttribute('data-a-target', 'chat-scroller')
+
+  const first = env.message('alice_mod', 'ＨＥＬＬＯ ＷＯＲＬＤ', 'Moderator', 's-1')
+  const emote = first.body.appendChild(new env.Element('img'))
+  emote.setAttribute('alt', 'Kappa')
+  const second = env.message('bob_vip', 'another message', 'VIP', 's-2')
+  const third = env.message('carol_mod', 'later talk', 'Moderator', 's-3')
+  scroller.appendChild(first.line)
+  scroller.appendChild(second.line)
+  scroller.appendChild(third.line)
+
+  env.api.refresh()
+  const state = env.api.mounted
+  env.api.setEnabled(state, true)
+  assert.equal(state.count.textContent, '3 則')
+
+  // Expanding target management hides message search; collapsing restores it
+  const targetBtn = state.panel.querySelector('.ttc-target-summary')
+  targetBtn.listeners.get('click')()
+  assert.equal(state.panel.querySelector('.ttc-message-search').hidden, true)
+  targetBtn.listeners.get('click')()
+  assert.equal(state.panel.querySelector('.ttc-message-search').hidden, false)
+
+  // Search by full-width multi-word + emote alt + login
+  state.messageSearch.value = 'alice_mod  hello kappa'
+  state.messageSearch.listeners.get('input')()
+  assert.equal(state.count.textContent, '1 則符合')
+  assert.equal(state.list.children.length, 1)
+  const locateBtn = state.list.children[0].querySelector('.ttc-locate')
+  assert.ok(locateBtn)
+  assert.equal(JSON.stringify(env.api.archiveTree(state.list.children[0])).includes('ttc-locate'), false)
+
+  // Live edit clears cached search text and updates active search results
+  first.body.innerHTML = 'edited away'
+  first.body.textContent = 'edited away'
+  env.api.captureMutations([{ target: first.body, addedNodes: [] }], state.history)
+  env.api.scheduleMessageRender(state)
+  env.flushFrames()
+  assert.equal(state.count.textContent, '0 則符合')
+  assert.equal(state.empty.hidden, false)
+  assert.equal(state.empty.textContent, '找不到符合搜尋的聊天訊息。')
+
+  // Search again for bob_vip and locate in full list
+  state.messageSearch.value = 'bob_vip'
+  state.messageSearch.listeners.get('input')()
+  assert.equal(state.count.textContent, '1 則符合')
+  const bobView = state.list.children[0]
+  bobView.getBoundingClientRect = () => ({ top: 180, height: 30 })
+  state.list.getBoundingClientRect = () => ({ top: 100, height: 200 })
+  state.list.clientHeight = 200
+  state.list.scrollTop = 0
+  bobView.querySelector('.ttc-locate').listeners.get('click')()
+
+  assert.equal(state.history.search, '')
+  assert.equal(state.messageSearch.value, '')
+  assert.equal(state.history.follow, false)
+  assert.equal(state.count.textContent, '3 則')
+  assert.equal(state.list.querySelector('.ttc-locate'), null)
+  assert.equal(bobView.getAttribute('data-ttc-located'), 'true')
+  assert.equal(bobView.getAttribute('tabindex'), '-1')
+  assert.equal(state.list.scrollTop, 0)
+  for (const [id, timer] of [...env.timers.entries()]) {
+    if (timer.delay === 3000) { env.timers.delete(id); timer.fn() }
+  }
+  assert.equal(bobView.getAttribute('data-ttc-located'), null)
+  assert.equal(bobView.getAttribute('tabindex'), null)
+  env.api.unmount()
 })

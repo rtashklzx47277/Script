@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name        Twitch Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.7.7
+// @version     0.7.8
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
-// @description 依頻道主、管理員、VIP 與全域帳號包含／排除名單篩選 Twitch 聊天，保留最近 1000 則／7 天紀錄並支援自動跟隨。
+// @description 依頻道主、管理員、VIP 與全域帳號包含／排除名單篩選 Twitch 聊天，保留最近 1000 則／7 天紀錄，支援搜尋、定位與自動跟隨。
 // @author      Derek
 // @match       *://www.twitch.tv/*
 // @run-at      document-idle
@@ -196,7 +196,7 @@
   const archiveTree = (node, depth = 0) => {
     if (depth > 20) return null
     if (node.nodeType === 3 || node.tagName === '#text') return { text: node.textContent }
-    if (node.nodeType !== 1) return null
+    if (node.nodeType !== 1 || node.matches?.('.ttc-locate')) return null
     const tag = (node.localName || node.tagName).toLowerCase()
     if (['script', 'style', 'iframe', 'object', 'embed', 'input'].includes(tag)) return null
     return { tag: ARCHIVE_TAGS.has(tag) ? tag : 'span',
@@ -381,12 +381,15 @@
           current.createdAt = Math.min(current.createdAt, item.createdAt)
           current.order = Number.isSafeInteger(item.order) ? item.order : current.order
           current.view.firstChild.textContent = restoreTree(item.tree)?.firstChild?.textContent || current.view.firstChild.textContent
+          current._searchText = ''
           saveRecord(history, current)
         } else {
           const record = restoreRecord(item)
           if (!record) continue
+          record._searchText = ''
           restored.push(record)
           if (record.id) history.ids.set(record.id, record)
+          history.byStorageId.set(record.storageId, record)
           history.dirty.add(record)
         }
         if (nowMs() >= deadline) {
@@ -426,9 +429,9 @@
     if (!history) {
       history = {
         channel, settings: loadSettings(channel), messages: [], nodes: new WeakMap(),
-        scope: channel, ids: new Map(), saveQueue: new Map(), deleteQueue: new Set(),
+        scope: channel, ids: new Map(), byStorageId: new Map(), saveQueue: new Map(), deleteQueue: new Set(),
         archiveReady: false, archiveError: false,
-        enabled: false, follow: true, dirty: new Set(), removed: new Set(),
+        enabled: false, follow: true, search: '', dirty: new Set(), removed: new Set(),
       }
       history.restorePromise = restoreHistory(history)
     }
@@ -523,13 +526,14 @@
       // Reflect edits/deletion placeholders while the original line is still present.
       view.firstChild.textContent = previous.view.firstChild.textContent
       record = Object.assign(previous, { moderator: message.moderator,
-        broadcaster: message.broadcaster, vip: message.vip, view, fingerprint })
+        broadcaster: message.broadcaster, vip: message.vip, _searchText: '', view, fingerprint })
     } else {
       record = { id: message.id, user: message.user, moderator: message.moderator,
-        broadcaster: message.broadcaster, vip: message.vip, view, fingerprint, retained: true,
+        broadcaster: message.broadcaster, vip: message.vip, _searchText: '', view, fingerprint, retained: true,
         storageId: message.id || `${pageKey}-${++anonymousMessage}`,
         createdAt: Date.now(), order: ++messageOrder }
       history.messages.push(record)
+      history.byStorageId.set(record.storageId, record)
       trimHistory(history)
     }
     history.nodes.set(line, record)
@@ -542,8 +546,10 @@
   // Keep these collection/render helpers in sync across both chat scripts.
   const forgetRecord = (history, record) => {
     record.retained = false
+    record._searchText = ''
     history.dirty.delete(record)
     if (record.id && history.ids?.get(record.id) === record) history.ids.delete(record.id)
+    if (history.byStorageId?.get(record.storageId) === record) history.byStorageId.delete(record.storageId)
     if (record.renderedView) history.removed.add(record)
   }
 
@@ -598,10 +604,131 @@
     })
   }
 
+  const normalizeSearch = value => String(value || '').normalize('NFKC').toLowerCase().trim()
+  const messageSearchText = record => {
+    if (record._searchText) return record._searchText
+    const text = normalizeSearch([
+      record.user,
+      ...[...record.view.childNodes]
+        .filter(node => !node.matches?.('.ttc-locate, .ttc-time'))
+        .map(node => node.textContent),
+      ...$$('img', record.view).map(image => image.getAttribute('alt') || ''),
+    ].join(' '))
+    record._searchText = text
+    return text
+  }
+  const unmountRecordView = (state, record) => {
+    const oldView = record.renderedView
+    if (oldView) {
+      state.messageResizeObserver?.unobserve(oldView)
+      oldView.remove()
+    }
+    record.renderedView = null
+    record.visible = false
+  }
+  const clearLocatedRecord = state => {
+    clearTimeout(state.locationTimer)
+    state.locatedView?.removeAttribute('data-ttc-located')
+    state.locatedView?.removeAttribute('tabindex')
+    state.locatedView = null
+    state.locationTimer = 0
+  }
+  const locateRecord = (state, storageId) => {
+    const { history, list } = state
+    if (!history.enabled) return false
+    const record = history.byStorageId?.get(storageId) ||
+      history.messages.find(row => row.storageId === storageId)
+    if (!record || !record.retained || !matchesFilter(record, history.settings) ||
+      record.createdAt + RETENTION_MS <= Date.now()) return false
+    history.search = ''
+    if (state.messageSearch) state.messageSearch.value = ''
+    history.follow = false
+    state.readerScrollIntent = false
+    renderMessages(state, true)
+    clearLocatedRecord(state)
+    const view = record.view
+    state.locatedView = view
+    view.setAttribute('data-ttc-located', 'true')
+    view.setAttribute('tabindex', '-1')
+    if (typeof view.focus === 'function') view.focus({ preventScroll: true })
+    if (typeof view.getBoundingClientRect === 'function' && typeof list.getBoundingClientRect === 'function') {
+      const rowBounds = view.getBoundingClientRect()
+      const listBounds = list.getBoundingClientRect()
+      list.scrollTop = Math.max(0, list.scrollTop + rowBounds.top - listBounds.top - (list.clientHeight - rowBounds.height) / 2)
+    }
+    state.locationTimer = setTimeout(() => {
+      view.removeAttribute('data-ttc-located')
+      view.removeAttribute('tabindex')
+      if (state.locatedView === view) state.locatedView = null
+      state.locationTimer = 0
+    }, 3000)
+    return true
+  }
+  const renderMessageSearch = (state, query) => {
+    const { history, list, empty, count, latest } = state
+    if (!state.inSearchMode) {
+      releaseMessageViews(state)
+      state.inSearchMode = true
+    }
+    const words = query.split(/\s+/u)
+    const hits = history.messages
+      .filter(record => record.retained && matchesFilter(record, history.settings) &&
+        words.every(word => messageSearchText(record).includes(word)))
+      .sort((a, b) => a.createdAt - b.createdAt || (a.order || 0) - (b.order || 0))
+    const shown = new Set(hits)
+    for (const record of state.searchShown || []) if (!shown.has(record)) unmountRecordView(state, record)
+    let index = 0
+    const scrollTop = list.scrollTop
+    for (const record of shown) {
+      const view = record.view
+      if (record.renderedView && record.renderedView !== view) {
+        state.messageResizeObserver?.unobserve(record.renderedView)
+        record.renderedView.remove()
+      }
+      view.hidden = false
+      if (!$('.ttc-locate', view)) {
+        const locate = element('button', {
+          type: 'button',
+          class: 'ttc-locate',
+          'aria-label': '在完整篩選紀錄中定位這則訊息',
+        }, ['定位'])
+        locate.addEventListener('click', () => locateRecord(state, record.storageId))
+        view.appendChild(locate)
+      }
+      const existing = list.children[index++]
+      if (existing !== view) {
+        if (existing) list.insertBefore(view, existing)
+        else list.appendChild(view)
+      }
+      record.renderedView = view
+      record.visible = true
+      state.messageResizeObserver?.observe(view)
+    }
+    state.searchShown = shown
+    state.visibleCount = shown.size
+    history.dirty.clear()
+    history.removed.clear()
+    state.renderedHistory = null
+    empty.hidden = shown.size > 0
+    empty.textContent = '找不到符合搜尋的聊天訊息。'
+    count.textContent = `${hits.length} 則符合`
+    if (history.follow) {
+      list.scrollTop = list.scrollHeight
+      state.followScrollTop = list.scrollTop
+    } else {
+      list.scrollTop = scrollTop
+    }
+    latest.hidden = history.follow
+  }
+
   const renderMessages = (state, rebuild = false) => {
     cancelMessageRender(state)
     cancelListFollow(state)
     const { history, list, empty, count, latest } = state
+    const query = normalizeSearch(history.search)
+    if (query) { renderMessageSearch(state, query); return }
+    if (state.inSearchMode) releaseMessageViews(state)
+    empty.textContent = '尚無符合條件的發言。新增目標帳號後開始收集。'
     const filterKey = JSON.stringify(history.settings)
     const full = rebuild || state.renderedHistory !== history || state.filterKey !== filterKey
     if (full) {
@@ -671,14 +798,20 @@
   }
 
   const releaseMessageViews = state => {
+    clearLocatedRecord(state)
     state.messageResizeObserver?.disconnect()
     cancelListFollow(state)
     cancelMessageRender(state)
-    for (const record of [...state.history.messages, ...state.history.removed]) {
+    for (const record of new Set([...state.history.messages, ...state.history.removed, ...(state.searchShown || [])])) {
+      if (record.view) $('.ttc-locate', record.view)?.remove()
       record.renderedView?.remove()
       record.renderedView = null
       record.visible = false
     }
+    state.inSearchMode = false
+    state.searchShown = null
+    state.renderedHistory = null
+    state.mountedTailOrder = 0
     state.history.removed.clear()
   }
 
@@ -686,7 +819,7 @@
     if (!mounted) return
     if (document.hidden) { cancelMessageRender(mounted); cancelListFollow(mounted) }
     else {
-      if (mounted.history.dirty.size || mounted.history.removed.size) scheduleMessageRender(mounted)
+      if (mounted.history.dirty.size || mounted.history.removed.size || mounted.history.search) scheduleMessageRender(mounted)
       scheduleListFollow(mounted)
     }
   }
@@ -879,7 +1012,12 @@
     } else {
       state.button.setAttribute('aria-describedby', tooltip.id)
     }
-    if (enabled) renderMessages(state, true)
+    if (enabled) {
+      if (state.messageSearch) state.messageSearch.value = state.history.search || ''
+      renderMessages(state, true)
+    } else {
+      clearLocatedRecord(state)
+    }
   }
 
   const renderTargets = (state) => {
@@ -940,6 +1078,19 @@
             'aria-expanded': 'false',
           }, ['目標用戶']),
           element('span', { class: 'ttc-count' }),
+        ]),
+        element('search', { class: 'ttc-message-search' }, [
+          element('label', { class: 'ttc-visually-hidden', for: 'ttc-input-search-messages' }, ['搜尋聊天紀錄']),
+          element('input', {
+            id: 'ttc-input-search-messages',
+            type: 'search',
+            name: 'search-messages',
+            placeholder: '搜尋帳號或留言',
+            autocomplete: 'off',
+            autocorrect: 'off',
+            autocapitalize: 'none',
+            spellcheck: 'false',
+          }),
         ]),
         element('div', { class: 'ttc-targets', id: 'ttc-target-settings', hidden: '' }, [
           element('div', { class: 'ttc-roles' }, [
@@ -1009,6 +1160,15 @@
     state.empty = $('.ttc-empty', panel)
     state.count = $('.ttc-count', panel)
     state.latest = $('.ttc-latest', panel)
+    state.messageSearch = $('[name="search-messages"]', panel)
+    state.messageSearch.value = state.history.search || ''
+    state.messageSearch.addEventListener('input', () => {
+      clearLocatedRecord(state)
+      state.history.search = state.messageSearch.value
+      state.readerScrollIntent = false
+      state.history.follow = true
+      if (state.history.enabled) renderMessages(state, true)
+    })
     const moderators = $('[name="moderators"]', panel)
     const broadcaster = $('[name="broadcaster"]', panel)
     const vip = $('[name="vip"]', panel)
@@ -1058,6 +1218,7 @@
       targetSettings.hidden = !open
       targetButton.setAttribute('aria-expanded', String(open))
       panel.classList.toggle('ttc-managing', open)
+      $('.ttc-message-search', panel).hidden = open
     }
     targetButton.addEventListener('click', () => setTargetsOpen(targetSettings.hidden))
     setTargetsOpen(false)
@@ -1177,6 +1338,7 @@
     .ttc-toggle:active { background: var(--color-background-button-text-active, #ffffff33); }
     .ttc-toggle[aria-pressed="true"] { color: var(--color-text-link, #bf94ff); background: var(--color-background-button-text-hover, #ffffff22); }
     .ttc-toggle:focus-visible, .ttc-panel button:focus-visible, .ttc-panel input:focus-visible { outline: 2px solid #9147ff; outline-offset: -2px; }
+    .ttc-visually-hidden:where(:not(:focus-within, :active)) { position: absolute; clip-path: inset(50%); overflow: hidden; width: 1px; height: 1px; margin: -1px; padding: 0; border: 0; white-space: nowrap; }
     .ttc-tooltip { position: fixed; inset: auto; z-index: 2147483647; display: none; overflow: visible; box-sizing: border-box; width: max-content; min-height: 27.6px; margin: 0; padding: 4px 8px; border: 0; border-radius: 4px; color: var(--color-text-tooltip, #0e0e10); background: var(--color-background-tooltip, #ffffff); font-family: Inter, "Noto Sans Arabic", Roobert, "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 14px; font-weight: 600; line-height: 19.6px; overflow-wrap: break-word; pointer-events: none; }
     .ttc-tooltip::after { position: absolute; top: 50%; right: -4px; width: 8px; height: 8px; background: inherit; content: ''; transform: translateY(-50%) rotate(45deg); }
     .ttc-tooltip[data-placement="bottom"]::after { top: -4px; right: auto; left: 50%; transform: translateX(-50%) rotate(45deg); }
@@ -1187,6 +1349,9 @@
     .ttc-panel [hidden], .ttc-panel[hidden] { display: none !important; }
     .ttc-toolbar { flex: 0 0 auto; padding: 10px; border-bottom: 1px solid var(--color-border-base, #ffffff22); }
     .ttc-options { display: flex; align-items: center; gap: 6px; flex-wrap: nowrap; font-size: 12px; }
+    .ttc-message-search { display: block; margin-top: 8px; }
+    .ttc-message-search input[type="search"] { box-sizing: border-box; width: 100%; min-width: 0; height: 30px; padding: 5px 8px; border: 1px solid var(--color-border-base, #ffffff44); border-radius: 4px; color: inherit; background: var(--color-background-input, #ffffff11); font: inherit; }
+    .ttc-managing .ttc-message-search { display: none; }
     .ttc-roles { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; flex-shrink: 0; margin-bottom: 12px; }
     .ttc-role { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
     .ttc-roles input { width: 13px; height: 13px; margin: 0; accent-color: #9147ff; }
@@ -1203,10 +1368,14 @@
     @media (prefers-contrast: more) {
       .ttc-list, .ttc-target-list, .ttc-managing > .ttc-toolbar { --ttc-scrollbar-thumb: #ffffff; --ttc-scrollbar-track: #000000; }
       .ttc-toggle:focus-visible, .ttc-panel button:focus-visible, .ttc-panel input:focus-visible { outline: 2px solid currentColor; }
+      .ttc-message[data-ttc-located] { outline-color: currentColor; }
     }
     .ttc-list { flex: 1; min-height: 0; overflow: auto; overflow-anchor: none; padding: 6px 0; }
     .ttc-message { padding: 5px 10px; overflow-wrap: anywhere; line-height: 1.6; content-visibility: auto; contain-intrinsic-size: auto none auto 30px; }
     .ttc-message:hover { background: var(--color-background-button-text-hover, #ffffff11); }
+    .ttc-message:has(> .ttc-locate) { position: relative; padding-right: 58px; }
+    .ttc-panel .ttc-locate { position: absolute; top: 5px; right: 6px; padding: 2px 6px; border: 1px solid currentColor; color: inherit; background: transparent; font: inherit; font-size: 11px; }
+    .ttc-message[data-ttc-located] { outline: 2px solid #ffb300; outline-offset: -2px; box-shadow: inset 0 0 0 4px #0008; }
     .ttc-time { margin-right: 6px; color: var(--color-text-alt-2, #adadb8); font-size: 10px; }
     .ttc-message > img { width: 18px; height: 18px; margin-right: 3px; vertical-align: middle; }
     .ttc-message .chat-image { max-height: 28px; vertical-align: middle; }
