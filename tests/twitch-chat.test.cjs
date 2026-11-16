@@ -295,7 +295,7 @@ test('Twitch archive: edits and DOM rebuilds do not renew expiry, and records ex
   assert.equal(database.records.size, 0)
 })
 
-test('Twitch archive: isolate channels, merge concurrent writers, restore directly and cap at 100 in memory and IndexedDB', async () => {
+test('Twitch archive: isolate channels, merge concurrent writers, restore directly and cap at 1000 in memory and IndexedDB', async () => {
   const database = fakeIndexedDB()
   const a = boot({ database })
   const b = boot({ database })
@@ -303,10 +303,10 @@ test('Twitch archive: isolate channels, merge concurrent writers, restore direct
   const h2 = b.api.getHistory('sample_channel')
   const other = a.api.getHistory('another_channel')
   await Promise.all([h1.restorePromise, h2.restorePromise, other.restorePromise])
-  for (let i = 0; i < 102; i++) a.api.captureLine(a.message('mod', `old ${i}`, 'moderator', `msg-${i}`).line, h1)
+  for (let i = 0; i < 1002; i++) a.api.captureLine(a.message('mod', `old ${i}`, 'moderator', `msg-${i}`).line, h1)
   b.api.captureLine(b.message('mod', 'another tab', 'moderator', 'another-tab').line, h2)
   a.api.captureLine(a.message('mod', 'another channel', 'moderator', 'another-channel').line, other)
-  assert.equal(h1.messages.length, 100)
+  assert.equal(h1.messages.length, 1000)
   assert.equal(h1.ids.has('msg-0'), false)
   assert.equal(h1.ids.has('msg-1'), false)
   assert.equal(h1.ids.has('msg-2'), true)
@@ -318,12 +318,12 @@ test('Twitch archive: isolate channels, merge concurrent writers, restore direct
   const fresh = boot({ database })
   const restored = fresh.api.getHistory('sample_channel')
   await restored.restorePromise
-  assert.equal(restored.messages.length, 100)
+  assert.equal(restored.messages.length, 1000)
   assert.equal(restored.older, undefined)
   assert.equal(database.records.has(JSON.stringify(['sample_channel', 'msg-2'])), false)
   const state = { history: restored, list: new fresh.Element(), empty: {}, count: {}, latest: {} }
   fresh.api.renderMessages(state)
-  assert.equal(state.count.textContent, '100 則')
+  assert.equal(state.count.textContent, '1000 則')
   assert.equal(state.list.children[0].children.at(-1).textContent, 'old 3')
   assert.equal(restored.ids.has('another-channel'), false)
 })
@@ -414,12 +414,15 @@ test('Twitch chat: badge identity, broadcaster login and specified login match i
   assert.equal(env.api.matchesFilter(history.messages[3], { moderators: false, broadcaster: false, vip: false, users: ['chosen'] }), true)
 })
 
-test('Twitch VIP users: recognize badge alt, asset UUID and srcset, preserve history, and respect exclusions', async () => {
+test('Twitch VIP users: recognize badge alt, asset UUID and srcset, skip unchecked/excluded capture, and respect exclusions', async () => {
   const database = fakeIndexedDB()
   const env = boot({ database })
   const history = env.api.getHistory('sample_channel')
   await history.restorePromise
   history.settings.vip = false
+  assert.equal(env.api.captureLine(env.message('vip_skipped', 'while off', 'VIP', 'vip-off').line, history), false,
+    'unchecked VIP messages are not captured')
+  history.settings.vip = true
   const variants = [
     env.message('vip_alt', 'by alt', 'VIP', 'vip-1'),
     env.message('vip_tw', 'by zh-TW alt', 'VIP 徽章', 'vip-2'),
@@ -434,16 +437,21 @@ test('Twitch VIP users: recognize badge alt, asset UUID and srcset, preserve his
     })(),
   ]
   for (const msg of variants) {
-    assert.equal(env.api.captureLine(msg.line, history), true, 'VIP messages are retained while vip filter is off')
+    assert.equal(env.api.captureLine(msg.line, history), true)
   }
   assert.equal(env.api.captureLine(env.message('sub_vip_tier', 'ordinary sub', 'VIP Subscriber').line, history), false)
   const state = { history, list: new env.Element(), empty: {}, count: {}, latest: {} }
+  env.api.renderMessages(state)
+  assert.equal(state.count.textContent, '4 則')
+  history.settings.vip = false
   env.api.renderMessages(state)
   assert.equal(state.count.textContent, '0 則')
   history.settings.vip = true
   env.api.renderMessages(state)
   assert.equal(state.count.textContent, '4 則')
   history.settings.excludedUsers = ['vip_alt', 'vip_tw']
+  assert.equal(env.api.captureLine(env.message('vip_alt', 'excluded new', 'VIP', 'vip-excluded').line, history), false,
+    'excluded users are not captured into history')
   env.api.renderMessages(state)
   assert.equal(state.count.textContent, '2 則')
   await env.api.flushHistory(history)
@@ -561,19 +569,19 @@ test('Twitch chat: global settings survive reload across channels when archive s
   assert.equal(env.api.getChannel(), '')
 })
 
-test('Twitch chat: cap history at 100 in memory and IndexedDB without forcing a reader to the bottom', async () => {
+test('Twitch chat: cap history at 1000 in memory and IndexedDB without forcing a reader to the bottom', async () => {
   const database = fakeIndexedDB()
   const env = boot({ database })
   const history = env.api.getHistory('sample_channel')
   await history.restorePromise
-  for (let i = 0; i < 105; i++) {
+  for (let i = 0; i < 1005; i++) {
     env.api.captureLine(env.message('mod', String(i), 'Moderator', `id-${i}`).line, history)
-    if (i === 100) await env.api.flushHistory(history)
+    if (i === 1000) await env.api.flushHistory(history)
   }
   await env.api.flushHistory(history)
-  assert.equal(history.messages.length, 100)
+  assert.equal(history.messages.length, 1000)
   assert.equal(history.messages[0].view.children.at(-1).innerHTML, '5')
-  assert.equal(database.records.size, 100)
+  assert.equal(database.records.size, 1000)
   assert.equal(database.records.has(JSON.stringify(['sample_channel', 'id-0'])), false)
   assert.equal(database.records.has(JSON.stringify(['sample_channel', 'id-4'])), false)
   assert.equal(database.records.has(JSON.stringify(['sample_channel', 'id-5'])), true)
@@ -583,7 +591,7 @@ test('Twitch chat: cap history at 100 in memory and IndexedDB without forcing a 
   history.follow = false
   env.api.renderMessages(state)
   assert.equal(state.list.scrollTop, 123)
-  assert.equal(state.count.textContent, '100 則')
+  assert.equal(state.count.textContent, '1000 則')
   assert.equal(state.latest.hidden, false)
   history.follow = true
   env.api.renderMessages(state)

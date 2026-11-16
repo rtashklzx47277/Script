@@ -95,7 +95,7 @@ module.exports = ({ test, assert, boot, site }) => {
 
   test(`${site} updates: incremental updates keep counts correct and settings changes restore excluded history`, () => {
     const env = setup()
-    const cap = site === 'Twitch' ? 100 : null
+    const cap = site === 'Twitch' ? 1000 : null
     const initial = cap || 2005
     for (let i = 0; i < initial; i++) env.api.captureLine(env.make(`old-${i}`).line, env.history)
     env.api.renderMessages(env.state)
@@ -122,7 +122,7 @@ module.exports = ({ test, assert, boot, site }) => {
 
   test(`${site} updates: queues retain history while disabled or hidden`, () => {
     const env = setup()
-    const cap = site === 'Twitch' ? 100 : null
+    const cap = site === 'Twitch' ? 1000 : null
     const total = (cap || 2000) + 5
     env.history.enabled = false
     for (let i = 0; i < total; i++) {

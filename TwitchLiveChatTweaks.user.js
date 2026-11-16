@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name        Twitch Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.7.6
+// @version     0.7.7
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
-// @description 依頻道主、管理員、VIP 與全域帳號包含／排除名單篩選 Twitch 聊天，保留最近 100 則／7 天紀錄並支援自動跟隨。
+// @description 依頻道主、管理員、VIP 與全域帳號包含／排除名單篩選 Twitch 聊天，保留最近 1000 則／7 天紀錄並支援自動跟隨。
 // @author      Derek
 // @match       *://www.twitch.tv/*
 // @run-at      document-idle
@@ -18,7 +18,7 @@
   const MESSAGE_SELECTOR = '[data-a-target="chat-line-message"]'
   const USER_SELECTOR = '[data-a-target="chat-message-username"]'
   const STORAGE_KEY = 'twitch-live-chat-tweaks-settings-v1'
-  const MAX_MESSAGES = 100
+  const MAX_MESSAGES = 1000
   const MAX_CHANNELS = 5
   const RETENTION_MS = 7 * 24 * 60 * 60 * 1000
   const ARCHIVE_DB = 'twitch-live-chat-tweaks-history-v1'
@@ -512,9 +512,9 @@
     const message = readMessage(line, history.channel)
     if (!message) return false
     const previous = message.id ? history.ids.get(message.id) : history.nodes.get(line)
-    // Keep all roles even when unchecked so turning a role back on restores its history.
-    if (!(previous?.retained && previous.user === message.user) && !message.moderator && !message.broadcaster &&
-      !message.vip && !history.settings.users.includes(message.user)) return false
+    // Only retain messages matching the active filter so unchecked roles and
+    // excluded accounts cannot evict matching history from the 1000-message cap.
+    if (!(previous?.retained && previous.user === message.user) && !matchesFilter(message, history.settings)) return false
     const fingerprint = `${message.user}\n${message.moderator}\n${message.broadcaster}\n${message.vip}\n${message.author.textContent}\n${message.body.innerHTML}`
     if (previous?.fingerprint === fingerprint) { history.nodes.set(line, previous); return false }
     const view = makeMessageView(message)
