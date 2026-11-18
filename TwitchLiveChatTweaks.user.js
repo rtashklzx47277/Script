@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name        Twitch Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.7.9
+// @version     0.8.0
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
-// @description 依頻道主、管理員、VIP 與全域帳號包含／排除名單篩選 Twitch 聊天，保留最近 1000 則／7 天紀錄，支援搜尋與自動跟隨。
+// @description 依頻道主、管理員、VIP 與全域帳號包含／排除名單篩選 Twitch 直播與 VOD 聊天，保留最近 1000 則／7 天紀錄並支援跨日分隔、搜尋與自動跟隨。
 // @author      Derek
 // @match       *://www.twitch.tv/*
 // @run-at      document-idle
@@ -15,8 +15,9 @@
 (() => {
   'use strict'
 
-  const MESSAGE_SELECTOR = '[data-a-target="chat-line-message"]'
-  const USER_SELECTOR = '[data-a-target="chat-message-username"]'
+  const MESSAGE_SELECTOR = '[data-a-target="chat-line-message"], .vod-message, [data-test-selector="message-layout"]'
+  const USER_SELECTOR = '[data-a-target="chat-message-username"], .chat-author__display-name, [data-test-selector="message-author"]'
+  const BODY_SELECTOR = '[data-a-target="chat-line-message-body"], [data-test-selector="message-text"], [data-a-target="chat-message-text"]'
   const STORAGE_KEY = 'twitch-live-chat-tweaks-settings-v1'
   const MAX_MESSAGES = 1000
   const MAX_CHANNELS = 5
@@ -32,7 +33,10 @@
   let anonymousMessage = 0
   const MODERATOR_BADGE = '3267646d-33f0-4b17-b3df-f923a41db1d0'
   const VIP_BADGE = 'b817aba4-fad8-49e2-b88a-7cc744dfa6ec'
+  const BROADCASTER_BADGE = '5527c58c-fb7d-422d-b71b-f309dcb85cc1'
+  const RESERVED_PATHS = new Set(['directory', 'downloads', 'settings', 'subscriptions', 'wallet', 'inventory', 'videos', 'popout', 'moderator', 'search', 'p', 'jobs', 'turbo', 'prime'])
   const histories = new Map()
+  const viewDates = new WeakMap()
   const defaultSettings = () => ({ moderators: true, broadcaster: true, vip: true, users: [], excludedUsers: [] })
   let globalSettings = defaultSettings()
   let mounted = null
@@ -64,11 +68,31 @@
     .toLowerCase().split(/[\s,，;；]+/).map(name => name.replace(/^@/, ''))
     .filter(name => /^[a-z0-9_]{1,25}$/.test(name)))]
 
+  const loginFromHref = href => {
+    if (!href) return ''
+    try {
+      const url = new URL(href, location.href)
+      if (!/(?:^|\.)twitch\.tv$/i.test(url.hostname)) return ''
+      const path = url.pathname.toLowerCase().split('/').filter(Boolean)
+      return path.length === 1 && /^[a-z0-9_]{1,25}$/.test(path[0]) && !RESERVED_PATHS.has(path[0]) ? path[0] : ''
+    } catch (_) { return '' }
+  }
+
+  const getVodOwner = () => {
+    for (const container of $$('.channel-info-content, [data-a-target="user-channel-header-item"], [data-a-target="watch-mode-to-channel-link"]')) {
+      for (const link of container.tagName?.toLowerCase() === 'a' ? [container] : $$('a', container)) {
+        const login = loginFromHref(link.getAttribute('href'))
+        if (login) return login
+      }
+    }
+    return ''
+  }
+
   const getChannel = () => {
     const parts = location.pathname.toLowerCase().split('/').filter(Boolean)
-    if (parts[0] === 'popout' && parts[2] === 'chat') return parts[1]
-    if (parts.length === 1 && /^[a-z0-9_]+$/.test(parts[0]) &&
-      !['directory', 'downloads', 'settings', 'subscriptions', 'wallet', 'inventory', 'videos'].includes(parts[0])) {
+    if (parts[0] === 'popout' && parts[2] === 'chat' && /^[a-z0-9_]{1,25}$/.test(parts[1])) return parts[1]
+    if (parts[0] === 'videos' && /^\d+$/.test(parts[1])) return `vod:${parts[1]}`
+    if (parts.length === 1 && /^[a-z0-9_]+$/.test(parts[0]) && !RESERVED_PATHS.has(parts[0])) {
       return parts[0]
     }
     return ''
@@ -273,6 +297,24 @@
     typeof saved.user === 'string' && /^[a-z0-9_]{1,25}$/.test(saved.user) &&
     Number.isFinite(saved.createdAt) && saved.createdAt <= Date.now() && saved.createdAt + RETENTION_MS > Date.now() &&
     saved.tree && typeof saved.tree === 'object'
+  const formatDateKey = timestamp => {
+    const date = new Date(Number.isFinite(timestamp) ? timestamp : Date.now())
+    return `${date.getFullYear()}/${String(date.getMonth() + 1).padStart(2, '0')}/${String(date.getDate()).padStart(2, '0')}`
+  }
+  const siblingView = (view, delta) => {
+    if (delta < 0 && 'previousElementSibling' in view) return view.previousElementSibling
+    if (delta > 0 && 'nextElementSibling' in view) return view.nextElementSibling
+    const siblings = view.parentElement?.children
+    if (!siblings) return null
+    return siblings[siblings.indexOf(view) + delta] || null
+  }
+  const syncDateMarker = (view, previousView) => {
+    if (!view) return
+    const dateKey = viewDates.get(view)
+    const prevKey = previousView ? viewDates.get(previousView) : ''
+    if (dateKey && dateKey !== prevKey) view.setAttribute('data-date', dateKey)
+    else view.removeAttribute('data-date')
+  }
   const formatAuthorLabel = (displayName, user) => {
     const name = String(displayName || '').replace(/\s+/g, ' ').trim()
     if (!name) return user || ''
@@ -286,6 +328,10 @@
     const view = restoreTree(saved.tree)
     if (!view || view.firstChild?.tagName?.toLowerCase() !== 'time') return null
     view.className = 'ttc-message'
+    const time = view.firstChild
+    if (!time.getAttribute('datetime')) time.setAttribute('datetime', new Date(saved.createdAt).toISOString())
+    if (!time.getAttribute('title')) time.setAttribute('title', `${formatDateKey(saved.createdAt)} ${time.textContent}`)
+    viewDates.set(view, formatDateKey(saved.createdAt))
     const authorNode = [...view.children].find(child => child.tagName?.toLowerCase() === 'strong')
     if (authorNode) authorNode.textContent = formatAuthorLabel(authorNode.textContent, saved.user)
     return { id: saved.id, storageId: saved.storageId, user: saved.user, createdAt: saved.createdAt,
@@ -391,6 +437,9 @@
           current.createdAt = Math.min(current.createdAt, item.createdAt)
           current.order = Number.isSafeInteger(item.order) ? item.order : current.order
           current.view.firstChild.textContent = restoreTree(item.tree)?.firstChild?.textContent || current.view.firstChild.textContent
+          current.view.firstChild.setAttribute('datetime', new Date(current.createdAt).toISOString())
+          current.view.firstChild.setAttribute('title', `${formatDateKey(current.createdAt)} ${current.view.firstChild.textContent}`)
+          viewDates.set(current.view, formatDateKey(current.createdAt))
           current._searchText = ''
           saveRecord(history, current)
         } else {
@@ -459,23 +508,33 @@
 
   const readMessage = (line, channel) => {
     const author = $(USER_SELECTOR, line)
-    const user = (author?.getAttribute('data-a-user') || line.getAttribute('data-a-user') || '').toLowerCase()
-    const body = $('[data-a-target="chat-line-message-body"]', line)
-    if (!user || !author || !body) return null
     // Use the author's badges only: quoted replies can contain another user's badges.
-    const authorContainer = author.closest('.chat-line__username-container') || author.parentElement
-    const badges = $$('[data-a-target="chat-badge"] img, img.chat-badge', authorContainer)
+    const authorContainer = author?.closest('.chat-line__username-container, .vod-message__header, [data-test-selector="message-header"]') || author?.parentElement
+    const user = (
+      author?.getAttribute('data-a-user') ||
+      author?.closest?.('[data-a-user]')?.getAttribute('data-a-user') ||
+      line.getAttribute('data-a-user') ||
+      $('[data-a-user]', authorContainer || line)?.getAttribute('data-a-user') ||
+      loginFromHref(author?.closest?.('a')?.getAttribute('href') || $$('a', authorContainer || line).find(a => a.getAttribute('href'))?.getAttribute('href')) ||
+      ''
+    ).toLowerCase()
+    const fragmentParent = $('.text-fragment', line)?.parentElement
+    const body = $(BODY_SELECTOR, line) || (fragmentParent && fragmentParent !== authorContainer ? fragmentParent : null)
+    if (!user || !author || !body || body.contains?.(author)) return null
+    const badges = $$('[data-a-target="chat-badge"] img, img.chat-badge', authorContainer).filter(badge => !body.contains?.(badge))
     const moderator = badges.some(badge =>
       (badge.getAttribute('src') || '').includes(MODERATOR_BADGE) ||
       /^(moderator|管理員|モデレーター)$/i.test(badge.getAttribute('alt') || ''))
-    const broadcaster = user === channel || badges.some(badge =>
+    const broadcaster = (Boolean(channel) && user === channel) || badges.some(badge =>
+      (badge.getAttribute('src') || '').includes(BROADCASTER_BADGE) ||
+      (badge.getAttribute('srcset') || '').includes(BROADCASTER_BADGE) ||
       /^(broadcaster|實況主|頻道主|配信者)$/i.test(badge.getAttribute('alt') || ''))
     const vip = badges.some(badge =>
       (badge.getAttribute('src') || '').includes(VIP_BADGE) ||
       (badge.getAttribute('srcset') || '').includes(VIP_BADGE) ||
       /^(vip|vip\s*(?:徽章|バッジ))$/i.test((badge.getAttribute('alt') || '').trim()))
     return { user, moderator, broadcaster, vip, author, body, badges,
-      id: line.getAttribute('data-id') || line.getAttribute('data-message-id') || line.id || '' }
+      id: line.getAttribute('data-id') || line.getAttribute('data-message-id') || line.getAttribute('data-a-id') || line.id || '' }
   }
 
   const matchesFilter = (message, settings) =>
@@ -486,13 +545,17 @@
       settings.users.includes(message.user)
     )
 
-  const makeMessageView = (message) => {
+  const makeMessageView = (message, createdAt = Date.now()) => {
     // Copy presentation only. Never keep React-owned message nodes or inactive controls.
     const row = document.createElement('div')
     row.className = 'ttc-message'
     const time = document.createElement('time')
     time.className = 'ttc-time'
-    time.textContent = new Date().toLocaleTimeString('zh-TW', { hour12: false })
+    const date = new Date(createdAt)
+    time.textContent = date.toLocaleTimeString('zh-TW', { hour12: false })
+    time.setAttribute('datetime', date.toISOString())
+    time.setAttribute('title', `${formatDateKey(createdAt)} ${time.textContent}`)
+    viewDates.set(row, formatDateKey(createdAt))
     row.appendChild(time)
     for (const badge of message.badges) {
       const copy = badge.cloneNode(false)
@@ -521,7 +584,8 @@
   }
 
   const captureLine = (line, history) => {
-    const message = readMessage(line, history.channel)
+    const owner = history.channel.startsWith('vod:') ? getVodOwner() : history.channel
+    const message = readMessage(line, owner)
     if (!message) return false
     const previous = message.id ? history.ids.get(message.id) : history.nodes.get(line)
     // Only retain messages matching the active filter so unchecked roles and
@@ -529,18 +593,21 @@
     if (!(previous?.retained && previous.user === message.user) && !matchesFilter(message, history.settings)) return false
     const fingerprint = `${message.user}\n${message.moderator}\n${message.broadcaster}\n${message.vip}\n${message.author.textContent}\n${message.body.innerHTML}`
     if (previous?.fingerprint === fingerprint) { history.nodes.set(line, previous); return false }
-    const view = makeMessageView(message)
+    const createdAt = previous && previous.user === message.user && previous.retained ? previous.createdAt : Date.now()
+    const view = makeMessageView(message, createdAt)
     let record
     if (previous && previous.user === message.user && previous.retained) {
       // Reflect edits/deletion placeholders while the original line is still present.
       view.firstChild.textContent = previous.view.firstChild.textContent
+      view.firstChild.setAttribute('datetime', new Date(createdAt).toISOString())
+      view.firstChild.setAttribute('title', `${formatDateKey(createdAt)} ${view.firstChild.textContent}`)
       record = Object.assign(previous, { moderator: message.moderator,
         broadcaster: message.broadcaster, vip: message.vip, _searchText: '', view, fingerprint })
     } else {
       record = { id: message.id, user: message.user, moderator: message.moderator,
         broadcaster: message.broadcaster, vip: message.vip, _searchText: '', view, fingerprint, retained: true,
         storageId: message.id || `${pageKey}-${++anonymousMessage}`,
-        createdAt: Date.now(), order: ++messageOrder }
+        createdAt, order: ++messageOrder }
       history.messages.push(record)
       trimHistory(history)
     }
@@ -560,11 +627,24 @@
     if (record.renderedView) history.removed.add(record)
   }
 
+  const rootMessageLine = node => {
+    let current = node?.closest?.(MESSAGE_SELECTOR)
+    while (current?.parentElement) {
+      const upper = current.parentElement.closest?.(MESSAGE_SELECTOR)
+      if (!upper) break
+      current = upper
+    }
+    return current || null
+  }
+
   const collectMessageLines = (node, lines) => {
-    if (node.nodeType !== 1) return
-    const line = node.closest(MESSAGE_SELECTOR)
+    if (node.nodeType !== 1 || node.closest?.('.ttc-panel')) return
+    const line = rootMessageLine(node)
     if (line) lines.add(line)
-    else for (const child of $$(MESSAGE_SELECTOR, node)) lines.add(child)
+    else for (const child of $$(MESSAGE_SELECTOR, node)) {
+      const root = rootMessageLine(child)
+      if (root) lines.add(root)
+    }
   }
 
   const captureTree = (node, history) => {
@@ -580,7 +660,8 @@
     for (const mutation of mutations) {
       for (const node of mutation.addedNodes || []) collectMessageLines(node, lines)
       const target = mutation.target.nodeType === 1 ? mutation.target : mutation.target.parentElement
-      const line = target?.closest(MESSAGE_SELECTOR)
+      if (target?.closest?.('.ttc-panel')) continue
+      const line = rootMessageLine(target)
       if (line) lines.add(line)
     }
     // Snapshot data now, even in background tabs: native renderers may be
@@ -647,6 +728,7 @@
     const shown = new Set(hits)
     for (const record of state.searchShown || []) if (!shown.has(record)) unmountRecordView(state, record)
     let index = 0
+    let previousView = null
     const scrollTop = list.scrollTop
     for (const record of shown) {
       const view = record.view
@@ -655,6 +737,9 @@
         record.renderedView.remove()
       }
       view.hidden = false
+      viewDates.set(view, formatDateKey(record.createdAt))
+      syncDateMarker(view, previousView)
+      previousView = view
       const existing = list.children[index++]
       if (existing !== view) {
         if (existing) list.insertBefore(view, existing)
@@ -703,6 +788,7 @@
       record.visible = false
     }
     history.removed.clear()
+    if (!full && list.firstChild) syncDateMarker(list.firstChild, null)
     let needsReorder = false
     for (const record of full ? history.messages : history.dirty) {
       const oldView = record.renderedView
@@ -711,14 +797,17 @@
       state.visibleCount += Number(show) - (full ? 0 : Number(!!wasVisible))
       if (!show) {
         if (oldView) {
+          const nextView = !full ? siblingView(oldView, 1) : null
           state.messageResizeObserver?.unobserve(oldView)
           oldView.remove()
+          if (nextView?.parentElement === list) syncDateMarker(nextView, siblingView(nextView, -1))
         }
         record.renderedView = null
         record.visible = false
         continue
       }
       record.view.hidden = false
+      viewDates.set(record.view, formatDateKey(record.createdAt))
       if (oldView && oldView !== record.view) {
         state.messageResizeObserver?.unobserve(oldView)
         if (oldView.parentElement === list) oldView.replaceWith(record.view)
@@ -727,6 +816,11 @@
       if (full || record.view.parentElement !== list) {
         if (!full && state.mountedTailOrder && record.order <= state.mountedTailOrder) needsReorder = true
         list.appendChild(record.view)
+      }
+      syncDateMarker(record.view, siblingView(record.view, -1))
+      if (!full) {
+        const nextView = siblingView(record.view, 1)
+        if (nextView?.parentElement === list) syncDateMarker(nextView, record.view)
       }
       if (!state.mountedTailOrder || record.order > state.mountedTailOrder) state.mountedTailOrder = record.order
       record.renderedView = record.view
@@ -1225,13 +1319,19 @@
 
   const refresh = () => {
     const channel = getChannel()
-    const header = $('.stream-chat-header')
-    const stream = header?.closest('.stream-chat')
-    const scroller = stream && $('[data-a-target="chat-scroller"]', stream)
+    const header = $('.stream-chat-header, .video-chat__header')
+    const stream = header?.closest('.stream-chat, .video-chat')
+    const vodWrapper = stream && $('.video-chat__message-list-wrapper', stream)
+    const scroller = stream && (
+      $('[data-a-target="chat-scroller"]', stream) ||
+      (vodWrapper && ($('.scrollable-area', vodWrapper) || $('ul', vodWrapper) || $('div', vodWrapper) || vodWrapper))
+    )
+    const host = scroller && (scroller.parentElement && scroller.parentElement !== stream && !scroller.parentElement.contains?.(header)
+      ? scroller.parentElement : scroller)
     if (mounted && (mounted.history.channel !== channel || mounted.header !== header ||
       mounted.scroller !== scroller || !mounted.button.isConnected || !mounted.panel.isConnected)) unmount()
-    if (mounted || !channel || !header || !scroller?.parentElement) return
-    const state = { history: getHistory(channel), header, scroller, host: scroller.parentElement }
+    if (mounted || !channel || !header || !host) return
+    const state = { history: getHistory(channel), header, scroller, host }
     state.host.classList.add('ttc-host')
     scroller.classList.add('ttc-source')
     const button = element('button', {
@@ -1288,6 +1388,7 @@
   const style = document.createElement('style')
   style.textContent = `
     .ttc-toggle { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 32px; width: 32px; height: 32px; padding: 0; border: 0; border-radius: 50%; color: inherit; background: transparent; cursor: pointer; }
+    .video-chat__header > .ttc-toggle { margin-left: auto; }
     .ttc-toggle:not(:last-child) { margin-right: 8px; }
     .ttc-toggle:hover { background: var(--color-background-button-text-hover, #ffffff22); }
     .ttc-toggle:active { background: var(--color-background-button-text-active, #ffffff33); }
@@ -1299,8 +1400,8 @@
     .ttc-tooltip[data-placement="bottom"]::after { top: -4px; right: auto; left: 50%; transform: translateX(-50%) rotate(45deg); }
     .ttc-tooltip[data-visible="true"] { display: inline-block; pointer-events: auto; }
     .ttc-host { position: relative; }
-    .ttc-active > .ttc-source { visibility: hidden; pointer-events: none; }
-    .ttc-panel { position: absolute; inset: 0; z-index: 2147483647; display: flex; flex-direction: column; box-sizing: border-box; min-height: 0; max-width: none; max-height: none; margin: 0; padding: 0; border: 0; color: var(--color-text-base, #efeff1); background: var(--color-background-base, #18181b); font-size: 13px; }
+    .ttc-active > .ttc-source, .ttc-active.ttc-source { visibility: hidden; pointer-events: none; }
+    .ttc-panel { position: absolute; inset: 0; z-index: 2147483647; visibility: visible; pointer-events: auto; display: flex; flex-direction: column; box-sizing: border-box; min-height: 0; max-width: none; max-height: none; margin: 0; padding: 0; border: 0; color: var(--color-text-base, #efeff1); background: var(--color-background-base, #18181b); font-size: 13px; }
     .ttc-panel [hidden], .ttc-panel[hidden] { display: none !important; }
     .ttc-toolbar { flex: 0 0 auto; padding: 10px; border-bottom: 1px solid var(--color-border-base, #ffffff22); }
     .ttc-options { display: flex; align-items: center; gap: 6px; flex-wrap: nowrap; font-size: 12px; }
@@ -1326,6 +1427,7 @@
     }
     .ttc-list { flex: 1; min-height: 0; overflow: auto; overflow-anchor: none; padding: 6px 0; }
     .ttc-message { padding: 5px 10px; overflow-wrap: anywhere; line-height: 1.6; content-visibility: auto; contain-intrinsic-size: auto none auto 30px; }
+    .ttc-message[data-date]::before { content: attr(data-date); display: block; margin: 2px 0 6px; padding: 2px 0 4px; border-bottom: 1px solid var(--color-border-base, #ffffff22); color: var(--color-text-alt-2, #adadb8); font-size: 11px; font-weight: 600; text-align: center; letter-spacing: 0.04em; }
     .ttc-message:hover { background: var(--color-background-button-text-hover, #ffffff11); }
     .ttc-time { margin-right: 6px; color: var(--color-text-alt-2, #adadb8); font-size: 10px; }
     .ttc-message > img { width: 18px; height: 18px; margin-right: 3px; vertical-align: middle; }
@@ -1362,7 +1464,7 @@
       mounted.scroller.isConnected && getChannel() === mounted.history.channel) return
     if (mutations.some(mutation => {
       const element = mutation.target.nodeType === 1 ? mutation.target : mutation.target.parentElement
-      return !element?.closest('.ttc-panel, .ttc-toggle, .ttc-tooltip, [data-a-target="chat-scroller"]')
+      return !element?.closest('.ttc-panel, .ttc-toggle, .ttc-tooltip, [data-a-target="chat-scroller"], .video-chat__message-list-wrapper')
     })) scheduleRefresh()
   })
   observer.observe(document.body, { childList: true, subtree: true })

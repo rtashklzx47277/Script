@@ -86,14 +86,17 @@ function boot({ saved, blocked = false, trustedTypes = false, withResizeObserver
         if (part === '*') return true
         if (part.startsWith('#')) return this.id === part.slice(1) || this.getAttribute('id') === part.slice(1)
         if (part.startsWith('.')) return (this.className || '').split(' ').includes(part.slice(1))
-        const attr = part.match(/^\[([^=]+)="([^"]+)"\]$/)
-        if (attr) return this.getAttribute(attr[1]) === attr[2]
+        const attr = part.match(/^\[([^=\]]+)(?:="([^"]*)")?\]$/)
+        if (attr) return attr[2] === undefined ? this.attrs.has(attr[1]) : this.getAttribute(attr[1]) === attr[2]
         if (part === 'img.chat-badge' || part === '[data-a-target="chat-badge"] img') {
           return this.tagName === 'img' && (this.className === 'chat-badge' ||
             this.parentElement?.getAttribute('data-a-target') === 'chat-badge')
         }
         return part === this.tagName
       })
+    }
+    contains(target) {
+      return Boolean(target && (target === this || this.children.some(child => child.contains(target))))
     }
     querySelectorAll(selector) {
       return this.children.flatMap(child => [
@@ -574,6 +577,10 @@ test('Twitch chat: global settings survive reload across channels when archive s
   assert.equal(fresh.api.getHistory('other_channel').settings.users[0], 'chosen')
   env.location.pathname = '/popout/sample_channel/chat'
   assert.equal(env.api.getChannel(), 'sample_channel')
+  env.location.pathname = '/videos/2345678901'
+  assert.equal(env.api.getChannel(), 'vod:2345678901')
+  env.location.pathname = '/videos'
+  assert.equal(env.api.getChannel(), '')
   env.location.pathname = '/directory'
   assert.equal(env.api.getChannel(), '')
 })
@@ -1179,4 +1186,134 @@ test('Twitch message search: preserve both display name and login ID, match mult
   assert.equal(state.count.textContent, '4 則')
   assert.equal(state.list.querySelector('.ttc-locate'), null)
   env.api.unmount()
+})
+
+test('Twitch date dividers: group consecutive days cleanly across restore, incremental updates, search, and deletions', async () => {
+  const database = fakeIndexedDB()
+  const day1 = new Date(2026, 10, 17, 23, 50, 0).getTime()
+  const day2 = new Date(2026, 10, 18, 0, 5, 0).getTime()
+  const day2Later = new Date(2026, 10, 18, 12, 0, 0).getTime()
+  const day3 = new Date(2026, 10, 19, 1, 0, 0).getTime()
+  let now = day1
+
+  const seed = boot({ database, now: () => now })
+  const seedHistory = seed.api.getHistory('sample_channel')
+  await seedHistory.restorePromise
+  seed.api.captureLine(seed.message('mod_a', 'day one msg', 'Moderator', 'd-1').line, seedHistory)
+  now = day2
+  seed.api.captureLine(seed.message('mod_b', 'day two first', 'Moderator', 'd-2').line, seedHistory)
+  now = day2Later
+  seed.api.captureLine(seed.message('mod_a', 'day two second', 'Moderator', 'd-3').line, seedHistory)
+  await seed.api.flushHistory(seedHistory)
+
+  now = day3
+  const env = boot({ database, now: () => now })
+  const stream = env.document.body.appendChild(new env.Element('div'))
+  stream.className = 'stream-chat'
+  const header = stream.appendChild(new env.Element('div'))
+  header.className = 'stream-chat-header'
+  const host = stream.appendChild(new env.Element('div'))
+  const scroller = host.appendChild(new env.Element('div'))
+  scroller.setAttribute('data-a-target', 'chat-scroller')
+
+  env.api.refresh()
+  const state = env.api.mounted
+  await state.history.restorePromise
+  env.api.setEnabled(state, true)
+
+  assert.equal(state.list.children[0].getAttribute('data-date'), '2026/11/17')
+  assert.equal(state.list.children[1].getAttribute('data-date'), '2026/11/18')
+  assert.equal(state.list.children[2].getAttribute('data-date'), null)
+
+  // Incremental cross-midnight arrival adds divider only on the new date
+  const msg3 = env.message('mod_c', 'day three msg', 'Moderator', 'd-4')
+  scroller.appendChild(msg3.line)
+  env.api.captureMutations([{ target: scroller, addedNodes: [msg3.line] }], state.history)
+  env.api.scheduleMessageRender(state)
+  env.flushFrames()
+  assert.equal(state.list.children.length, 4)
+  assert.equal(state.list.children[3].getAttribute('data-date'), '2026/11/19')
+
+  // Search mode also preserves per-day date dividers
+  state.messageSearch.value = 'mod_a'
+  state.messageSearch.listeners.get('input')()
+  assert.equal(state.list.children.length, 2)
+  assert.equal(state.list.children[0].getAttribute('data-date'), '2026/11/17')
+  assert.equal(state.list.children[1].getAttribute('data-date'), '2026/11/18')
+
+  // Excluding day2 first message promotes day2 second message to carry the 2026/11/18 divider
+  state.messageSearch.value = ''
+  state.messageSearch.listeners.get('input')()
+  state.history.settings = env.api.changeTargetUsers(state.history.settings, 'mod_b', false, true)
+  env.api.renderMessages(state, true)
+  assert.equal(state.list.children.length, 3)
+  assert.equal(state.list.children[0].getAttribute('data-date'), '2026/11/17')
+  assert.equal(state.list.children[1].getAttribute('data-date'), '2026/11/18')
+  assert.equal(state.list.children[2].getAttribute('data-date'), '2026/11/19')
+  env.api.unmount()
+})
+
+test('Twitch VOD chat: isolate per-VOD archive scope from live/other VODs, detect owner and replay DOM, and avoid double-capturing nested nodes', async () => {
+  const database = fakeIndexedDB()
+  const liveEnv = boot({ database })
+  const liveHistory = liveEnv.api.getHistory('streamer_one')
+  await liveHistory.restorePromise
+  liveEnv.api.captureLine(liveEnv.message('mod_live', 'live message', 'Moderator', 'live-1').line, liveHistory)
+  await liveEnv.api.flushHistory(liveHistory)
+
+  const vodEnv = boot({ database })
+  vodEnv.location.pathname = '/videos/987654321'
+  const info = vodEnv.document.body.appendChild(new vodEnv.Element('div'))
+  info.className = 'channel-info-content'
+  const ownerLink = info.appendChild(new vodEnv.Element('a'))
+  ownerLink.setAttribute('href', '/streamer_one')
+
+  const vodChat = vodEnv.document.body.appendChild(new vodEnv.Element('div'))
+  vodChat.className = 'video-chat'
+  const vodHeader = vodChat.appendChild(new vodEnv.Element('div'))
+  vodHeader.className = 'video-chat__header'
+  const wrapper = vodChat.appendChild(new vodEnv.Element('div'))
+  wrapper.className = 'video-chat__message-list-wrapper'
+  const scroller = wrapper.appendChild(new vodEnv.Element('ul'))
+
+  // Nested VOD message structure: li.vod-message > div[data-test-selector="message-layout"]
+  const li = scroller.appendChild(new vodEnv.Element('li'))
+  li.className = 'vod-message'
+  li.setAttribute('data-a-id', 'vod-msg-1')
+  const layout = li.appendChild(new vodEnv.Element('div'))
+  layout.setAttribute('data-test-selector', 'message-layout')
+  const msgHeader = layout.appendChild(new vodEnv.Element('div'))
+  msgHeader.className = 'vod-message__header'
+  const authorLink = msgHeader.appendChild(new vodEnv.Element('a'))
+  authorLink.setAttribute('href', '/streamer_one')
+  const displayName = authorLink.appendChild(new vodEnv.Element('span'))
+  displayName.className = 'chat-author__display-name'
+  displayName.textContent = '實況主'
+  const body = layout.appendChild(new vodEnv.Element('span'))
+  body.setAttribute('data-test-selector', 'message-text')
+  const fragment = body.appendChild(new vodEnv.Element('span'))
+  fragment.className = 'text-fragment'
+  fragment.textContent = 'vod replay hello'
+
+  vodEnv.api.refresh()
+  const state = vodEnv.api.mounted
+  assert.ok(state)
+  assert.equal(state.history.channel, 'vod:987654321')
+  assert.equal(state.history.scope, 'vod:987654321')
+  assert.notEqual(state.host, vodChat)
+  assert.equal(state.host.contains(vodHeader), false)
+  await state.history.restorePromise
+
+  // Live stream message must not leak into VOD archive, and nested mutation does not duplicate
+  vodEnv.api.captureMutations([
+    { target: scroller, addedNodes: [li] },
+    { target: layout, addedNodes: [msgHeader] },
+    { target: fragment, addedNodes: [] },
+  ], state.history)
+  vodEnv.api.setEnabled(state, true)
+  assert.equal(state.history.messages.length, 1)
+  assert.equal(state.history.messages[0].broadcaster, true)
+  assert.equal(state.count.textContent, '1 則')
+  assert.equal(state.list.children[0].querySelector('strong').textContent, '實況主 (streamer_one)')
+  vodEnv.api.unmount()
 })
