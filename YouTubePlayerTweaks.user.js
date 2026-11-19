@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Player Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.2.25
+// @version     0.2.26
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubePlayerTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubePlayerTweaks.user.js
 // @description 提供 YouTube 原解析度 PNG 截圖、滾輪音量與速度調整、直播追平、擴大直播回看範圍，並於 Shorts 隱藏影片內資訊與預設右側頁籤面板。
@@ -1338,6 +1338,7 @@
   const SHORTS_MISSING_POLL_MAX = 24
   const SHORTS_AUTO_OPEN_RETRY_MS = 250
   const SHORTS_DESC_FALLBACK_MS = 180
+  const SHORTS_AUTO_TITLE_RETRY_MS = 250
   const SHORTS_DESC_MENU_POLL_MS = 50
   const SHORTS_DESC_MENU_MAX_POLLS = 8
   const SHORTS_PENDING_GRACE_MS = 900
@@ -1444,26 +1445,67 @@
     )
   }
 
+  const SHORTS_PLAYER_CHROME_SELECTOR =
+    '.html5-video-player, #shorts-player, .ytp-overlays-container, .ytp-chrome-top, .ytp-chrome-bottom'
+
+  const isPlayerChromeButton = (button) =>
+    !button ||
+    Boolean(button.closest?.(SHORTS_PLAYER_CHROME_SELECTOR)) ||
+    /\bytp-/.test(button.className || '')
+
+  const isElementHiddenAttrOrStyle = (element) =>
+    !element ||
+    Boolean(element.hidden) ||
+    Boolean(element.hasAttribute?.('hidden')) ||
+    element.getAttribute?.('aria-hidden') === 'true' ||
+    element.style?.display === 'none' ||
+    element.style?.visibility === 'hidden'
+
+  const isElementVisible = (element) => {
+    if (isElementHiddenAttrOrStyle(element)) return false
+    const rect = element.getBoundingClientRect?.()
+    return Boolean(rect && rect.width > 0 && rect.height > 0)
+  }
+
+  const pickBestButton = (candidates) => {
+    for (const button of candidates) {
+      if (isElementVisible(button)) return button
+    }
+    for (const button of candidates) {
+      if (!isElementHiddenAttrOrStyle(button)) return button
+    }
+    return null
+  }
+
   const findShortsMoreActionsButton = (reel, shorts) => {
     const scope = reel || shorts
     if (!scope) return null
+
+    const excludedSelector =
+      'reel-action-bar-view-model, .ytReelPlayerOverlayViewModelMetadataContainer, #anchored-panel'
+
+    const menuButtons = []
+    for (const button of scope.querySelectorAll(
+      'ytd-shorts-player-controls #menu-button button, .ytdReelVideoRendererPlayerControls #menu-button button, #menu-button button'
+    )) {
+      if (isPlayerChromeButton(button) || button.closest?.(excludedSelector)) continue
+      menuButtons.push(button)
+    }
+    const preferred = pickBestButton(menuButtons)
+    if (preferred) return preferred
+
+    const fallbackButtons = []
     for (const button of scope.querySelectorAll('button')) {
-      if (
-        button.closest?.(
-          'reel-action-bar-view-model, .ytReelPlayerOverlayViewModelMetadataContainer, #anchored-panel'
-        )
-      ) {
-        continue
-      }
+      if (isPlayerChromeButton(button) || button.closest?.(excludedSelector)) continue
       const label = button.getAttribute?.('aria-label') || ''
-      if (SHORTS_MORE_ACTIONS_LABEL_RE.test(label)) return button
-      if (button.closest?.('#menu-button')) return button
-      for (const path of button.querySelectorAll('path')) {
-        const d = path.getAttribute?.('d') || ''
-        if (SHORTS_THREE_DOTS_PATH_RE.test(d)) return button
+      const hasDotsPath = [...button.querySelectorAll('path')].some((path) =>
+        SHORTS_THREE_DOTS_PATH_RE.test(path.getAttribute?.('d') || '')
+      )
+      if (SHORTS_MORE_ACTIONS_LABEL_RE.test(label) || hasDotsPath) {
+        fallbackButtons.push(button)
       }
     }
-    return null
+    return pickBestButton(fallbackButtons)
   }
 
   const isDropdownVisible = (dropdown) => {
@@ -1518,21 +1560,6 @@
       panel.querySelector('yt-video-title-header-view-model .ytVideoTitleHeaderViewModelHeaderButton button') ||
       panel.querySelector('yt-floating-button-view-model button')
     )
-  }
-
-  const isElementVisible = (element) => {
-    if (!element) return false
-    if (
-      element.hidden ||
-      element.hasAttribute?.('hidden') ||
-      element.getAttribute?.('aria-hidden') === 'true' ||
-      element.style?.display === 'none' ||
-      element.style?.visibility === 'hidden'
-    ) {
-      return false
-    }
-    const rect = element.getBoundingClientRect?.()
-    return Boolean(rect && rect.width > 0 && rect.height > 0)
   }
 
   const canAutoOpenShortsPanel = (shorts, reel) => {
@@ -1788,7 +1815,31 @@
         if (getExpandedShortsPanel(shorts)?.getAttribute('target-id') === SHORTS_PANEL_DESCRIPTION) {
           return 'expanded'
         }
-        menuFallbackTimer = setTimeout(startMenuFallback, SHORTS_DESC_FALLBACK_MS)
+        if (isAuto) {
+          menuFallbackTimer = setTimeout(() => {
+            menuFallbackTimer = 0
+            if (signal.aborted || desiredTab !== 'description' || shortsPanelDismissed) return
+            const latestShorts = $('ytd-shorts')
+            const latestReel = getActiveShortsReel(latestShorts)
+            if (getExpandedShortsPanel(latestShorts)?.getAttribute('target-id') === SHORTS_PANEL_DESCRIPTION) {
+              sync()
+              return
+            }
+            const latestTitle = findShortsDescriptionTitleTarget(latestReel, latestShorts)
+            if (latestTitle) {
+              triggerInternalClick(latestTitle)
+              if (getExpandedShortsPanel(latestShorts)?.getAttribute('target-id') === SHORTS_PANEL_DESCRIPTION) {
+                sync()
+                return
+              }
+              menuFallbackTimer = setTimeout(startMenuFallback, SHORTS_DESC_FALLBACK_MS)
+              return
+            }
+            startMenuFallback()
+          }, SHORTS_AUTO_TITLE_RETRY_MS)
+        } else {
+          menuFallbackTimer = setTimeout(startMenuFallback, SHORTS_DESC_FALLBACK_MS)
+        }
         return 'pending'
       }
 
@@ -1796,7 +1847,7 @@
         isAuto &&
         (!reel ||
           !reel.querySelector(
-            '.ytReelPlayerOverlayViewModelMetadataContainer, yt-reel-metapanel-view-model, reel-action-bar-view-model'
+            '.ytReelPlayerOverlayViewModelMetadataContainer, yt-reel-metapanel-view-model'
           ))
       ) {
         return 'missing'

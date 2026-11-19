@@ -513,6 +513,7 @@ function addShortsPanelFixture(env, options = {}) {
     fullscreen = false,
     visibleScrim = false,
     deferActionBar = false,
+    deferMetadata = false,
     deferOverlay = false,
     reelTag = 'ytd-reel-video-renderer',
     commentsLabel = '3,414 件のコメントを表示',
@@ -521,6 +522,8 @@ function addShortsPanelFixture(env, options = {}) {
     omitTitle = false,
     brokenTitle = false,
     omitDescriptionMenuItem = false,
+    omitMenuButton = false,
+    duplicateHiddenMenu = false,
   } = options
 
   env.window.innerWidth = innerWidth
@@ -610,6 +613,21 @@ function addShortsPanelFixture(env, options = {}) {
   video.id = 'short-video-container'
   video.rect = { left: 480, top: 64, right: 795, bottom: 640, width: 315, height: 576 }
 
+  // Real YouTube Shorts mounts a hidden HTML5 .ytp-overflow-button inside #shorts-player
+  // BEFORE ytd-shorts-player-controls #menu-button in DOM order; clicking it opens Watch Later.
+  const shortsPlayer = video.appendChild(new env.Element())
+  shortsPlayer.id = 'shorts-player'
+  shortsPlayer.className = 'html5-video-player ytp-hide-controls'
+  const ytpOverlays = shortsPlayer.appendChild(new env.Element())
+  ytpOverlays.className = 'ytp-overlays-container'
+  const overflowBtn = ytpOverlays.appendChild(new env.Element('button'))
+  overflowBtn.className = 'ytp-overflow-button ytp-button'
+  overflowBtn.setAttribute('aria-label', 'その他の操作')
+  const overflowPath = overflowBtn.appendChild(new env.Element('svg')).appendChild(new env.Element('path'))
+  overflowPath.setAttribute('d', 'M12 8c1.1 0 2-.9 2-2s-.9-2-2-2')
+  let overflowClicks = 0
+  overflowBtn.addEventListener('click', () => { overflowClicks++ })
+
   const overlay = reel.appendChild(new env.Element())
   overlay.className = 'overlay'
   let metaContainer = null
@@ -672,14 +690,29 @@ function addShortsPanelFixture(env, options = {}) {
   }
 
   if (!deferOverlay) {
-    mountMetadata()
+    if (!deferMetadata) mountMetadata()
     if (!deferActionBar) mountActionBar()
   }
 
-  const menuButtonHost = reel.appendChild(new env.Element())
-  menuButtonHost.id = 'menu-button'
-  const moreBtn = menuButtonHost.appendChild(new env.Element('button'))
-  moreBtn.setAttribute('aria-label', 'その他の操作')
+  let hiddenMenuClicks = 0
+  if (duplicateHiddenMenu) {
+    const hiddenMenuHost = reel.appendChild(new env.Element())
+    hiddenMenuHost.id = 'menu-button'
+    const hiddenMenuBtn = hiddenMenuHost.appendChild(new env.Element('button'))
+    hiddenMenuBtn.setAttribute('aria-label', 'その他の操作')
+    hiddenMenuBtn.style.display = 'none'
+    hiddenMenuBtn.addEventListener('click', () => { hiddenMenuClicks++ })
+  }
+
+  const playerControls = reel.appendChild(new env.Element('ytd-shorts-player-controls'))
+  let moreBtn = null
+  if (!omitMenuButton) {
+    const menuButtonHost = playerControls.appendChild(new env.Element())
+    menuButtonHost.id = 'menu-button'
+    moreBtn = menuButtonHost.appendChild(new env.Element('button'))
+    moreBtn.setAttribute('aria-label', 'その他の操作')
+    moreBtn.rect = { left: 740, top: 80, right: 788, bottom: 128, width: 48, height: 48 }
+  }
   const dropdown = new env.Element('tp-yt-iron-dropdown')
   dropdown.style.display = 'none'
   const menu = dropdown.appendChild(new env.Element('yt-list-view-model'))
@@ -711,7 +744,7 @@ function addShortsPanelFixture(env, options = {}) {
       openDescriptionPanel()
     })
   }
-  moreBtn.addEventListener('click', () => {
+  moreBtn?.addEventListener('click', () => {
     dropdown.style.display = 'block'
   })
   env.selectors.set('tp-yt-iron-dropdown', [dropdown])
@@ -722,12 +755,14 @@ function addShortsPanelFixture(env, options = {}) {
     get metaContainer() { return metaContainer },
     get titleLink() { return titleLink },
     get commentsBtn() { return commentsBtn },
-    mountActionBar, mountOverlay, moreBtn, dropdown, descMenuBtn, commentsCloseBtn, descCloseBtn,
+    mountActionBar, mountMetadata, mountOverlay, moreBtn, overflowBtn, dropdown, descMenuBtn, commentsCloseBtn, descCloseBtn,
     openCommentsPanel, openDescriptionPanel, closeAnyPanel,
     getTitleClicks: () => titleClicks,
     getCommentClicks: () => commentClicks,
     getMenuDescClicks: () => menuDescClicks,
     getOtherMenuClicks: () => otherMenuClicks,
+    getOverflowClicks: () => overflowClicks,
+    getHiddenMenuClicks: () => hiddenMenuClicks,
     expandedTargetId: () => {
       if (slot0.getAttribute('visibility') === 'ENGAGEMENT_PANEL_VISIBILITY_EXPANDED') return slot0.getAttribute('target-id')
       if (slot1.getAttribute('visibility') === 'ENGAGEMENT_PANEL_VISIBILITY_EXPANDED') return slot1.getAttribute('target-id')
@@ -843,15 +878,23 @@ test('YouTube Shorts: switches between Video Info and Comments tabs with keyboar
   assert.equal(fx.expandedTargetId(), 'engagement-panel-structured-description')
   assert.equal(descTab.getAttribute('aria-selected'), 'true')
 
-  // Broken title triggers 180ms fallback to More Actions -> Description menu item on both auto-open and manual click.
+  // Broken title retries once at 250ms, then falls back after 180ms to real #menu-button (ignoring .ytp-overflow-button);
+  // manual click still uses 180ms fallback.
   const envBroken = boot(scripts[0], 'worker', '/shorts/broken')
-  const fxBroken = addShortsPanelFixture(envBroken, { brokenTitle: true })
+  const fxBroken = addShortsPanelFixture(envBroken, { brokenTitle: true, duplicateHiddenMenu: true })
   envBroken.render()
   assert.equal(fxBroken.getTitleClicks(), 1)
   assert.equal(fxBroken.getMenuDescClicks(), 0)
+  assert.equal(fxBroken.getOverflowClicks(), 0)
   assert.equal(fxBroken.expandedTargetId(), '')
+  envBroken.flush(250)
+  assert.equal(fxBroken.getTitleClicks(), 2)
+  assert.equal(fxBroken.getMenuDescClicks(), 0)
+  assert.equal(fxBroken.getOverflowClicks(), 0)
   envBroken.flush(180)
   assert.equal(fxBroken.getMenuDescClicks(), 1)
+  assert.equal(fxBroken.getHiddenMenuClicks(), 0)
+  assert.equal(fxBroken.getOverflowClicks(), 0)
   assert.equal(fxBroken.expandedTargetId(), 'engagement-panel-structured-description')
   assert.equal(fxBroken.anchoredPanel.querySelector('#yt-shorts-panel-tabs').hidden, false)
 
@@ -859,23 +902,26 @@ test('YouTube Shorts: switches between Video Info and Comments tabs with keyboar
   brokenCommentsTab.click()
   assert.equal(fxBroken.expandedTargetId(), 'engagement-panel-comments-section')
   brokenDescTab.click()
-  assert.equal(fxBroken.getTitleClicks(), 2)
+  assert.equal(fxBroken.getTitleClicks(), 3)
   assert.equal(fxBroken.getMenuDescClicks(), 1)
   envBroken.flush(180)
   assert.equal(fxBroken.getMenuDescClicks(), 2)
+  assert.equal(fxBroken.getOverflowClicks(), 0)
   assert.equal(fxBroken.expandedTargetId(), 'engagement-panel-structured-description')
 
-  // Missing title immediately opens More Actions -> Description menu item on auto-open and manual tab switch.
+  // Missing title immediately opens real #menu-button -> Description menu item without touching .ytp-overflow-button.
   const envNoTitle = boot(scripts[0], 'worker', '/shorts/notitle')
   const fxNoTitle = addShortsPanelFixture(envNoTitle, { omitTitle: true })
   envNoTitle.render()
   assert.equal(fxNoTitle.getMenuDescClicks(), 1)
+  assert.equal(fxNoTitle.getOverflowClicks(), 0)
   assert.equal(fxNoTitle.expandedTargetId(), 'engagement-panel-structured-description')
   const [noTitleDescTab, noTitleCommentsTab] = fxNoTitle.anchoredPanel.querySelectorAll('[role="tab"]')
   noTitleCommentsTab.click()
   assert.equal(fxNoTitle.expandedTargetId(), 'engagement-panel-comments-section')
   noTitleDescTab.click()
   assert.equal(fxNoTitle.getMenuDescClicks(), 2)
+  assert.equal(fxNoTitle.getOverflowClicks(), 0)
   assert.equal(fxNoTitle.expandedTargetId(), 'engagement-panel-structured-description')
 })
 
@@ -1722,15 +1768,26 @@ test('YouTube Shorts: close dismissal persists across Shorts, disabled comments 
   assert.equal(disabledCommentsTab.getAttribute('aria-selected'), 'false')
   assert.equal(envDisabled.timers.size, 0)
 
-  // Ad Short (no title & no Description menu item) tries More Actions once, never clicks unrelated first item, and stops polling cleanly.
+  // Ad Short (no title & no Description menu item) tries More Actions once, never clicks unrelated first item or .ytp-overflow-button, and stops polling cleanly.
   const envAd = boot(scripts[0], 'worker', '/shorts/ad')
   const fxAd = addShortsPanelFixture(envAd, { omitTitle: true, omitDescriptionMenuItem: true })
   envAd.render()
   for (let i = 0; i < 8; i++) envAd.flush(50)
   assert.equal(fxAd.getOtherMenuClicks(), 0)
   assert.equal(fxAd.getMenuDescClicks(), 0)
+  assert.equal(fxAd.getOverflowClicks(), 0)
   assert.equal(fxAd.expandedTargetId(), '')
   assert.equal(envAd.timers.size, 0)
+
+  // Missing title AND missing #menu-button never falls back to HTML5 player's .ytp-overflow-button and stops polling cleanly.
+  const envPlayerOnly = boot(scripts[0], 'worker', '/shorts/playeronly')
+  const fxPlayerOnly = addShortsPanelFixture(envPlayerOnly, { omitTitle: true, omitMenuButton: true })
+  envPlayerOnly.render()
+  for (let i = 0; i < 26; i++) envPlayerOnly.flush(250)
+  assert.equal(fxPlayerOnly.getOverflowClicks(), 0)
+  assert.equal(fxPlayerOnly.getMenuDescClicks(), 0)
+  assert.equal(fxPlayerOnly.expandedTargetId(), '')
+  assert.equal(envPlayerOnly.timers.size, 0)
 })
 
 test('YouTube Shorts: hidden #anchored-panel-scrim on desktop allows auto-open while visible scrim blocks it', () => {
@@ -1796,6 +1853,20 @@ test('YouTube Shorts: background tabs defer auto-open until visible and missing-
   envLate.render()
   assert.equal(fxLate.getTitleClicks(), 1, 'late overlay still auto-opens Video Info without permanent exhaustion')
   assert.equal(fxLate.expandedTargetId(), 'engagement-panel-structured-description')
+
+  // Action bar mounting before metadata must NOT trigger More Actions or .ytp-overflow-button prematurely; once metadata mounts, title opens Video Info.
+  const envActionFirst = boot(scripts[0], 'worker', '/shorts/actionfirst')
+  const fxActionFirst = addShortsPanelFixture(envActionFirst, { deferMetadata: true })
+  envActionFirst.render()
+  assert.equal(fxActionFirst.getTitleClicks(), 0)
+  assert.equal(fxActionFirst.getOverflowClicks(), 0)
+  assert.equal(fxActionFirst.getMenuDescClicks(), 0)
+  assert.equal(fxActionFirst.expandedTargetId(), '')
+  fxActionFirst.mountMetadata()
+  envActionFirst.flush(250)
+  assert.equal(fxActionFirst.getTitleClicks(), 1)
+  assert.equal(fxActionFirst.getOverflowClicks(), 0)
+  assert.equal(fxActionFirst.expandedTargetId(), 'engagement-panel-structured-description')
 })
 
 test('YouTube: addStyle re-appends stylesheet after head resources on DOMContentLoaded when document is loading', () => {
@@ -1860,6 +1931,7 @@ test('YouTube Shorts: supports ytd-reel-video-renderer-cow for Video Info defaul
   sortBtn.addEventListener('click', () => { sortClicks++ })
   envFallback.render()
   assert.equal(sortClicks, 0)
+  assert.equal(fxFallback.getOverflowClicks(), 0)
   assert.equal(fxFallback.getMenuDescClicks(), 1)
   assert.equal(fxFallback.expandedTargetId(), 'engagement-panel-structured-description')
 
