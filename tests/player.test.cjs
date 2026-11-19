@@ -513,12 +513,14 @@ function addShortsPanelFixture(env, options = {}) {
     fullscreen = false,
     visibleScrim = false,
     deferActionBar = false,
+    deferOverlay = false,
     reelTag = 'ytd-reel-video-renderer',
     commentsLabel = '3,414 件のコメントを表示',
     commentsPath = 'M1 6a4 4 0 014-4h14a4 4 0 014 4v10a4 4 0',
     commentsDisabled = false,
     omitTitle = false,
     brokenTitle = false,
+    omitDescriptionMenuItem = false,
   } = options
 
   env.window.innerWidth = innerWidth
@@ -610,15 +612,23 @@ function addShortsPanelFixture(env, options = {}) {
 
   const overlay = reel.appendChild(new env.Element())
   overlay.className = 'overlay'
-  const metaContainer = overlay.appendChild(new env.Element())
-  metaContainer.className = 'ytReelPlayerOverlayViewModelMetadataContainer'
+  let metaContainer = null
   let titleLink = null
-  if (!omitTitle) {
-    const titleVm = metaContainer.appendChild(new env.Element('yt-shorts-video-title-view-model'))
-    titleLink = titleVm.appendChild(new env.Element('h1'))
-    titleLink.className = 'ytShortsVideoTitleViewModelShortsVideoTitle'
-    titleLink.setAttribute('role', 'link')
-    if (!brokenTitle) titleLink.addEventListener('click', openDescriptionPanel)
+  let titleClicks = 0
+  const mountMetadata = () => {
+    if (metaContainer) return
+    metaContainer = overlay.appendChild(new env.Element())
+    metaContainer.className = 'ytReelPlayerOverlayViewModelMetadataContainer'
+    if (!omitTitle) {
+      const titleVm = metaContainer.appendChild(new env.Element('yt-shorts-video-title-view-model'))
+      titleLink = titleVm.appendChild(new env.Element('h1'))
+      titleLink.className = 'ytShortsVideoTitleViewModelShortsVideoTitle'
+      titleLink.setAttribute('role', 'link')
+      titleLink.addEventListener('click', () => {
+        titleClicks++
+        if (!brokenTitle) openDescriptionPanel()
+      })
+    }
   }
 
   const actionsContainer = overlay.appendChild(new env.Element())
@@ -656,7 +666,15 @@ function addShortsPanelFixture(env, options = {}) {
     return commentsBtn
   }
 
-  if (!deferActionBar) mountActionBar()
+  const mountOverlay = () => {
+    mountMetadata()
+    mountActionBar()
+  }
+
+  if (!deferOverlay) {
+    mountMetadata()
+    if (!deferActionBar) mountActionBar()
+  }
 
   const menuButtonHost = reel.appendChild(new env.Element())
   menuButtonHost.id = 'menu-button'
@@ -666,18 +684,33 @@ function addShortsPanelFixture(env, options = {}) {
   dropdown.style.display = 'none'
   const menu = dropdown.appendChild(new env.Element('yt-list-view-model'))
   menu.setAttribute('role', 'menu')
-  const descMenuItem = menu.appendChild(new env.Element('yt-list-item-view-model'))
-  const descMenuBtn = descMenuItem.appendChild(new env.Element('button'))
-  descMenuBtn.setAttribute('role', 'menuitem')
-  descMenuBtn.textContent = '說明'
-  const descMenuPath = descMenuBtn.appendChild(new env.Element('svg')).appendChild(new env.Element('path'))
-  descMenuPath.setAttribute('d', 'M4 5a1 1 0 000 2h16a1 1 0 100-')
+  let descMenuBtn = null
   let menuDescClicks = 0
-  descMenuBtn.addEventListener('click', () => {
-    menuDescClicks++
-    dropdown.style.display = 'none'
-    openDescriptionPanel()
-  })
+  let otherMenuClicks = 0
+  if (omitDescriptionMenuItem) {
+    const otherMenuItem = menu.appendChild(new env.Element('yt-list-item-view-model'))
+    const otherMenuBtn = otherMenuItem.appendChild(new env.Element('button'))
+    otherMenuBtn.setAttribute('role', 'menuitem')
+    otherMenuBtn.textContent = '檢舉'
+    const otherPath = otherMenuBtn.appendChild(new env.Element('svg')).appendChild(new env.Element('path'))
+    otherPath.setAttribute('d', 'M14.4 6L14 4H5v17h2v-7h5.6l.4 2h7V6z')
+    otherMenuBtn.addEventListener('click', () => {
+      otherMenuClicks++
+      dropdown.style.display = 'none'
+    })
+  } else {
+    const descMenuItem = menu.appendChild(new env.Element('yt-list-item-view-model'))
+    descMenuBtn = descMenuItem.appendChild(new env.Element('button'))
+    descMenuBtn.setAttribute('role', 'menuitem')
+    descMenuBtn.textContent = '說明'
+    const descMenuPath = descMenuBtn.appendChild(new env.Element('svg')).appendChild(new env.Element('path'))
+    descMenuPath.setAttribute('d', 'M4 5a1 1 0 000 2h16a1 1 0 100-')
+    descMenuBtn.addEventListener('click', () => {
+      menuDescClicks++
+      dropdown.style.display = 'none'
+      openDescriptionPanel()
+    })
+  }
   moreBtn.addEventListener('click', () => {
     dropdown.style.display = 'block'
   })
@@ -685,12 +718,16 @@ function addShortsPanelFixture(env, options = {}) {
   env.selectors.set('ytd-shorts', shorts)
 
   return {
-    shorts, scrim, anchoredPanel, slot0, slot1, reel, metaContainer, titleLink,
+    shorts, innerContainer, scrim, anchoredPanel, slot0, slot1, reel,
+    get metaContainer() { return metaContainer },
+    get titleLink() { return titleLink },
     get commentsBtn() { return commentsBtn },
-    mountActionBar, moreBtn, dropdown, descMenuBtn, commentsCloseBtn, descCloseBtn,
+    mountActionBar, mountOverlay, moreBtn, dropdown, descMenuBtn, commentsCloseBtn, descCloseBtn,
     openCommentsPanel, openDescriptionPanel, closeAnyPanel,
+    getTitleClicks: () => titleClicks,
     getCommentClicks: () => commentClicks,
     getMenuDescClicks: () => menuDescClicks,
+    getOtherMenuClicks: () => otherMenuClicks,
     expandedTargetId: () => {
       if (slot0.getAttribute('visibility') === 'ENGAGEMENT_PANEL_VISIBILITY_EXPANDED') return slot0.getAttribute('target-id')
       if (slot1.getAttribute('visibility') === 'ENGAGEMENT_PANEL_VISIBILITY_EXPANDED') return slot1.getAttribute('target-id')
@@ -699,7 +736,7 @@ function addShortsPanelFixture(env, options = {}) {
   }
 }
 
-test('YouTube Shorts: hides in-video metadata unconditionally, auto-opens Comments on desktop, and builds accessible Trusted Types tabs', () => {
+test('YouTube Shorts: hides in-video metadata unconditionally, pins top tab bar order, auto-opens Video Info on desktop, and builds accessible Trusted Types tabs', () => {
   const env = boot(scripts[0], 'worker', '/shorts/example', { trustedTypes: true })
   const css = env.styles[0].textContent
   const metadataRule = css.match(/html body ytd-shorts #shorts-container #experiment-overlay \.ytReelPlayerOverlayViewModelMetadataContainer,[\s\S]*?html body ytd-shorts #metapanel\s*\{([^}]*)\}/)
@@ -710,12 +747,15 @@ test('YouTube Shorts: hides in-video metadata unconditionally, auto-opens Commen
   assert.doesNotMatch(metadataRule[1], /display:\s*none/)
   assert.match(css, /\.ytReelPlayerOverlayViewModelMetadataContainer \*,[\s\S]*?yt-reel-metapanel-view-model \*\s*\{[^}]*visibility:\s*hidden !important;[^}]*pointer-events:\s*none !important;/)
   assert.doesNotMatch(css, /#anchored-panel\[data-yt-shorts-tabs\][^}]*overflow:\s*hidden/)
+  assert.match(css, /#anchored-panel\[data-yt-shorts-tabs\] > :not\(#yt-shorts-panel-tabs\)\s*\{[^}]*order:\s*0 !important;/)
+  assert.match(css, /#yt-shorts-panel-tabs\s*\{[^}]*order:\s*-1 !important;/)
 
   const fx = addShortsPanelFixture(env, { commentsLabel: '' })
   env.render()
 
-  assert.equal(fx.getCommentClicks(), 1, 'matches Comments button by SVG path even when aria-label is blank')
-  assert.equal(fx.expandedTargetId(), 'engagement-panel-comments-section')
+  assert.equal(fx.getTitleClicks(), 1)
+  assert.equal(fx.getCommentClicks(), 0)
+  assert.equal(fx.expandedTargetId(), 'engagement-panel-structured-description')
   assert.equal(fx.shorts.hasAttribute('data-yt-shorts-tabs'), true)
   assert.equal(fx.anchoredPanel.hasAttribute('data-yt-shorts-tabs'), true)
 
@@ -729,7 +769,7 @@ test('YouTube Shorts: hides in-video metadata unconditionally, auto-opens Commen
   assert.equal(tablist.getAttribute('focusgroup'), 'tablist nomemory')
   const tabs = tablist.querySelectorAll('[role="tab"]')
   assert.equal(tabs.length, 2)
-  assert.deepEqual(tabs.map(t => t.textContent), ['留言', '影片資訊'])
+  assert.deepEqual(tabs.map(t => t.textContent), ['影片資訊', '留言'])
   assert.equal(tabs[0].getAttribute('aria-selected'), 'true')
   assert.equal(tabs[0].getAttribute('tabindex'), '0')
   assert.equal(tabs[0].hasAttribute('focusgroupstart'), true)
@@ -739,131 +779,185 @@ test('YouTube Shorts: hides in-video metadata unconditionally, auto-opens Commen
   assert.equal(tabs[1].hasAttribute('focusgroupstart'), false)
   assert.equal(tabs[1].hasAttribute('aria-controls'), false)
 
+  // Clicking the already-active tab must not re-click or toggle the panel closed.
+  tabs[0].click()
+  assert.equal(fx.getTitleClicks(), 1)
+  assert.equal(fx.expandedTargetId(), 'engagement-panel-structured-description')
+
   const closeBtn = tabBar.querySelector('.yt-shorts-panel-close')
   assert.ok(closeBtn)
   assert.equal(tablist.contains(closeBtn), false, 'close button must sit outside tablist')
   assert.equal(env.timers.size, 0)
 })
 
-test('YouTube Shorts: switches between Comments and Description tabs with keyboard navigation and More Actions menu fallback', () => {
+test('YouTube Shorts: switches between Video Info and Comments tabs with keyboard navigation and More Actions menu fallback', () => {
   const env = boot(scripts[0], 'worker', '/shorts/example')
   const fx = addShortsPanelFixture(env)
   env.render()
 
   const tabBar = fx.anchoredPanel.querySelector('#yt-shorts-panel-tabs')
   const tablist = tabBar.querySelector('[role="tablist"]')
-  const [commentsTab, descTab] = tablist.querySelectorAll('[role="tab"]')
+  const [descTab, commentsTab] = tablist.querySelectorAll('[role="tab"]')
 
-  descTab.click()
   assert.equal(fx.expandedTargetId(), 'engagement-panel-structured-description')
   assert.equal(descTab.getAttribute('aria-selected'), 'true')
-  assert.equal(descTab.getAttribute('tabindex'), '0')
-  assert.equal(descTab.hasAttribute('focusgroupstart'), true)
-  assert.equal(commentsTab.getAttribute('aria-selected'), 'false')
-  assert.equal(commentsTab.getAttribute('tabindex'), '-1')
+
+  commentsTab.click()
+  assert.equal(fx.expandedTargetId(), 'engagement-panel-comments-section')
+  assert.equal(commentsTab.getAttribute('aria-selected'), 'true')
+  assert.equal(commentsTab.getAttribute('tabindex'), '0')
+  assert.equal(commentsTab.hasAttribute('focusgroupstart'), true)
+  assert.equal(descTab.getAttribute('aria-selected'), 'false')
+  assert.equal(descTab.getAttribute('tabindex'), '-1')
+  assert.equal(fx.getCommentClicks(), 1)
+
+  // Clicking Comments tab while already expanded must not toggle Comments closed.
+  commentsTab.click()
+  assert.equal(fx.getCommentClicks(), 1)
+  assert.equal(fx.expandedTargetId(), 'engagement-panel-comments-section')
 
   // Keyboard navigation moves focus & roving tabindex without page/player interference.
   const keyRight = {
-    type: 'keydown', key: 'ArrowRight', target: descTab,
+    type: 'keydown', key: 'ArrowRight', target: commentsTab,
     preventDefault() { this.prevented = true },
     stopPropagation() { this.stopped = true },
   }
   tablist.dispatchEvent(keyRight)
   assert.equal(keyRight.prevented, true)
   assert.equal(keyRight.stopped, true)
-  assert.equal(env.document.activeElement, commentsTab)
-  assert.equal(commentsTab.getAttribute('tabindex'), '0')
-  assert.equal(descTab.getAttribute('tabindex'), '-1')
+  assert.equal(env.document.activeElement, descTab)
+  assert.equal(descTab.getAttribute('tabindex'), '0')
+  assert.equal(commentsTab.getAttribute('tabindex'), '-1')
 
-  const keyEnd = { key: 'End', target: commentsTab, preventDefault() {}, stopPropagation() {} }
+  const keyEnd = { key: 'End', target: descTab, preventDefault() {}, stopPropagation() {} }
   tablist.dispatchEvent({ type: 'keydown', ...keyEnd })
-  assert.equal(env.document.activeElement, descTab)
-  const keyHome = { key: 'Home', target: descTab, preventDefault() {}, stopPropagation() {} }
-  tablist.dispatchEvent({ type: 'keydown', ...keyHome })
   assert.equal(env.document.activeElement, commentsTab)
-  const keyLeft = { key: 'ArrowLeft', target: commentsTab, preventDefault() {}, stopPropagation() {} }
-  tablist.dispatchEvent({ type: 'keydown', ...keyLeft })
+  const keyHome = { key: 'Home', target: commentsTab, preventDefault() {}, stopPropagation() {} }
+  tablist.dispatchEvent({ type: 'keydown', ...keyHome })
   assert.equal(env.document.activeElement, descTab)
+  const keyLeft = { key: 'ArrowLeft', target: descTab, preventDefault() {}, stopPropagation() {} }
+  tablist.dispatchEvent({ type: 'keydown', ...keyLeft })
+  assert.equal(env.document.activeElement, commentsTab)
 
-  commentsTab.click()
-  assert.equal(fx.expandedTargetId(), 'engagement-panel-comments-section')
-  assert.equal(commentsTab.getAttribute('aria-selected'), 'true')
+  descTab.click()
+  assert.equal(fx.expandedTargetId(), 'engagement-panel-structured-description')
+  assert.equal(descTab.getAttribute('aria-selected'), 'true')
 
-  // Broken title triggers 180ms fallback to More Actions -> Description menu item.
+  // Broken title triggers 180ms fallback to More Actions -> Description menu item on both auto-open and manual click.
   const envBroken = boot(scripts[0], 'worker', '/shorts/broken')
   const fxBroken = addShortsPanelFixture(envBroken, { brokenTitle: true })
   envBroken.render()
-  const [, descTabBroken] = fxBroken.anchoredPanel.querySelectorAll('[role="tab"]')
-  descTabBroken.click()
+  assert.equal(fxBroken.getTitleClicks(), 1)
   assert.equal(fxBroken.getMenuDescClicks(), 0)
+  assert.equal(fxBroken.expandedTargetId(), '')
   envBroken.flush(180)
   assert.equal(fxBroken.getMenuDescClicks(), 1)
   assert.equal(fxBroken.expandedTargetId(), 'engagement-panel-structured-description')
+  assert.equal(fxBroken.anchoredPanel.querySelector('#yt-shorts-panel-tabs').hidden, false)
 
-  // Missing title immediately opens More Actions -> Description menu item.
+  const [brokenDescTab, brokenCommentsTab] = fxBroken.anchoredPanel.querySelectorAll('[role="tab"]')
+  brokenCommentsTab.click()
+  assert.equal(fxBroken.expandedTargetId(), 'engagement-panel-comments-section')
+  brokenDescTab.click()
+  assert.equal(fxBroken.getTitleClicks(), 2)
+  assert.equal(fxBroken.getMenuDescClicks(), 1)
+  envBroken.flush(180)
+  assert.equal(fxBroken.getMenuDescClicks(), 2)
+  assert.equal(fxBroken.expandedTargetId(), 'engagement-panel-structured-description')
+
+  // Missing title immediately opens More Actions -> Description menu item on auto-open and manual tab switch.
   const envNoTitle = boot(scripts[0], 'worker', '/shorts/notitle')
   const fxNoTitle = addShortsPanelFixture(envNoTitle, { omitTitle: true })
   envNoTitle.render()
-  const [, descTabNoTitle] = fxNoTitle.anchoredPanel.querySelectorAll('[role="tab"]')
-  descTabNoTitle.click()
   assert.equal(fxNoTitle.getMenuDescClicks(), 1)
+  assert.equal(fxNoTitle.expandedTargetId(), 'engagement-panel-structured-description')
+  const [noTitleDescTab, noTitleCommentsTab] = fxNoTitle.anchoredPanel.querySelectorAll('[role="tab"]')
+  noTitleCommentsTab.click()
+  assert.equal(fxNoTitle.expandedTargetId(), 'engagement-panel-comments-section')
+  noTitleDescTab.click()
+  assert.equal(fxNoTitle.getMenuDescClicks(), 2)
   assert.equal(fxNoTitle.expandedTargetId(), 'engagement-panel-structured-description')
 })
 
-test('YouTube Shorts: switching Shorts resets back to Comments via navigation or scroll without stacking listeners', async () => {
+test('YouTube Shorts: switching Shorts resets back to Video Info and recovers when YouTube flips back to Comments', async () => {
   const env = boot(scripts[0], 'worker', '/shorts/first')
   const fx = addShortsPanelFixture(env)
   env.render()
-
-  const [, descTab] = fx.anchoredPanel.querySelectorAll('[role="tab"]')
-  descTab.click()
+  assert.equal(fx.getTitleClicks(), 1)
   assert.equal(fx.expandedTargetId(), 'engagement-panel-structured-description')
+
+  const [descTab, commentsTab] = fx.anchoredPanel.querySelectorAll('[role="tab"]')
+  commentsTab.click()
+  assert.equal(fx.expandedTargetId(), 'engagement-panel-comments-section')
 
   env.location.pathname = '/shorts/second'
   await env.listeners.get('yt-navigate-finish')()
-  assert.equal(fx.expandedTargetId(), 'engagement-panel-comments-section')
+  assert.equal(fx.expandedTargetId(), 'engagement-panel-structured-description')
+  assert.equal(descTab.getAttribute('aria-selected'), 'true')
   assert.equal(env.observers.length, 1)
   assert.equal(env.listenerCount('wheel'), 1)
   assert.equal(env.listenerCount('click'), 1)
 
-  descTab.click()
-  assert.equal(fx.expandedTargetId(), 'engagement-panel-structured-description')
+  commentsTab.click()
+  assert.equal(fx.expandedTargetId(), 'engagement-panel-comments-section')
   env.location.pathname = '/shorts/third'
   env.emit('scroll', {})
   env.render()
-  assert.equal(fx.expandedTargetId(), 'engagement-panel-comments-section')
+  assert.equal(fx.expandedTargetId(), 'engagement-panel-structured-description')
+  assert.equal(descTab.getAttribute('aria-selected'), 'true')
+
+  // Simulate YouTube keeping stale Description momentarily on Short 4 before flipping to Comments.
+  const clicksBeforeFlip = fx.getTitleClicks()
+  env.location.pathname = '/shorts/fourth'
+  await env.listeners.get('yt-navigate-finish')()
+  assert.equal(fx.getTitleClicks(), clicksBeforeFlip)
+  assert.equal(fx.expandedTargetId(), 'engagement-panel-structured-description')
+
+  fx.openCommentsPanel()
+  env.observers[0].callback([
+    { type: 'attributes', attributeName: 'target-id', target: fx.slot0 },
+    { type: 'attributes', attributeName: 'visibility', target: fx.slot0 },
+  ])
+  env.render()
+  assert.equal(fx.getTitleClicks(), clicksBeforeFlip + 1)
+  assert.equal(fx.expandedTargetId(), 'engagement-panel-structured-description')
+  assert.equal(descTab.getAttribute('aria-selected'), 'true')
 })
 
-test('YouTube Shorts: narrow viewports and fullscreen never auto-open modal panels, while manual open keeps tabs and widening auto-opens', () => {
+test('YouTube Shorts: narrow viewports and fullscreen never auto-open modal panels, while manual open keeps tabs and widening auto-opens Video Info', () => {
   const env = boot(scripts[0], 'worker', '/shorts/narrow')
   const fx = addShortsPanelFixture(env, { innerWidth: 820, smallScreen: true })
   env.render()
+  assert.equal(fx.getTitleClicks(), 0)
   assert.equal(fx.getCommentClicks(), 0)
   assert.equal(fx.expandedTargetId(), '')
 
-  // Manual open in narrow mode still shows tabs.
+  // Manual open in narrow mode still shows tabs with Comments selected first in [影片資訊, 留言] order.
   fx.commentsBtn.click()
   env.render()
   assert.equal(fx.expandedTargetId(), 'engagement-panel-comments-section')
   assert.equal(fx.anchoredPanel.querySelector('#yt-shorts-panel-tabs').hidden, false)
+  const [narrowDescTab, narrowCommentsTab] = fx.anchoredPanel.querySelectorAll('[role="tab"]')
+  assert.equal(narrowDescTab.getAttribute('aria-selected'), 'false')
+  assert.equal(narrowCommentsTab.getAttribute('aria-selected'), 'true')
 
-  // Resizing from narrow (not dismissed) to wide desktop auto-opens Comments.
+  // Resizing from narrow (not dismissed) to wide desktop auto-opens Video Info.
   const envResize = boot(scripts[0], 'worker', '/shorts/resize')
   const fxResize = addShortsPanelFixture(envResize, { innerWidth: 820, smallScreen: true })
   envResize.render()
-  assert.equal(fxResize.getCommentClicks(), 0)
+  assert.equal(fxResize.getTitleClicks(), 0)
   fxResize.shorts.removeAttribute('small-screen-persistent-panel')
   envResize.window.innerWidth = 1440
   envResize.emit('resize', {})
   envResize.render()
-  assert.equal(fxResize.getCommentClicks(), 1)
-  assert.equal(fxResize.expandedTargetId(), 'engagement-panel-comments-section')
+  assert.equal(fxResize.getTitleClicks(), 1)
+  assert.equal(fxResize.expandedTargetId(), 'engagement-panel-structured-description')
 
   // Fullscreen blocks auto-open as well.
   const envFs = boot(scripts[0], 'worker', '/shorts/fs')
   const fxFs = addShortsPanelFixture(envFs, { fullscreen: true })
   envFs.render()
-  assert.equal(fxFs.getCommentClicks(), 0)
+  assert.equal(fxFs.getTitleClicks(), 0)
   assert.equal(fxFs.expandedTargetId(), '')
 })
 
@@ -1552,14 +1646,15 @@ test('YouTube player lookup & initial response: scope player queries to #movie_p
 })
 
 
-test('YouTube Shorts: close dismissal persists across Shorts, disabled comments do not retry, self/unrelated mutations are filtered, and leaving Shorts cleans up', async () => {
+test('YouTube Shorts: close dismissal persists across Shorts, disabled comments stay on Video Info, ad/late-overlay retries stop cleanly, and leaving Shorts cleans up', async () => {
   const env = boot(scripts[0], 'worker', '/shorts/first')
   const fx = addShortsPanelFixture(env)
   env.render()
 
   const tabBar = fx.anchoredPanel.querySelector('#yt-shorts-panel-tabs')
   const closeBtn = tabBar.querySelector('.yt-shorts-panel-close')
-  assert.equal(fx.expandedTargetId(), 'engagement-panel-comments-section')
+  assert.equal(fx.expandedTargetId(), 'engagement-panel-structured-description')
+  assert.equal(fx.getTitleClicks(), 1)
 
   // Dismiss via unified close button.
   closeBtn.click()
@@ -1572,7 +1667,7 @@ test('YouTube Shorts: close dismissal persists across Shorts, disabled comments 
   env.location.pathname = '/shorts/second'
   await env.listeners.get('yt-navigate-finish')()
   assert.equal(fx.expandedTargetId(), '')
-  assert.equal(fx.getCommentClicks(), 1)
+  assert.equal(fx.getTitleClicks(), 1)
 
   // Manual native Comments click clears dismissal and restores tabs.
   fx.commentsBtn.click()
@@ -1580,7 +1675,7 @@ test('YouTube Shorts: close dismissal persists across Shorts, disabled comments 
   assert.equal(fx.expandedTargetId(), 'engagement-panel-comments-section')
   assert.equal(tabBar.hidden, false)
 
-  // Dismiss again, leave Shorts, verify cleanup, then return to Shorts -> auto-opens again.
+  // Dismiss again, leave Shorts, verify cleanup, then return to Shorts -> auto-opens Video Info again.
   closeBtn.click()
   assert.equal(fx.expandedTargetId(), '')
   env.location.pathname = '/'
@@ -1590,13 +1685,14 @@ test('YouTube Shorts: close dismissal persists across Shorts, disabled comments 
   assert.equal(env.animationFrames.size, 0)
   assert.equal(env.listenerCount('click'), 0)
   assert.equal(env.listenerCount('scroll'), 0)
+  assert.equal(env.listenerCount('scrollend'), 0)
   assert.equal(tabBar.isConnected, false)
 
   env.location.pathname = '/shorts/third'
   await env.listeners.get('yt-navigate-finish')()
   env.render()
-  assert.equal(fx.expandedTargetId(), 'engagement-panel-comments-section')
-  assert.equal(fx.getCommentClicks(), 3)
+  assert.equal(fx.expandedTargetId(), 'engagement-panel-structured-description')
+  assert.equal(fx.getTitleClicks(), 2)
 
   // Unrelated DOM churn and tab-bar self-mutations must not schedule frames.
   const activeTabBar = fx.anchoredPanel.querySelector('#yt-shorts-panel-tabs')
@@ -1612,13 +1708,29 @@ test('YouTube Shorts: close dismissal persists across Shorts, disabled comments 
   env.observers[1].callback([{ type: 'attributes', attributeName: 'is-fullscreen', target: fx.shorts }])
   assert.equal(env.animationFrames.size, 1)
 
-  // Disabled Comments button does not schedule infinite retry timers.
-  const envDisabled = boot(scripts[0], 'worker', '/shorts/ad')
-  const fxDisabled = addShortsPanelFixture(envDisabled, { commentsDisabled: true })
+  // Comments-disabled Short still auto-opens Video Info; clicking Comments stays on Video Info with 0 timers.
+  const envDisabled = boot(scripts[0], 'worker', '/shorts/nocomments')
+  const fxDisabled = addShortsPanelFixture(envDisabled, { commentsDisabled: true, commentsLabel: '' })
   envDisabled.render()
+  assert.equal(fxDisabled.getTitleClicks(), 1)
+  assert.equal(fxDisabled.expandedTargetId(), 'engagement-panel-structured-description')
+  const [disabledDescTab, disabledCommentsTab] = fxDisabled.anchoredPanel.querySelectorAll('[role="tab"]')
+  disabledCommentsTab.click()
   assert.equal(fxDisabled.getCommentClicks(), 0)
-  assert.equal(fxDisabled.expandedTargetId(), '')
+  assert.equal(fxDisabled.expandedTargetId(), 'engagement-panel-structured-description')
+  assert.equal(disabledDescTab.getAttribute('aria-selected'), 'true')
+  assert.equal(disabledCommentsTab.getAttribute('aria-selected'), 'false')
   assert.equal(envDisabled.timers.size, 0)
+
+  // Ad Short (no title & no Description menu item) tries More Actions once, never clicks unrelated first item, and stops polling cleanly.
+  const envAd = boot(scripts[0], 'worker', '/shorts/ad')
+  const fxAd = addShortsPanelFixture(envAd, { omitTitle: true, omitDescriptionMenuItem: true })
+  envAd.render()
+  for (let i = 0; i < 8; i++) envAd.flush(50)
+  assert.equal(fxAd.getOtherMenuClicks(), 0)
+  assert.equal(fxAd.getMenuDescClicks(), 0)
+  assert.equal(fxAd.expandedTargetId(), '')
+  assert.equal(envAd.timers.size, 0)
 })
 
 test('YouTube Shorts: hidden #anchored-panel-scrim on desktop allows auto-open while visible scrim blocks it', () => {
@@ -1626,13 +1738,13 @@ test('YouTube Shorts: hidden #anchored-panel-scrim on desktop allows auto-open w
   const fxHidden = addShortsPanelFixture(envHidden, { visibleScrim: false })
   assert.ok(fxHidden.shorts.querySelector('#anchored-panel-scrim'))
   envHidden.render()
-  assert.equal(fxHidden.getCommentClicks(), 1)
-  assert.equal(fxHidden.expandedTargetId(), 'engagement-panel-comments-section')
+  assert.equal(fxHidden.getTitleClicks(), 1)
+  assert.equal(fxHidden.expandedTargetId(), 'engagement-panel-structured-description')
 
   const envVisible = boot(scripts[0], 'worker', '/shorts/modal')
   const fxVisible = addShortsPanelFixture(envVisible, { visibleScrim: true })
   envVisible.render()
-  assert.equal(fxVisible.getCommentClicks(), 0)
+  assert.equal(fxVisible.getTitleClicks(), 0)
   assert.equal(fxVisible.expandedTargetId(), '')
 })
 
@@ -1640,16 +1752,16 @@ test('YouTube Shorts: bare /shorts route and yt-page-data-updated activate and c
   const envBare = boot(scripts[0], 'worker', '/shorts')
   const fxBare = addShortsPanelFixture(envBare)
   envBare.render()
-  assert.equal(fxBare.getCommentClicks(), 1)
-  assert.equal(fxBare.expandedTargetId(), 'engagement-panel-comments-section')
+  assert.equal(fxBare.getTitleClicks(), 1)
+  assert.equal(fxBare.expandedTargetId(), 'engagement-panel-structured-description')
 
   const envSpa = boot(scripts[0], 'worker', '/')
   const fxSpa = addShortsPanelFixture(envSpa)
   envSpa.location.pathname = '/shorts'
   envSpa.emit('yt-page-data-updated', {})
   envSpa.render()
-  assert.equal(fxSpa.getCommentClicks(), 1)
-  assert.equal(fxSpa.expandedTargetId(), 'engagement-panel-comments-section')
+  assert.equal(fxSpa.getTitleClicks(), 1)
+  assert.equal(fxSpa.expandedTargetId(), 'engagement-panel-structured-description')
 
   envSpa.location.pathname = '/'
   envSpa.emit('popstate', {})
@@ -1657,32 +1769,33 @@ test('YouTube Shorts: bare /shorts route and yt-page-data-updated activate and c
   assert.equal(envSpa.timers.size, 0)
 })
 
-test('YouTube Shorts: background tabs defer auto-open until visible and missing-button polls do not exhaust late hydration', () => {
+test('YouTube Shorts: background tabs defer auto-open until visible and missing-overlay polls do not exhaust late hydration', () => {
   const envBg = boot(scripts[0], 'worker', '/shorts/bg', {
     setupWindow: (_win, doc) => { doc.visibilityState = 'hidden' },
   })
   const fxBg = addShortsPanelFixture(envBg)
   envBg.render()
-  assert.equal(fxBg.getCommentClicks(), 0)
+  assert.equal(fxBg.getTitleClicks(), 0)
 
   envBg.document.visibilityState = 'visible'
   envBg.emit('visibilitychange', {})
   envBg.render()
-  assert.equal(fxBg.getCommentClicks(), 1)
-  assert.equal(fxBg.expandedTargetId(), 'engagement-panel-comments-section')
+  assert.equal(fxBg.getTitleClicks(), 1)
+  assert.equal(fxBg.expandedTargetId(), 'engagement-panel-structured-description')
 
   const envLate = boot(scripts[0], 'worker', '/shorts/late')
-  const fxLate = addShortsPanelFixture(envLate, { deferActionBar: true })
+  const fxLate = addShortsPanelFixture(envLate, { deferOverlay: true })
   envLate.render()
   for (let i = 0; i < 26; i++) envLate.flush(250)
-  assert.equal(fxLate.getCommentClicks(), 0)
-  assert.equal(envLate.timers.size, 0, 'missing-button polling stops after SHORTS_MISSING_POLL_MAX')
+  assert.equal(fxLate.getTitleClicks(), 0)
+  assert.equal(fxLate.getMenuDescClicks(), 0)
+  assert.equal(envLate.timers.size, 0, 'missing-overlay polling stops after SHORTS_MISSING_POLL_MAX')
 
-  fxLate.mountActionBar()
+  fxLate.mountOverlay()
   envLate.observers[0].callback([{ type: 'childList', target: fxLate.reel, addedNodes: [fxLate.reel], removedNodes: [] }])
   envLate.render()
-  assert.equal(fxLate.getCommentClicks(), 1, 'late action bar still auto-opens without permanent exhaustion')
-  assert.equal(fxLate.expandedTargetId(), 'engagement-panel-comments-section')
+  assert.equal(fxLate.getTitleClicks(), 1, 'late overlay still auto-opens Video Info without permanent exhaustion')
+  assert.equal(fxLate.expandedTargetId(), 'engagement-panel-structured-description')
 })
 
 test('YouTube: addStyle re-appends stylesheet after head resources on DOMContentLoaded when document is loading', () => {
@@ -1695,23 +1808,46 @@ test('YouTube: addStyle re-appends stylesheet after head resources on DOMContent
   assert.equal(env.styles[1], env.styles[0])
 })
 
-test('YouTube Shorts: supports ytd-reel-video-renderer-cow for auto-open, Description tab, menu fallback, Short reset, and wheel volume', async () => {
+test('YouTube Shorts: supports ytd-reel-video-renderer-cow for Video Info default, active-reel reset, menu fallback, and wheel volume', async () => {
   const env = boot(scripts[0], 'worker', '/shorts/cow1')
   const fx = addShortsPanelFixture(env, { reelTag: 'ytd-reel-video-renderer-cow' })
+  fx.reel.setAttribute('is-active', '')
   env.render()
-  assert.equal(fx.expandedTargetId(), 'engagement-panel-comments-section')
+  assert.equal(fx.expandedTargetId(), 'engagement-panel-structured-description')
 
-  const [commentsTab, descTab] = fx.anchoredPanel.querySelectorAll('[role="tab"]')
-  descTab.click()
+  const [descTab, commentsTab] = fx.anchoredPanel.querySelectorAll('[role="tab"]')
+  assert.equal(descTab.textContent, '影片資訊')
+  assert.equal(descTab.getAttribute('aria-selected'), 'true')
+  commentsTab.click()
+  assert.equal(fx.expandedTargetId(), 'engagement-panel-comments-section')
+  assert.equal(commentsTab.getAttribute('aria-selected'), 'true')
+
+  // Moving is-active to the next reel resets back to Video Info even before URL navigation finishes.
+  const reel2 = fx.innerContainer.appendChild(new env.Element('ytd-reel-video-renderer-cow'))
+  const reel2Title = reel2
+    .appendChild(new env.Element('div'))
+    .appendChild(new env.Element('div'))
+    .appendChild(new env.Element('yt-shorts-video-title-view-model'))
+    .appendChild(new env.Element('h1'))
+  reel2Title.setAttribute('role', 'link')
+  let reel2TitleClicks = 0
+  reel2Title.addEventListener('click', () => {
+    reel2TitleClicks++
+    fx.openDescriptionPanel()
+  })
+  fx.reel.removeAttribute('is-active')
+  reel2.setAttribute('is-active', '')
+  env.observers[0].callback([{ type: 'attributes', attributeName: 'is-active', target: reel2 }])
+  env.render()
+  assert.equal(reel2TitleClicks, 1)
   assert.equal(fx.expandedTargetId(), 'engagement-panel-structured-description')
   assert.equal(descTab.getAttribute('aria-selected'), 'true')
 
   commentsTab.click()
   assert.equal(fx.expandedTargetId(), 'engagement-panel-comments-section')
-
   env.location.pathname = '/shorts/cow2'
   await env.listeners.get('yt-navigate-finish')()
-  assert.equal(fx.expandedTargetId(), 'engagement-panel-comments-section')
+  assert.equal(fx.expandedTargetId(), 'engagement-panel-structured-description')
 
   // Menu fallback inside ytd-reel-video-renderer-cow picks #menu-button without clicking #anchored-panel buttons.
   const envFallback = boot(scripts[0], 'worker', '/shorts/cow-fallback')
@@ -1723,8 +1859,6 @@ test('YouTube Shorts: supports ytd-reel-video-renderer-cow for auto-open, Descri
   let sortClicks = 0
   sortBtn.addEventListener('click', () => { sortClicks++ })
   envFallback.render()
-  const [, fallbackDescTab] = fxFallback.anchoredPanel.querySelectorAll('[role="tab"]')
-  fallbackDescTab.click()
   assert.equal(sortClicks, 0)
   assert.equal(fxFallback.getMenuDescClicks(), 1)
   assert.equal(fxFallback.expandedTargetId(), 'engagement-panel-structured-description')

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Player Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.2.24
+// @version     0.2.25
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubePlayerTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubePlayerTweaks.user.js
 // @description 提供 YouTube 原解析度 PNG 截圖、滾輪音量與速度調整、直播追平、擴大直播回看範圍，並於 Shorts 隱藏影片內資訊與預設右側頁籤面板。
@@ -294,11 +294,16 @@
       flex-direction: column !important;
     }
 
+    #anchored-panel[data-yt-shorts-tabs] > :not(#yt-shorts-panel-tabs) {
+      order: 0 !important;
+    }
+
     #anchored-panel[data-yt-shorts-tabs] > ytd-engagement-panel-section-list-renderer[visibility="ENGAGEMENT_PANEL_VISIBILITY_EXPANDED"] {
       flex: 1 1 auto !important;
       min-height: 0 !important;
       max-height: calc(100% - var(--yt-shorts-tabs-height, 44px)) !important;
       width: 100% !important;
+      border-radius: 0 0 12px 12px !important;
     }
 
     #anchored-panel[data-yt-shorts-tabs] ytd-engagement-panel-title-header-renderer #visibility-button,
@@ -308,7 +313,7 @@
     }
 
     #yt-shorts-panel-tabs {
-      order: -10;
+      order: -1 !important;
       flex: 0 0 auto;
       box-sizing: border-box;
       height: var(--yt-shorts-tabs-height, 44px);
@@ -329,7 +334,8 @@
     }
 
     #yt-shorts-panel-tabs[hidden],
-    ytd-shorts:not([is-watch-while-mode]) #yt-shorts-panel-tabs {
+    #anchored-panel:not([data-yt-shorts-tabs]) #yt-shorts-panel-tabs,
+    ytd-shorts:not([is-watch-while-mode]):not([small-screen-persistent-panel]) #yt-shorts-panel-tabs {
       display: none !important;
     }
 
@@ -1467,7 +1473,7 @@
     return true
   }
 
-  const findDescriptionMenuItem = () => {
+  const findDescriptionMenuItem = ({ allowFirstFallback = true } = {}) => {
     const menus = []
     const dropdowns = [...document.querySelectorAll('tp-yt-iron-dropdown')]
     for (const dropdown of dropdowns) {
@@ -1497,8 +1503,10 @@
           return item.querySelector('button, [role="menuitem"]') || item
         }
       }
-      const first = items[0]
-      return first.querySelector('button, [role="menuitem"]') || first
+      if (allowFirstFallback) {
+        const first = items[0]
+        return first.querySelector('button, [role="menuitem"]') || first
+      }
     }
     return null
   }
@@ -1554,12 +1562,14 @@
   const startShortsPanelController = (signal) => {
     let frame = 0
     let currentShortKey = getShortKey()
-    let desiredTab = 'comments'
+    let currentActiveReel = null
+    let desiredTab = 'description'
     let pendingTarget = null
     let pendingUntil = 0
     let autoOpenAttempts = 0
     let missingButtonPolls = 0
     let autoOpenExhausted = false
+    let autoOpenMenuFallbackUsed = false
     let waitingAutoRetry = false
     let autoOpenTimer = 0
     let menuFallbackTimer = 0
@@ -1590,10 +1600,10 @@
       return tab
     }
 
-    const commentsTab = makeTab('comments', '留言', true)
-    const descTab = makeTab('description', '影片資訊', false)
-    const tabs = [commentsTab, descTab]
-    tablist.append(commentsTab, descTab)
+    const descTab = makeTab('description', '影片資訊', true)
+    const commentsTab = makeTab('comments', '留言', false)
+    const tabs = [descTab, commentsTab]
+    tablist.append(descTab, commentsTab)
 
     const closeBtn = document.createElement('button')
     closeBtn.type = 'button'
@@ -1618,7 +1628,7 @@
     const updateTabSelection = (activeTab) => {
       if (lastActiveTab === activeTab) return
       lastActiveTab = activeTab
-      const fallbackTab = activeTab === 'description' ? descTab : commentsTab
+      const fallbackTab = activeTab === 'comments' ? commentsTab : descTab
       for (const tab of tabs) {
         const selected = tab.dataset.tab === activeTab
         const focusable = activeTab ? selected : tab === fallbackTab
@@ -1692,10 +1702,10 @@
       return 'clicked'
     }
 
-    const openDescription = (shorts, reel) => {
+    const openDescription = (shorts, reel, { isAuto = false } = {}) => {
       clearMenuTimers()
       if (getExpandedShortsPanel(shorts)?.getAttribute('target-id') === SHORTS_PANEL_DESCRIPTION) {
-        return
+        return 'expanded'
       }
 
       const startMenuFallback = () => {
@@ -1704,15 +1714,37 @@
         const latestShorts = $('ytd-shorts')
         const latestReel = getActiveShortsReel(latestShorts)
         if (getExpandedShortsPanel(latestShorts)?.getAttribute('target-id') === SHORTS_PANEL_DESCRIPTION) {
+          sync()
+          return
+        }
+        if (isAuto && autoOpenMenuFallbackUsed) {
+          autoOpenExhausted = true
+          waitingAutoRetry = false
           return
         }
         const moreBtn = findShortsMoreActionsButton(latestReel, latestShorts)
-        if (!moreBtn) return
+        if (!moreBtn || isControlDisabled(moreBtn)) {
+          if (isAuto) {
+            waitingAutoRetry = false
+            if (moreBtn) autoOpenExhausted = true
+            else scheduleAutoOpenRetry(true)
+          }
+          return
+        }
+        if (isAuto) autoOpenMenuFallbackUsed = true
         triggerInternalClick(moreBtn)
 
-        const firstTry = findDescriptionMenuItem()
+        const firstTry = findDescriptionMenuItem({ allowFirstFallback: !isAuto })
         if (firstTry) {
           triggerInternalClick(firstTry)
+          if (getExpandedShortsPanel(latestShorts)?.getAttribute('target-id') === SHORTS_PANEL_DESCRIPTION) {
+            sync()
+            return
+          }
+          if (isAuto) {
+            waitingAutoRetry = true
+            scheduleAutoOpenRetry(true)
+          }
           return
         }
 
@@ -1728,14 +1760,24 @@
             clearMenuTimers()
             return
           }
-          const item = findDescriptionMenuItem()
+          const item = findDescriptionMenuItem({ allowFirstFallback: !isAuto })
           if (item) {
             clearMenuTimers()
             triggerInternalClick(item)
+            if (getExpandedShortsPanel($('ytd-shorts'))?.getAttribute('target-id') === SHORTS_PANEL_DESCRIPTION) {
+              sync()
+            } else if (isAuto) {
+              waitingAutoRetry = true
+              scheduleAutoOpenRetry(true)
+            }
             return
           }
           if (polls >= SHORTS_DESC_MENU_MAX_POLLS) {
             clearMenuTimers()
+            if (isAuto) {
+              autoOpenExhausted = true
+              waitingAutoRetry = false
+            }
           }
         }, SHORTS_DESC_MENU_POLL_MS)
       }
@@ -1744,13 +1786,37 @@
       if (titleTarget) {
         triggerInternalClick(titleTarget)
         if (getExpandedShortsPanel(shorts)?.getAttribute('target-id') === SHORTS_PANEL_DESCRIPTION) {
-          return
+          return 'expanded'
         }
         menuFallbackTimer = setTimeout(startMenuFallback, SHORTS_DESC_FALLBACK_MS)
-        return
+        return 'pending'
+      }
+
+      if (
+        isAuto &&
+        (!reel ||
+          !reel.querySelector(
+            '.ytReelPlayerOverlayViewModelMetadataContainer, yt-reel-metapanel-view-model, reel-action-bar-view-model'
+          ))
+      ) {
+        return 'missing'
+      }
+
+      const moreBtn = findShortsMoreActionsButton(reel, shorts)
+      if (!moreBtn) return 'missing'
+      if (isControlDisabled(moreBtn)) {
+        if (isAuto) autoOpenExhausted = true
+        return 'disabled'
+      }
+      if (isAuto && autoOpenMenuFallbackUsed) {
+        autoOpenExhausted = true
+        return 'exhausted'
       }
 
       startMenuFallback()
+      return getExpandedShortsPanel(shorts)?.getAttribute('target-id') === SHORTS_PANEL_DESCRIPTION
+        ? 'expanded'
+        : 'pending'
     }
 
     const scheduleAutoOpenRetry = (countAttempt) => {
@@ -1774,22 +1840,34 @@
     }
 
     const ensureDesiredPanel = (shorts, reel) => {
-      if (desiredTab !== 'comments' || autoOpenExhausted || waitingAutoRetry) return
-      const status = openComments(reel, shorts)
-      if (status === 'disabled') {
-        clearAutoOpenTimer()
+      if (
+        desiredTab !== 'description' ||
+        autoOpenExhausted ||
+        waitingAutoRetry ||
+        menuFallbackTimer ||
+        menuPollTimer
+      ) {
         return
       }
-      if (status === 'clicked') {
+      const status = openDescription(shorts, reel, { isAuto: true })
+      if (status === 'expanded') {
+        clearAllTimers()
+        waitingAutoRetry = false
+        autoOpenAttempts = 0
         missingButtonPolls = 0
-        const expanded = getExpandedShortsPanel(shorts)
-        if (expanded?.getAttribute('target-id') === SHORTS_PANEL_COMMENTS) {
-          clearAutoOpenTimer()
-          waitingAutoRetry = false
-          return
-        }
+        return
+      }
+      if (status === 'disabled' || status === 'exhausted') {
+        clearAutoOpenTimer()
+        waitingAutoRetry = false
+        return
+      }
+      if (status === 'pending') {
+        missingButtonPolls = 0
         waitingAutoRetry = true
-        scheduleAutoOpenRetry(true)
+        if (!menuFallbackTimer && !menuPollTimer) {
+          scheduleAutoOpenRetry(true)
+        }
         return
       }
       scheduleAutoOpenRetry(false)
@@ -1799,20 +1877,25 @@
       frame = 0
       if (signal.aborted) return
 
+      const shorts = $('ytd-shorts')
+      const activeReel = shorts?.querySelector(SHORTS_ACTIVE_REEL_SELECTOR) || null
       const nextShortKey = getShortKey()
-      if (nextShortKey !== currentShortKey) {
+      const reelChanged = Boolean(currentActiveReel && activeReel && activeReel !== currentActiveReel)
+      if (activeReel) currentActiveReel = activeReel
+
+      if (nextShortKey !== currentShortKey || reelChanged) {
         currentShortKey = nextShortKey
-        desiredTab = 'comments'
+        desiredTab = 'description'
         pendingTarget = null
         pendingUntil = 0
         autoOpenAttempts = 0
         missingButtonPolls = 0
         autoOpenExhausted = false
+        autoOpenMenuFallbackUsed = false
         waitingAutoRetry = false
         clearAllTimers()
       }
 
-      const shorts = $('ytd-shorts')
       const anchoredPanel = shorts?.querySelector('#anchored-panel')
       if (!shorts || !anchoredPanel) {
         clearShortsTabsState(shorts, anchoredPanel || tabBar.parentElement)
@@ -1824,8 +1907,8 @@
       let expandedId = expandedPanel?.getAttribute('target-id') || ''
 
       if (
-        desiredTab === 'comments' &&
-        expandedId !== SHORTS_PANEL_COMMENTS &&
+        desiredTab === 'description' &&
+        expandedId !== SHORTS_PANEL_DESCRIPTION &&
         !pendingTarget &&
         canAutoOpenShortsPanel(shorts, reel) &&
         !autoOpenExhausted
@@ -1839,9 +1922,6 @@
         clearShortsTabsState(shorts, anchoredPanel)
         return
       }
-
-      clearAutoOpenTimer()
-      waitingAutoRetry = false
 
       if (tabBar.parentElement !== anchoredPanel || anchoredPanel.firstChild !== tabBar) {
         anchoredPanel.insertBefore(tabBar, anchoredPanel.firstChild || null)
@@ -1862,7 +1942,10 @@
             : ''
 
       if (actualTab === desiredTab) {
-        clearMenuTimers()
+        clearAllTimers()
+        waitingAutoRetry = false
+        autoOpenAttempts = 0
+        missingButtonPolls = 0
       }
       if (pendingTarget && (pendingTarget === actualTab || Date.now() >= pendingUntil)) {
         pendingTarget = null
@@ -1901,9 +1984,18 @@
       shortsPanelDismissed = false
       desiredTab = 'comments'
       autoOpenExhausted = false
+      autoOpenMenuFallbackUsed = false
       waitingAutoRetry = false
       clearAllTimers()
       const shorts = $('ytd-shorts')
+      if (getExpandedShortsPanel(shorts)?.getAttribute('target-id') === SHORTS_PANEL_COMMENTS) {
+        pendingTarget = null
+        pendingUntil = 0
+        updateTabSelection('comments')
+        commentsTab.scrollIntoView?.({ block: 'nearest', inline: 'nearest', container: 'nearest' })
+        sync()
+        return
+      }
       const reel = getActiveShortsReel(shorts)
       const status = openComments(reel, shorts)
       if (status === 'disabled') {
@@ -1922,16 +2014,25 @@
     descTab.addEventListener('click', () => {
       shortsPanelDismissed = false
       desiredTab = 'description'
-      pendingTarget = 'description'
-      pendingUntil = Date.now() + SHORTS_PENDING_GRACE_MS
       autoOpenExhausted = false
+      autoOpenMenuFallbackUsed = false
       waitingAutoRetry = false
       clearAllTimers()
+      const shorts = $('ytd-shorts')
+      if (getExpandedShortsPanel(shorts)?.getAttribute('target-id') === SHORTS_PANEL_DESCRIPTION) {
+        pendingTarget = null
+        pendingUntil = 0
+        updateTabSelection('description')
+        descTab.scrollIntoView?.({ block: 'nearest', inline: 'nearest', container: 'nearest' })
+        sync()
+        return
+      }
+      pendingTarget = 'description'
+      pendingUntil = Date.now() + SHORTS_PENDING_GRACE_MS
       updateTabSelection('description')
       descTab.scrollIntoView?.({ block: 'nearest', inline: 'nearest', container: 'nearest' })
-      const shorts = $('ytd-shorts')
       const reel = getActiveShortsReel(shorts)
-      openDescription(shorts, reel)
+      openDescription(shorts, reel, { isAuto: false })
       sync()
     }, { signal })
 
@@ -1973,6 +2074,7 @@
         pendingTarget = 'comments'
         pendingUntil = Date.now() + SHORTS_PENDING_GRACE_MS
         autoOpenExhausted = false
+        autoOpenMenuFallbackUsed = false
         waitingAutoRetry = false
         clearAllTimers()
         schedule()
@@ -1990,6 +2092,7 @@
           pendingTarget = 'description'
           pendingUntil = Date.now() + SHORTS_PENDING_GRACE_MS
           autoOpenExhausted = false
+          autoOpenMenuFallbackUsed = false
           waitingAutoRetry = false
           clearAutoOpenTimer()
           schedule()
@@ -2060,7 +2163,11 @@
     })
 
     const onScroll = () => {
-      if (getShortKey() !== currentShortKey) schedule()
+      const shorts = $('ytd-shorts')
+      const activeReel = shorts?.querySelector(SHORTS_ACTIVE_REEL_SELECTOR) || null
+      if (getShortKey() !== currentShortKey || (currentActiveReel && activeReel && activeReel !== currentActiveReel)) {
+        schedule()
+      }
     }
 
     window.addEventListener('resize', schedule, { signal })
@@ -2070,6 +2177,7 @@
     document.addEventListener('yt-page-data-updated', schedule, { signal })
     document.addEventListener('click', onDocumentClick, { capture: true, signal })
     document.addEventListener('scroll', onScroll, { capture: true, passive: true, signal })
+    document.addEventListener('scrollend', onScroll, { capture: true, passive: true, signal })
 
     signal.addEventListener('abort', () => {
       cancelAnimationFrame(frame)
