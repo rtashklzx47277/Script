@@ -30,6 +30,7 @@ function boot(file, mode = 'worker', pathname = '/', { trustedTypes = false, set
     constructor(tagName = 'div') {
       super()
       this.tagName = tagName
+      this.nodeType = 1
       this.style = {
         setProperty(name, value) { this[name] = value },
         removeProperty(name) { delete this[name] },
@@ -40,14 +41,33 @@ function boot(file, mode = 'worker', pathname = '/', { trustedTypes = false, set
       this.queries = new Map()
       this.rect = { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 }
     }
+    get firstChild() {
+      return this.children[0] || null
+    }
+    get isConnected() {
+      if ('_connected' in this) return this._connected
+      return Boolean(this.parentElement)
+    }
+    set isConnected(value) {
+      this._connected = Boolean(value)
+    }
+    remove() {
+      if (!this.parentElement) return
+      const index = this.parentElement.children.indexOf(this)
+      if (index !== -1) this.parentElement.children.splice(index, 1)
+      this.parentElement = null
+    }
     appendChild(element) {
+      element.remove?.()
       element.parentElement = this
       this.children.push(element)
       return element
     }
     insertBefore(element, ref) {
+      if (element === ref) return element
+      element.remove?.()
       element.parentElement = this
-      const index = this.children.indexOf(ref)
+      const index = ref ? this.children.indexOf(ref) : -1
       if (index === -1) this.children.push(element)
       else this.children.splice(index, 0, element)
       return element
@@ -65,16 +85,54 @@ function boot(file, mode = 'worker', pathname = '/', { trustedTypes = false, set
       if (trustedTypes) throw new TypeError('This document requires TrustedHTML assignment')
       this._innerHTML = value
     }
+    matchesSimple(part) {
+      part = part.trim()
+      if (!part || part === '*') return true
+      let rest = part
+      const tagMatch = rest.match(/^([a-z0-9_-]+)/i)
+      if (tagMatch) {
+        if (tagMatch[1].toLowerCase() !== (this.tagName || '').toLowerCase()) return false
+        rest = rest.slice(tagMatch[0].length)
+      }
+      while (rest) {
+        if (rest.startsWith('#')) {
+          const m = rest.match(/^#([a-z0-9_-]+)/i)
+          if (!m || this.id !== m[1]) return false
+          rest = rest.slice(m[0].length)
+        } else if (rest.startsWith('.')) {
+          const m = rest.match(/^\.([a-z0-9_-]+)/i)
+          if (!m || !(this.className || '').split(/\s+/).includes(m[1])) return false
+          rest = rest.slice(m[0].length)
+        } else if (rest.startsWith('[')) {
+          const m = rest.match(/^\[([a-z0-9_-]+)(?:=(?:"([^"]*)"|'([^']*)'|([^\]]*)))?\]/i)
+          if (!m) return false
+          const attrName = m[1]
+          const expected = m[2] ?? m[3] ?? m[4]
+          if (!this.hasAttribute(attrName)) return false
+          if (expected !== undefined && this.getAttribute(attrName) !== expected) return false
+          rest = rest.slice(m[0].length)
+        } else {
+          return false
+        }
+      }
+      return true
+    }
     matches(selector) {
-      return selector.split(',').some(part => {
-        part = part.trim()
-        if (part.startsWith('#')) return this.id === part.slice(1)
-        if (part.startsWith('.')) return (this.className || '').split(' ').includes(part.slice(1))
-        const tagClass = part.match(/^([a-z0-9-]+)\.([a-z0-9_-]+)$/i)
-        if (tagClass) return tagClass[1] === this.tagName && (this.className || '').split(' ').includes(tagClass[2])
-        const tagAttr = part.match(/^([a-z0-9-]+)\[([^\]]+)\]$/i)
-        if (tagAttr) return tagAttr[1] === this.tagName && this.hasAttribute(tagAttr[2])
-        return part === this.tagName
+      return selector.split(',').some(chain => {
+        const tokens = chain.trim().replace(/\s*>\s*/g, ' > ').split(/\s+/).filter(Boolean)
+        if (!tokens.length) return false
+        const matchAt = (node, idx) => {
+          const token = tokens[idx]
+          if (token === '>') return false
+          if (!node?.matchesSimple?.(token)) return false
+          if (idx === 0) return true
+          if (tokens[idx - 1] === '>') return matchAt(node.parentElement, idx - 2)
+          for (let anc = node.parentElement; anc; anc = anc.parentElement) {
+            if (matchAt(anc, idx - 1)) return true
+          }
+          return false
+        }
+        return matchAt(this, tokens.length - 1)
       })
     }
     closest(selector) {
@@ -91,7 +149,7 @@ function boot(file, mode = 'worker', pathname = '/', { trustedTypes = false, set
     }
     querySelector(selector) {
       if (this.queries.has(selector)) return this.queries.get(selector)
-      if (selector.includes(' > ')) {
+      if (selector.includes(' > ') && !selector.includes(',')) {
         const [parentSel, childSel] = selector.split(' > ').map(s => s.trim())
         const parent = this.querySelector(parentSel)
         return parent ? parent.children.find(child => child.matches(childSel)) || null : null
@@ -103,21 +161,86 @@ function boot(file, mode = 'worker', pathname = '/', { trustedTypes = false, set
       }
       return null
     }
-    querySelectorAll(selector) { return this.queries.get(selector) || [] }
+    querySelectorAll(selector) {
+      if (this.queries.has(selector)) return this.queries.get(selector)
+      const results = []
+      const collect = (node) => {
+        for (const child of node.children) {
+          if (child.matches(selector)) results.push(child)
+          collect(child)
+        }
+      }
+      collect(this)
+      return results
+    }
     getBoundingClientRect() { return this.rect }
-    setAttribute(name, value) { this.attributes.set(name, value) }
+    setAttribute(name, value) { this.attributes.set(name, String(value)) }
     getAttribute(name) { return this.attributes.get(name) ?? null }
     removeAttribute(name) { this.attributes.delete(name) }
     hasAttribute(name) { return this.attributes.has(name) }
-    addEventListener(name, callback) {
+    focus() {
+      this.focused = true
+      document.activeElement = this
+    }
+    click() {
+      if (this.disabled || this.hasAttribute('disabled')) return
+      const target = this
+      const event = {
+        type: 'click',
+        target,
+        currentTarget: target,
+        defaultPrevented: false,
+        propagationStopped: false,
+        stopped: false,
+        preventDefault() { this.defaultPrevented = true },
+        stopPropagation() { this.propagationStopped = true },
+        stopImmediatePropagation() { this.propagationStopped = true; this.stopped = true },
+        composedPath() {
+          const path = []
+          for (let node = target; node; node = node.parentElement) path.push(node)
+          path.push(document, context.window)
+          return path
+        },
+      }
+      for (const entry of [...eventListeners]) {
+        if (entry.name === 'click' && entry.options?.capture && !entry.options?.signal?.aborted) {
+          entry.callback(event)
+          if (event.stopped) return
+        }
+      }
+      for (let node = target; node && !event.propagationStopped; node = node.parentElement) {
+        event.currentTarget = node
+        node.dispatchEvent(event)
+      }
+      if (!event.propagationStopped) {
+        for (const entry of [...eventListeners]) {
+          if (entry.name === 'click' && !entry.options?.capture && !entry.options?.signal?.aborted) {
+            event.currentTarget = document
+            entry.callback(event)
+            if (event.stopped) return
+          }
+        }
+      }
+    }
+    addEventListener(name, callback, options) {
+      if (options?.signal?.aborted) return
       this.events ||= new Map()
       const callbacks = this.events.get(name) || []
       callbacks.push(callback)
       this.events.set(name, callbacks)
+      options?.signal?.addEventListener?.('abort', () => {
+        const list = this.events?.get(name)
+        if (!list) return
+        const index = list.indexOf(callback)
+        if (index !== -1) list.splice(index, 1)
+      }, { once: true })
     }
     dispatchEvent(event) {
-      for (const callback of this.events?.get(event.type) || []) callback(event)
-      return true
+      for (const callback of [...(this.events?.get(event.type) || [])]) {
+        callback(event)
+        if (event.stopped) break
+      }
+      return !event.defaultPrevented
     }
   }
 
@@ -292,7 +415,7 @@ function boot(file, mode = 'worker', pathname = '/', { trustedTypes = false, set
   vm.runInContext(source.replace(/\}\)\(\)\s*$/, exposure + '})()'), context, { filename: file })
 
   return {
-    api: context.__test, window: context.window,
+    api: context.__test, window: context.window, document,
     Element: ElementMock, location: context.location,
     frames, draws, timers, selectors, observers, resizeObservers, animationFrames, listeners, styles,
     render() {
@@ -383,135 +506,338 @@ function addShortsPlayer(env, shorts, top = 20) {
   return { player, video, area }
 }
 
-function addShortsLayout(env) {
+function addShortsPanelFixture(env, options = {}) {
+  const {
+    innerWidth = 1440,
+    smallScreen = false,
+    fullscreen = false,
+    commentsLabel = '3,414 件のコメントを表示',
+    commentsPath = 'M1 6a4 4 0 014-4h14a4 4 0 014 4v10a4 4 0',
+    commentsDisabled = false,
+    omitTitle = false,
+    brokenTitle = false,
+  } = options
+
+  env.window.innerWidth = innerWidth
+
   const shorts = new env.Element('ytd-shorts')
-  const container = new env.Element()
-  container.rect = { left: 72, top: 64, bottom: 680, width: 1228, height: 616 }
-  const reel = new env.Element('ytd-reel-video-renderer')
-  const video = new env.Element()
-  video.rect = { left: 480, top: 64, bottom: 640, width: 315, height: 576 }
-  const overlay = new env.Element()
-  overlay.rect = { left: 480, top: 64, bottom: 640, width: 387, height: 576 }
-  overlay.queries.set('.ytReelPlayerOverlayViewModelMetadataContainer', new env.Element())
-  reel.queries.set('.overlay', overlay)
-  reel.queries.set('#short-video-container', video)
-  shorts.queries.set('#shorts-container', container)
-  shorts.queries.set('ytd-reel-video-renderer', [reel])
-  shorts.appendChild(reel)
+  if (smallScreen) shorts.setAttribute('small-screen-persistent-panel', '')
+  if (fullscreen) shorts.setAttribute('is-fullscreen', '')
+
+  const shortsContainer = shorts.appendChild(new env.Element())
+  shortsContainer.id = 'shorts-container'
+  shortsContainer.rect = { left: 0, top: 64, right: innerWidth, bottom: 900, width: innerWidth, height: 836 }
+  const innerContainer = shortsContainer.appendChild(new env.Element())
+  innerContainer.id = 'shorts-inner-container'
+
+  const panelContainer = shorts.appendChild(new env.Element())
+  panelContainer.id = 'shorts-panel-container'
+  const anchoredPanel = panelContainer.appendChild(new env.Element())
+  anchoredPanel.id = 'anchored-panel'
+
+  const slot0 = anchoredPanel.appendChild(new env.Element('ytd-engagement-panel-section-list-renderer'))
+  slot0.setAttribute('target-id', '')
+  slot0.setAttribute('visibility', '')
+  const slot0Header = slot0.appendChild(new env.Element())
+  slot0Header.id = 'header'
+  const titleHeader = slot0Header.appendChild(new env.Element('ytd-engagement-panel-title-header-renderer'))
+  const visBtnWrap = titleHeader.appendChild(new env.Element())
+  visBtnWrap.id = 'visibility-button'
+  const commentsCloseBtn = visBtnWrap.appendChild(new env.Element('button'))
+  commentsCloseBtn.setAttribute('aria-label', '關閉')
+
+  const slot1 = anchoredPanel.appendChild(new env.Element('ytd-engagement-panel-section-list-renderer'))
+  slot1.setAttribute('target-id', '')
+  slot1.setAttribute('visibility', '')
+  const slot1Header = slot1.appendChild(new env.Element())
+  slot1Header.id = 'header'
+  const slot1Content = slot1.appendChild(new env.Element())
+  slot1Content.id = 'content'
+  const sdp = slot1Content.appendChild(new env.Element('ytd-structured-description-content-renderer'))
+  const titleHeaderVm = sdp.appendChild(new env.Element('yt-video-title-header-view-model'))
+  const titleBtnWrap = titleHeaderVm.appendChild(new env.Element())
+  titleBtnWrap.className = 'ytVideoTitleHeaderViewModelHeaderButton'
+  const descCloseBtn = titleBtnWrap.appendChild(new env.Element('button'))
+  descCloseBtn.setAttribute('aria-label', '關閉')
+  const floatingWrap = sdp.appendChild(new env.Element('yt-floating-button-view-model'))
+  const floatingCloseBtn = floatingWrap.appendChild(new env.Element('button'))
+  floatingCloseBtn.setAttribute('aria-label', '關閉')
+
+  const slot2 = anchoredPanel.appendChild(new env.Element('ytd-engagement-panel-section-list-renderer'))
+  slot2.setAttribute('target-id', '')
+  slot2.setAttribute('visibility', '')
+
+  const openCommentsPanel = () => {
+    shorts.setAttribute('is-watch-while-mode', '')
+    slot1.setAttribute('target-id', '')
+    slot1.setAttribute('visibility', '')
+    slot0.setAttribute('target-id', 'engagement-panel-comments-section')
+    slot0.setAttribute('visibility', 'ENGAGEMENT_PANEL_VISIBILITY_EXPANDED')
+  }
+  const openDescriptionPanel = () => {
+    shorts.setAttribute('is-watch-while-mode', '')
+    slot0.setAttribute('target-id', '')
+    slot0.setAttribute('visibility', '')
+    slot1.setAttribute('target-id', 'engagement-panel-structured-description')
+    slot1.setAttribute('visibility', 'ENGAGEMENT_PANEL_VISIBILITY_EXPANDED')
+  }
+  const closeAnyPanel = () => {
+    shorts.removeAttribute('is-watch-while-mode')
+    slot0.setAttribute('target-id', '')
+    slot0.setAttribute('visibility', '')
+    slot1.setAttribute('target-id', '')
+    slot1.setAttribute('visibility', '')
+  }
+
+  commentsCloseBtn.addEventListener('click', closeAnyPanel)
+  descCloseBtn.addEventListener('click', closeAnyPanel)
+  floatingCloseBtn.addEventListener('click', closeAnyPanel)
+
+  const reel = innerContainer.appendChild(new env.Element('ytd-reel-video-renderer'))
+  const video = reel.appendChild(new env.Element())
+  video.id = 'short-video-container'
+  video.rect = { left: 480, top: 64, right: 795, bottom: 640, width: 315, height: 576 }
+
+  const overlay = reel.appendChild(new env.Element())
+  overlay.className = 'overlay'
+  const metaContainer = overlay.appendChild(new env.Element())
+  metaContainer.className = 'ytReelPlayerOverlayViewModelMetadataContainer'
+  let titleLink = null
+  if (!omitTitle) {
+    const titleVm = metaContainer.appendChild(new env.Element('yt-shorts-video-title-view-model'))
+    titleLink = titleVm.appendChild(new env.Element('h1'))
+    titleLink.className = 'ytShortsVideoTitleViewModelShortsVideoTitle'
+    titleLink.setAttribute('role', 'link')
+    if (!brokenTitle) titleLink.addEventListener('click', openDescriptionPanel)
+  }
+
+  const actionsContainer = overlay.appendChild(new env.Element())
+  actionsContainer.className = 'ytReelPlayerOverlayViewModelActionsContainer'
+  const actionBar = actionsContainer.appendChild(new env.Element('reel-action-bar-view-model'))
+
+  const addAction = (wrapperTag, label, pathD) => {
+    const host = actionBar.appendChild(new env.Element(wrapperTag))
+    const bvm = wrapperTag === 'button-view-model' ? host : host.appendChild(new env.Element('button-view-model'))
+    const btn = bvm.appendChild(new env.Element('button'))
+    btn.setAttribute('aria-label', label)
+    const svg = btn.appendChild(new env.Element('svg'))
+    const p = svg.appendChild(new env.Element('path'))
+    p.setAttribute('d', pathD)
+    return btn
+  }
+
+  addAction('like-button-view-model', '和另外 61萬 人都喜歡這部影片', 'M16.25 2.5A6.56 6.56 0 0012 4.062')
+  const commentsBtn = addAction('button-view-model', commentsLabel, commentsPath)
+  if (commentsDisabled) {
+    commentsBtn.disabled = true
+    commentsBtn.setAttribute('disabled', 'true')
+    commentsBtn.setAttribute('aria-disabled', 'true')
+  }
+  let commentClicks = 0
+  commentsBtn.addEventListener('click', () => {
+    commentClicks++
+    openCommentsPanel()
+  })
+  addAction('button-view-model', '分享', 'M10 3.158V7.51c-5.428.223')
+
+  const moreBtn = reel.appendChild(new env.Element('button'))
+  moreBtn.setAttribute('aria-label', 'その他の操作')
+  const dropdown = new env.Element('tp-yt-iron-dropdown')
+  dropdown.style.display = 'none'
+  const menu = dropdown.appendChild(new env.Element('yt-list-view-model'))
+  menu.setAttribute('role', 'menu')
+  const descMenuItem = menu.appendChild(new env.Element('yt-list-item-view-model'))
+  const descMenuBtn = descMenuItem.appendChild(new env.Element('button'))
+  descMenuBtn.setAttribute('role', 'menuitem')
+  descMenuBtn.textContent = '說明'
+  const descMenuPath = descMenuBtn.appendChild(new env.Element('svg')).appendChild(new env.Element('path'))
+  descMenuPath.setAttribute('d', 'M4 5a1 1 0 000 2h16a1 1 0 100-')
+  let menuDescClicks = 0
+  descMenuBtn.addEventListener('click', () => {
+    menuDescClicks++
+    dropdown.style.display = 'none'
+    openDescriptionPanel()
+  })
+  moreBtn.addEventListener('click', () => {
+    dropdown.style.display = 'block'
+  })
+  env.selectors.set('tp-yt-iron-dropdown', [dropdown])
   env.selectors.set('ytd-shorts', shorts)
-  return { shorts, container, reel, video, overlay }
+
+  return {
+    shorts, anchoredPanel, slot0, slot1, reel, metaContainer, titleLink,
+    commentsBtn, moreBtn, dropdown, descMenuBtn, commentsCloseBtn, descCloseBtn,
+    openCommentsPanel, openDescriptionPanel, closeAnyPanel,
+    getCommentClicks: () => commentClicks,
+    getMenuDescClicks: () => menuDescClicks,
+    expandedTargetId: () => {
+      if (slot0.getAttribute('visibility') === 'ENGAGEMENT_PANEL_VISIBILITY_EXPANDED') return slot0.getAttribute('target-id')
+      if (slot1.getAttribute('visibility') === 'ENGAGEMENT_PANEL_VISIBILITY_EXPANDED') return slot1.getAttribute('target-id')
+      return ''
+    },
+  }
 }
 
-test('YouTube Shorts: metadata fits entirely beside the video and responds to available space', () => {
-  const env = boot(scripts[0], 'worker', '/shorts/example')
-  const { reel, video, container, overlay } = addShortsLayout(env)
-  env.render()
-  assert.equal(reel.hasAttribute('data-yt-side-metadata'), true)
-  const left = overlay.rect.left + parseFloat(reel.style['--yt-side-metadata-left'])
-  const right = left + parseFloat(reel.style['--yt-side-metadata-width'])
-  assert.ok(left >= container.rect.left + 16)
-  assert.equal(right, video.rect.left - 16)
-  assert.equal(video.rect.height, 576, 'player height is untouched')
+test('YouTube Shorts: hides in-video metadata unconditionally, auto-opens Comments on desktop, and builds accessible Trusted Types tabs', () => {
+  const env = boot(scripts[0], 'worker', '/shorts/example', { trustedTypes: true })
+  const css = env.styles[0].textContent
+  assert.match(css, /ytd-shorts ytd-reel-video-renderer \.ytReelPlayerOverlayViewModelMetadataContainer,\s*ytd-shorts ytd-reel-video-renderer #metapanel\s*\{\s*display:\s*none !important;/)
+  assert.doesNotMatch(css, /#anchored-panel\[data-yt-shorts-tabs\][^}]*overflow:\s*hidden/)
 
-  video.rect.left = 280
-  env.emit('resize', {})
+  const fx = addShortsPanelFixture(env, { commentsLabel: '' })
   env.render()
-  assert.equal(reel.hasAttribute('data-yt-side-metadata'), false, 'narrow space uses native layout')
-  assert.equal(reel.style['--yt-side-metadata-width'], undefined)
 
-  video.rect.left = 480
-  env.resizeObservers[0].callback()
-  env.render()
-  assert.equal(reel.hasAttribute('data-yt-side-metadata'), true)
+  assert.equal(fx.getCommentClicks(), 1, 'matches Comments button by SVG path even when aria-label is blank')
+  assert.equal(fx.expandedTargetId(), 'engagement-panel-comments-section')
+  assert.equal(fx.shorts.hasAttribute('data-yt-shorts-tabs'), true)
+  assert.equal(fx.anchoredPanel.hasAttribute('data-yt-shorts-tabs'), true)
+
+  const tabBar = fx.anchoredPanel.querySelector('#yt-shorts-panel-tabs')
+  assert.ok(tabBar)
+  assert.equal(tabBar.hidden, false)
+  assert.equal(fx.anchoredPanel.firstChild, tabBar)
+
+  const tablist = tabBar.querySelector('[role="tablist"]')
+  assert.ok(tablist)
+  assert.equal(tablist.getAttribute('focusgroup'), 'tablist nomemory')
+  const tabs = tablist.querySelectorAll('[role="tab"]')
+  assert.equal(tabs.length, 2)
+  assert.deepEqual(tabs.map(t => t.textContent), ['留言', '影片資訊'])
+  assert.equal(tabs[0].getAttribute('aria-selected'), 'true')
+  assert.equal(tabs[0].getAttribute('tabindex'), '0')
+  assert.equal(tabs[0].hasAttribute('focusgroupstart'), true)
+  assert.equal(tabs[0].hasAttribute('aria-controls'), false)
+  assert.equal(tabs[1].getAttribute('aria-selected'), 'false')
+  assert.equal(tabs[1].getAttribute('tabindex'), '-1')
+  assert.equal(tabs[1].hasAttribute('focusgroupstart'), false)
+  assert.equal(tabs[1].hasAttribute('aria-controls'), false)
+
+  const closeBtn = tabBar.querySelector('.yt-shorts-panel-close')
+  assert.ok(closeBtn)
+  assert.equal(tablist.contains(closeBtn), false, 'close button must sit outside tablist')
+  assert.equal(env.timers.size, 0)
 })
 
-test('YouTube Shorts: native extracted layout, fullscreen and comments release metadata positioning', () => {
+test('YouTube Shorts: switches between Comments and Description tabs with keyboard navigation and More Actions menu fallback', () => {
   const env = boot(scripts[0], 'worker', '/shorts/example')
-  const { shorts, reel } = addShortsLayout(env)
+  const fx = addShortsPanelFixture(env)
   env.render()
-  for (const [element, attribute] of [
-    [reel, 'extract-overlay'], [reel, 'is-fullscreen'],
-    [shorts, 'is-fullscreen'], [shorts, 'is-watch-while-mode'],
-  ]) {
-    element.setAttribute(attribute, '')
-    env.observers[0].callback()
-    env.render()
-    assert.equal(reel.hasAttribute('data-yt-side-metadata'), false, attribute)
-    element.removeAttribute(attribute)
-    env.observers[0].callback()
-    env.render()
-    assert.equal(reel.hasAttribute('data-yt-side-metadata'), true)
+
+  const tabBar = fx.anchoredPanel.querySelector('#yt-shorts-panel-tabs')
+  const tablist = tabBar.querySelector('[role="tablist"]')
+  const [commentsTab, descTab] = tablist.querySelectorAll('[role="tab"]')
+
+  descTab.click()
+  assert.equal(fx.expandedTargetId(), 'engagement-panel-structured-description')
+  assert.equal(descTab.getAttribute('aria-selected'), 'true')
+  assert.equal(descTab.getAttribute('tabindex'), '0')
+  assert.equal(descTab.hasAttribute('focusgroupstart'), true)
+  assert.equal(commentsTab.getAttribute('aria-selected'), 'false')
+  assert.equal(commentsTab.getAttribute('tabindex'), '-1')
+
+  // Keyboard navigation moves focus & roving tabindex without page/player interference.
+  const keyRight = {
+    type: 'keydown', key: 'ArrowRight', target: descTab,
+    preventDefault() { this.prevented = true },
+    stopPropagation() { this.stopped = true },
   }
+  tablist.dispatchEvent(keyRight)
+  assert.equal(keyRight.prevented, true)
+  assert.equal(keyRight.stopped, true)
+  assert.equal(env.document.activeElement, commentsTab)
+  assert.equal(commentsTab.getAttribute('tabindex'), '0')
+  assert.equal(descTab.getAttribute('tabindex'), '-1')
+
+  const keyEnd = { key: 'End', target: commentsTab, preventDefault() {}, stopPropagation() {} }
+  tablist.dispatchEvent({ type: 'keydown', ...keyEnd })
+  assert.equal(env.document.activeElement, descTab)
+  const keyHome = { key: 'Home', target: descTab, preventDefault() {}, stopPropagation() {} }
+  tablist.dispatchEvent({ type: 'keydown', ...keyHome })
+  assert.equal(env.document.activeElement, commentsTab)
+  const keyLeft = { key: 'ArrowLeft', target: commentsTab, preventDefault() {}, stopPropagation() {} }
+  tablist.dispatchEvent({ type: 'keydown', ...keyLeft })
+  assert.equal(env.document.activeElement, descTab)
+
+  commentsTab.click()
+  assert.equal(fx.expandedTargetId(), 'engagement-panel-comments-section')
+  assert.equal(commentsTab.getAttribute('aria-selected'), 'true')
+
+  // Broken title triggers 180ms fallback to More Actions -> Description menu item.
+  const envBroken = boot(scripts[0], 'worker', '/shorts/broken')
+  const fxBroken = addShortsPanelFixture(envBroken, { brokenTitle: true })
+  envBroken.render()
+  const [, descTabBroken] = fxBroken.anchoredPanel.querySelectorAll('[role="tab"]')
+  descTabBroken.click()
+  assert.equal(fxBroken.getMenuDescClicks(), 0)
+  envBroken.flush(180)
+  assert.equal(fxBroken.getMenuDescClicks(), 1)
+  assert.equal(fxBroken.expandedTargetId(), 'engagement-panel-structured-description')
+
+  // Missing title immediately opens More Actions -> Description menu item.
+  const envNoTitle = boot(scripts[0], 'worker', '/shorts/notitle')
+  const fxNoTitle = addShortsPanelFixture(envNoTitle, { omitTitle: true })
+  envNoTitle.render()
+  const [, descTabNoTitle] = fxNoTitle.anchoredPanel.querySelectorAll('[role="tab"]')
+  descTabNoTitle.click()
+  assert.equal(fxNoTitle.getMenuDescClicks(), 1)
+  assert.equal(fxNoTitle.expandedTargetId(), 'engagement-panel-structured-description')
 })
 
-test('YouTube Shorts: late reels, feed scroll and navigation clean up layout work', async () => {
-  const env = boot(scripts[0], 'worker', '/shorts/example')
+test('YouTube Shorts: switching Shorts resets back to Comments via navigation or scroll without stacking listeners', async () => {
+  const env = boot(scripts[0], 'worker', '/shorts/first')
+  const fx = addShortsPanelFixture(env)
   env.render()
-  const { reel, video, shorts } = addShortsLayout(env)
-  env.observers[0].callback()
-  env.render()
-  assert.equal(reel.hasAttribute('data-yt-side-metadata'), true)
-  video.rect.top = 700
-  env.emit('scroll', {})
-  env.render()
-  assert.equal(reel.hasAttribute('data-yt-side-metadata'), false)
-  video.rect.top = 64
-  env.emit('scroll', {})
-  env.render()
-  assert.equal(reel.hasAttribute('data-yt-side-metadata'), true)
 
-  shorts.queries.set('ytd-reel-video-renderer', [])
-  env.observers[0].callback()
-  env.render()
-  assert.equal(reel.hasAttribute('data-yt-side-metadata'), false, 'removed reels are restored')
-  shorts.queries.set('ytd-reel-video-renderer', [reel])
-  env.observers[0].callback()
-  env.render()
-  env.emit('resize', {})
-  assert.equal(env.animationFrames.size, 1)
-  env.location.pathname = '/'
+  const [, descTab] = fx.anchoredPanel.querySelectorAll('[role="tab"]')
+  descTab.click()
+  assert.equal(fx.expandedTargetId(), 'engagement-panel-structured-description')
+
+  env.location.pathname = '/shorts/second'
   await env.listeners.get('yt-navigate-finish')()
-  assert.equal(env.animationFrames.size, 0)
-  assert.equal(env.observers[0].connected, false)
-  assert.equal(env.resizeObservers[0].target, null)
-  assert.equal(reel.hasAttribute('data-yt-side-metadata'), false)
-  assert.equal(env.listenerCount('scroll'), 0)
-  assert.equal(env.listenerCount('transitionend'), 0)
-  assert.equal(env.listenerCount('transitioncancel'), 0)
+  assert.equal(fx.expandedTargetId(), 'engagement-panel-comments-section')
+  assert.equal(env.observers.length, 1)
+  assert.equal(env.listenerCount('wheel'), 1)
+  assert.equal(env.listenerCount('click'), 1)
+
+  descTab.click()
+  assert.equal(fx.expandedTargetId(), 'engagement-panel-structured-description')
+  env.location.pathname = '/shorts/third'
+  env.emit('scroll', {})
+  env.render()
+  assert.equal(fx.expandedTargetId(), 'engagement-panel-comments-section')
 })
 
-test('YouTube Shorts: closing comments restores metadata after the player finishes moving', () => {
-  const env = boot(scripts[0], 'worker', '/shorts/example')
-  const { shorts, reel, video, overlay } = addShortsLayout(env)
+test('YouTube Shorts: narrow viewports and fullscreen never auto-open modal panels, while manual open keeps tabs and widening auto-opens', () => {
+  const env = boot(scripts[0], 'worker', '/shorts/narrow')
+  const fx = addShortsPanelFixture(env, { innerWidth: 820, smallScreen: true })
   env.render()
+  assert.equal(fx.getCommentClicks(), 0)
+  assert.equal(fx.expandedTargetId(), '')
 
-  for (const eventType of ['transitionend', 'transitioncancel']) {
-    shorts.setAttribute('is-watch-while-mode', '')
-    video.rect.left = overlay.rect.left = 230
-    env.observers[0].callback()
-    env.render()
-    assert.equal(reel.hasAttribute('data-yt-side-metadata'), false)
+  // Manual open in narrow mode still shows tabs.
+  fx.commentsBtn.click()
+  env.render()
+  assert.equal(fx.expandedTargetId(), 'engagement-panel-comments-section')
+  assert.equal(fx.anchoredPanel.querySelector('#yt-shorts-panel-tabs').hidden, false)
 
-    // The mode attribute is removed before the 300ms right transition.
-    // The container never resizes, so ResizeObserver cannot catch this.
-    shorts.removeAttribute('is-watch-while-mode')
-    env.observers[0].callback()
-    env.render()
-    assert.equal(reel.hasAttribute('data-yt-side-metadata'), false)
+  // Resizing from narrow (not dismissed) to wide desktop auto-opens Comments.
+  const envResize = boot(scripts[0], 'worker', '/shorts/resize')
+  const fxResize = addShortsPanelFixture(envResize, { innerWidth: 820, smallScreen: true })
+  envResize.render()
+  assert.equal(fxResize.getCommentClicks(), 0)
+  fxResize.shorts.removeAttribute('small-screen-persistent-panel')
+  envResize.window.innerWidth = 1440
+  envResize.emit('resize', {})
+  envResize.render()
+  assert.equal(fxResize.getCommentClicks(), 1)
+  assert.equal(fxResize.expandedTargetId(), 'engagement-panel-comments-section')
 
-    video.rect.left = overlay.rect.left = 480
-    env.emit(eventType, { target: reel, propertyName: 'right' })
-    env.render()
-    assert.equal(reel.hasAttribute('data-yt-side-metadata'), true, eventType)
-    const metadataRight = overlay.rect.left +
-      parseFloat(reel.style['--yt-side-metadata-left']) +
-      parseFloat(reel.style['--yt-side-metadata-width'])
-    assert.equal(metadataRight, video.rect.left - 16)
-  }
-
-  env.emit('transitionend', { target: new env.Element(), propertyName: 'right' })
-  env.emit('transitionend', { target: reel, propertyName: 'opacity' })
-  assert.equal(env.animationFrames.size, 0, 'unrelated transitions do not trigger layout reads')
+  // Fullscreen blocks auto-open as well.
+  const envFs = boot(scripts[0], 'worker', '/shorts/fs')
+  const fxFs = addShortsPanelFixture(envFs, { fullscreen: true })
+  envFs.render()
+  assert.equal(fxFs.getCommentClicks(), 0)
+  assert.equal(fxFs.expandedTargetId(), '')
 })
 
 function wheel(target, overrides = {}) {
@@ -1199,57 +1525,73 @@ test('YouTube player lookup & initial response: scope player queries to #movie_p
 })
 
 
-test('YouTube Shorts: metadata layout batches all reads before writes, skips unchanged CSS writes and filters mutations', () => {
-  const env = boot(scripts[0], 'worker', '/shorts/example')
-  const { shorts, reel, video, container, overlay } = addShortsLayout(env)
+test('YouTube Shorts: close dismissal persists across Shorts, disabled comments do not retry, self/unrelated mutations are filtered, and leaving Shorts cleans up', async () => {
+  const env = boot(scripts[0], 'worker', '/shorts/first')
+  const fx = addShortsPanelFixture(env)
   env.render()
 
-  let styleWrites = 0
-  const origSetProperty = reel.style.setProperty.bind(reel.style)
-  const origRemoveProperty = reel.style.removeProperty.bind(reel.style)
-  reel.style.setProperty = (name, value) => {
-    styleWrites++
-    return origSetProperty(name, value)
-  }
-  reel.style.removeProperty = name => {
-    styleWrites++
-    return origRemoveProperty(name)
-  }
+  const tabBar = fx.anchoredPanel.querySelector('#yt-shorts-panel-tabs')
+  const closeBtn = tabBar.querySelector('.yt-shorts-panel-close')
+  assert.equal(fx.expandedTargetId(), 'engagement-panel-comments-section')
 
-  // Re-running with identical geometry must skip redundant style writes.
-  env.resizeObservers[0].callback()
+  // Dismiss via unified close button.
+  closeBtn.click()
+  assert.equal(fx.expandedTargetId(), '')
+  assert.equal(tabBar.hidden, true)
+  assert.equal(fx.shorts.hasAttribute('data-yt-shorts-tabs'), false)
+  assert.equal(fx.anchoredPanel.hasAttribute('data-yt-shorts-tabs'), false)
+
+  // Next Short stays closed while dismissed.
+  env.location.pathname = '/shorts/second'
+  await env.listeners.get('yt-navigate-finish')()
+  assert.equal(fx.expandedTargetId(), '')
+  assert.equal(fx.getCommentClicks(), 1)
+
+  // Manual native Comments click clears dismissal and restores tabs.
+  fx.commentsBtn.click()
   env.render()
-  assert.equal(styleWrites, 0)
+  assert.equal(fx.expandedTargetId(), 'engagement-panel-comments-section')
+  assert.equal(tabBar.hidden, false)
 
-  // Moving the player must perform all rect reads before any style write.
-  const ops = []
-  for (const [label, node] of [['overlay', overlay], ['container', container], ['video', video]]) {
-    const origRect = node.getBoundingClientRect.bind(node)
-    node.getBoundingClientRect = () => {
-      ops.push(`read:${label}`)
-      return origRect()
-    }
-  }
-  reel.style.setProperty = (name, value) => {
-    ops.push(`write:${name}`)
-    return origSetProperty(name, value)
-  }
-  video.rect.left = 500
-  env.resizeObservers[0].callback()
+  // Dismiss again, leave Shorts, verify cleanup, then return to Shorts -> auto-opens again.
+  closeBtn.click()
+  assert.equal(fx.expandedTargetId(), '')
+  env.location.pathname = '/'
+  await env.listeners.get('yt-navigate-finish')()
+  assert.equal(env.observers[0].connected, false)
+  assert.equal(env.timers.size, 0)
+  assert.equal(env.animationFrames.size, 0)
+  assert.equal(env.listenerCount('click'), 0)
+  assert.equal(env.listenerCount('scroll'), 0)
+  assert.equal(tabBar.isConnected, false)
+
+  env.location.pathname = '/shorts/third'
+  await env.listeners.get('yt-navigate-finish')()
   env.render()
-  const firstWrite = ops.findIndex(op => op.startsWith('write:'))
-  assert.notEqual(firstWrite, -1)
-  assert.equal(ops.slice(firstWrite).some(op => op.startsWith('read:')), false, `reads happened after writes: ${ops.join(',')}`)
+  assert.equal(fx.expandedTargetId(), 'engagement-panel-comments-section')
+  assert.equal(fx.getCommentClicks(), 3)
 
-  // Unrelated DOM churn outside Shorts must not schedule layout frames.
-  shorts.nodeType = 1
-  const unrelated = Object.assign(new env.Element('div'), { nodeType: 1 })
-  const span = Object.assign(new env.Element('span'), { nodeType: 1 })
-  env.observers[0].callback([{ type: 'childList', target: unrelated, addedNodes: [span], removedNodes: [] }])
+  // Unrelated DOM churn and tab-bar self-mutations must not schedule frames.
+  const activeTabBar = fx.anchoredPanel.querySelector('#yt-shorts-panel-tabs')
+  const unrelated = new env.Element('div')
+  const span = new env.Element('span')
+  env.observers[1].callback([
+    { type: 'childList', target: unrelated, addedNodes: [span], removedNodes: [] },
+    { type: 'attributes', attributeName: 'data-yt-shorts-tabs', target: fx.shorts },
+    { type: 'childList', target: fx.anchoredPanel, addedNodes: [activeTabBar], removedNodes: [] },
+  ])
   assert.equal(env.animationFrames.size, 0)
 
-  env.observers[0].callback([{ type: 'attributes', attributeName: 'is-fullscreen', target: shorts }])
+  env.observers[1].callback([{ type: 'attributes', attributeName: 'is-fullscreen', target: fx.shorts }])
   assert.equal(env.animationFrames.size, 1)
+
+  // Disabled Comments button does not schedule infinite retry timers.
+  const envDisabled = boot(scripts[0], 'worker', '/shorts/ad')
+  const fxDisabled = addShortsPanelFixture(envDisabled, { commentsDisabled: true })
+  envDisabled.render()
+  assert.equal(fxDisabled.getCommentClicks(), 0)
+  assert.equal(fxDisabled.expandedTargetId(), '')
+  assert.equal(envDisabled.timers.size, 0)
 })
 
 test('Twitch: body MutationObserver ignores chat subtree churn without querying players', () => {

@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name        YouTube Player Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.2.21
+// @version     0.2.22
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubePlayerTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubePlayerTweaks.user.js
-// @description 提供 YouTube 原解析度 PNG 截圖、滾輪音量與速度調整、直播追平，並擴大直播回看範圍。
+// @description 提供 YouTube 原解析度 PNG 截圖、滾輪音量與速度調整、直播追平、擴大直播回看範圍，並於 Shorts 隱藏影片內資訊與預設右側頁籤面板。
 // @author      Derek
 // @match       *://www.youtube.com/*
 // @grant       unsafeWindow
@@ -246,39 +246,165 @@
       live: 'M12 8a4 4 0 1 0 0 8a4 4 0 0 0 0-8Zm0 2a2 2 0 1 1 0 4a2 2 0 0 1 0-4ZM6.34 6.34a8 8 0 0 0 0 11.32l1.42-1.42a6 6 0 0 1 0-8.48L6.34 6.34Zm11.32 0l-1.42 1.42a6 6 0 0 1 0 8.48l1.42 1.42a8 8 0 0 0 0-11.32Z',
       photo: 'M480-260q75 0 127.5-52.5T660-440q0-75-52.5-127.5T480-620q-75 0-127.5 52.5T300-440q0 75 52.5 127.5T480-260Zm0-80q-42 0-71-29t-29-71q0-42 29-71t71-29q42 0 71 29t29 71q0 42-29 71t-71 29ZM160-120q-33 0-56.5-23.5T80-200v-480q0-33 23.5-56.5T160-760h126l74-80h240l74 80h126q33 0 56.5 23.5T880-680v480q0 33-23.5 56.5T800-120H160Zm0-80h640v-480H638l-73-80H395l-73 80H160v480Zm320-240Z',
       speed: 'M418-340q24 24 62 23.5t56-27.5l224-336-336 224q-27 18-28.5 55t22.5 61Zm62-460q59 0 113.5 16.5T696-734l-76 48q-33-17-68.5-25.5T480-720q-133 0-226.5 93.5T160-400q0 42 11.5 83t32.5 77h552q23-38 33.5-79t10.5-85q0-36-8.5-70T766-540l48-76q30 47 47.5 100T880-406q1 57-13 109t-41 99q-11 18-30 28t-40 10H204q-21 0-40-10t-30-28q-26-45-40-95.5T80-400q0-83 31.5-155.5t86-127Q252-737 325-768.5T480-800Zm7 313Z',
+      close: 'M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z',
     },
   }
 
   addStyle(`
-    /* Move only metadata into measured free space. The native player size,
-       action bar and already-extracted wide-screen layout stay intact. */
-    ytd-reel-video-renderer[data-yt-side-metadata] > .overlay {
-      overflow: visible !important;
+    /* Always hide in-video Shorts metadata and keep native info/comments inside
+       the right-side panel with a top tab switcher. */
+    ytd-shorts ytd-reel-video-renderer .ytReelPlayerOverlayViewModelMetadataContainer,
+    ytd-shorts ytd-reel-video-renderer #metapanel {
+      display: none !important;
     }
 
-    ytd-reel-video-renderer[data-yt-side-metadata]
-      .ytReelPlayerOverlayViewModelMetadataContainer {
-      position: absolute !important;
-      left: var(--yt-side-metadata-left) !important;
-      right: auto !important;
-      bottom: 0 !important;
-      width: var(--yt-side-metadata-width) !important;
-      margin: 0 !important;
+    ytd-shorts[data-yt-shorts-tabs]:not([small-screen-persistent-panel]) {
+      --yt-shorts-tabs-height: 44px;
+      --ytd-comments-engagement-panel-content-height: calc(max(var(--ytd-shorts-player-height), var(--ytd-reels-min-height, 576px)) - var(--yt-shorts-tabs-height));
+      --ytd-engagement-panel-content-min-height: calc(var(--ytd-reels-min-height, 576px) - var(--yt-shorts-tabs-height));
+      --ytd-engagement-panel-content-height: calc(max(var(--ytd-shorts-player-height), var(--ytd-reels-min-height, 576px)) + 56px - var(--yt-shorts-tabs-height));
+    }
+
+    #anchored-panel[data-yt-shorts-tabs] {
+      display: flex !important;
+      flex-direction: column !important;
+    }
+
+    #anchored-panel[data-yt-shorts-tabs] > ytd-engagement-panel-section-list-renderer[visibility="ENGAGEMENT_PANEL_VISIBILITY_EXPANDED"] {
+      flex: 1 1 auto !important;
+      min-height: 0 !important;
+      max-height: calc(100% - var(--yt-shorts-tabs-height, 44px)) !important;
+      width: 100% !important;
+    }
+
+    #anchored-panel[data-yt-shorts-tabs] ytd-engagement-panel-title-header-renderer #visibility-button,
+    #anchored-panel[data-yt-shorts-tabs] yt-video-title-header-view-model .ytVideoTitleHeaderViewModelHeaderButton,
+    #anchored-panel[data-yt-shorts-tabs] yt-floating-button-view-model.ytFloatingButtonViewModelHostSdDesktop {
+      display: none !important;
+    }
+
+    #yt-shorts-panel-tabs {
+      order: -10;
+      flex: 0 0 auto;
       box-sizing: border-box;
-      background: none !important;
-      filter: none !important;
-      border-radius: 0 !important;
+      height: var(--yt-shorts-tabs-height, 44px);
+      display: flex;
+      align-items: stretch;
+      justify-content: space-between;
+      padding: 0 8px 0 12px;
+      background-color: var(--yt-spec-base-background, #212121);
+      color: var(--yt-spec-text-primary, #f1f1f1);
+      border-bottom: 1px solid var(--yt-spec-10-percent-layer, rgba(255, 255, 255, 0.1));
+      border-radius: 12px 12px 0 0;
     }
 
-    ytd-reel-video-renderer[data-yt-side-metadata] .ytReelChannelBarViewModelHost {
-      flex-wrap: wrap;
-      row-gap: 8px;
-      max-width: 100%;
+    html:not([dark]) #yt-shorts-panel-tabs {
+      background-color: var(--yt-spec-base-background, #fff);
+      color: var(--yt-spec-text-primary, #0f0f0f);
+      border-bottom-color: var(--yt-spec-10-percent-layer, rgba(0, 0, 0, 0.1));
     }
 
-    ytd-reel-video-renderer[data-yt-side-metadata]
-      .ytReelPlayerOverlayViewModelActionsContainer {
-      margin-left: auto;
+    #yt-shorts-panel-tabs[hidden],
+    ytd-shorts:not([is-watch-while-mode]) #yt-shorts-panel-tabs {
+      display: none !important;
+    }
+
+    .yt-shorts-panel-tablist {
+      display: flex;
+      flex: 1 1 auto;
+      min-width: 0;
+      align-items: stretch;
+      flex-wrap: nowrap;
+      overflow-x: auto;
+      scrollbar-width: none;
+      gap: 4px;
+    }
+
+    .yt-shorts-panel-tablist::-webkit-scrollbar {
+      display: none;
+    }
+
+    .yt-shorts-panel-tab {
+      position: relative;
+      flex: none;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-inline-size: 64px;
+      min-block-size: 44px;
+      padding: 0 12px;
+      border: 0;
+      margin: 0;
+      background: transparent;
+      color: var(--yt-spec-text-secondary, #aaa);
+      font-family: Roboto, Arial, sans-serif;
+      font-size: 14px;
+      font-weight: 500;
+      line-height: 20px;
+      white-space: nowrap;
+      cursor: pointer;
+    }
+
+    html:not([dark]) .yt-shorts-panel-tab {
+      color: var(--yt-spec-text-secondary, #606060);
+    }
+
+    .yt-shorts-panel-tab:hover {
+      color: var(--yt-spec-text-primary, #f1f1f1);
+    }
+
+    html:not([dark]) .yt-shorts-panel-tab:hover {
+      color: var(--yt-spec-text-primary, #0f0f0f);
+    }
+
+    .yt-shorts-panel-tab[aria-selected="true"] {
+      color: var(--yt-spec-text-primary, #f1f1f1);
+    }
+
+    html:not([dark]) .yt-shorts-panel-tab[aria-selected="true"] {
+      color: var(--yt-spec-text-primary, #0f0f0f);
+    }
+
+    .yt-shorts-panel-tab[aria-selected="true"]::after {
+      content: "";
+      position: absolute;
+      inset: auto 8px 0;
+      border-block-end: 2px solid currentColor;
+    }
+
+    .yt-shorts-panel-close {
+      flex: none;
+      align-self: center;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 36px;
+      height: 36px;
+      padding: 0;
+      border: 0;
+      margin: 0 0 0 8px;
+      border-radius: 50%;
+      background: transparent;
+      color: var(--yt-spec-text-primary, #f1f1f1);
+      cursor: pointer;
+    }
+
+    html:not([dark]) .yt-shorts-panel-close {
+      color: var(--yt-spec-text-primary, #0f0f0f);
+    }
+
+    .yt-shorts-panel-close:hover {
+      background: var(--yt-spec-10-percent-layer, rgba(255, 255, 255, 0.1));
+    }
+
+    html:not([dark]) .yt-shorts-panel-close:hover {
+      background: var(--yt-spec-10-percent-layer, rgba(0, 0, 0, 0.08));
+    }
+
+    .yt-shorts-panel-tab:focus-visible,
+    .yt-shorts-panel-close:focus-visible {
+      outline: 2px solid currentColor;
+      outline-offset: -2px;
     }
 
     #voice-search-button,
@@ -1168,94 +1294,686 @@
     }
   }
 
-  const startShortsMetadataLayout = (signal) => {
-    const adjusted = new Map()
-    let frame = 0
-    let observedContainer = null
+  const SHORTS_PANEL_COMMENTS = 'engagement-panel-comments-section'
+  const SHORTS_PANEL_DESCRIPTION = 'engagement-panel-structured-description'
+  const SHORTS_PANEL_EXPANDED = 'ENGAGEMENT_PANEL_VISIBILITY_EXPANDED'
+  const SHORTS_MIN_SIDE_PANEL_WIDTH = 960
+  const SHORTS_AUTO_OPEN_MAX_ATTEMPTS = 12
+  const SHORTS_AUTO_OPEN_RETRY_MS = 250
+  const SHORTS_DESC_FALLBACK_MS = 180
+  const SHORTS_DESC_MENU_POLL_MS = 50
+  const SHORTS_DESC_MENU_MAX_POLLS = 8
+  const SHORTS_PENDING_GRACE_MS = 900
 
-    const restore = (reel) => {
-      reel.removeAttribute('data-yt-side-metadata')
-      reel.style.removeProperty('--yt-side-metadata-left')
-      reel.style.removeProperty('--yt-side-metadata-width')
-      adjusted.delete(reel)
+  const SHORTS_COMMENT_PATH_RE = /^(?:M1 6a4 4 0 014-4h14|M20 2H4|M8 7h8|M18 4H6)/
+  const SHORTS_COMMENT_LABEL_RE = /comment|留言|コメント|评论|댓글/i
+  const SHORTS_MORE_ACTIONS_LABEL_RE = /more actions|其他動作|その他の操作|更多操作|더보기/i
+  const SHORTS_THREE_DOTS_PATH_RE = /^(?:M12 16\.5|M12 4a2|M12 8c1\.1)/
+  const SHORTS_DESC_PATH_RE = /^M4 5a1 1 0 000 2h16/
+  const SHORTS_DESC_TEXT_RE = /^(description|說明|説明|简介|설명)$/i
+
+  let shortsPanelDismissed = false
+  let activeShortsSession = null
+
+  const getShortKey = () => {
+    const match = location.pathname.match(/^\/shorts\/([^/?#]+)/)
+    return match ? match[1] : location.pathname
+  }
+
+  const getActiveShortsReel = (shorts) => {
+    if (!shorts) return null
+    const explicit = shorts.querySelector('ytd-reel-video-renderer[is-active]')
+    if (explicit) return explicit
+    const reels = shorts.querySelectorAll('ytd-reel-video-renderer')
+    if (reels.length === 1) return reels[0]
+    if (!reels.length) return null
+    const bounds = shorts.querySelector('#shorts-container')?.getBoundingClientRect?.()
+    if (!bounds || bounds.width <= 0 || bounds.height <= 0) return reels[0]
+
+    let bestReel = reels[0]
+    let bestOverlap = -1
+    for (const reel of reels) {
+      const target = reel.querySelector('#short-video-container') || reel
+      const rect = target.getBoundingClientRect?.()
+      if (!rect) continue
+      const overlapX = Math.max(0, Math.min(rect.right, bounds.right) - Math.max(rect.left, bounds.left))
+      const overlapY = Math.max(0, Math.min(rect.bottom, bounds.bottom) - Math.max(rect.top, bounds.top))
+      const overlap = overlapX * overlapY
+      if (overlap > bestOverlap) {
+        bestOverlap = overlap
+        bestReel = reel
+      }
+    }
+    return bestReel
+  }
+
+  const getExpandedShortsPanel = (shorts) => {
+    const root = shorts?.querySelector('#anchored-panel') || shorts
+    if (!root) return null
+    for (const panel of root.querySelectorAll('ytd-engagement-panel-section-list-renderer')) {
+      if (panel.getAttribute('visibility') === SHORTS_PANEL_EXPANDED) return panel
+    }
+    return null
+  }
+
+  const isControlDisabled = (element) =>
+    !element ||
+    Boolean(element.disabled) ||
+    element.hasAttribute?.('disabled') ||
+    element.getAttribute?.('aria-disabled') === 'true'
+
+  const findShortsCommentsButton = (reel) => {
+    if (!reel) return null
+    const legacy = reel.querySelector('#comments-button button') || reel.querySelector('#comments-button')
+    if (legacy) return legacy
+
+    const actionBar = reel.querySelector('reel-action-bar-view-model')
+    if (!actionBar) return null
+
+    const candidates = []
+    for (const button of actionBar.querySelectorAll('button')) {
+      if (!button.closest?.('button-view-model')) continue
+      if (button.closest?.('like-button-view-model, dislike-button-view-model, pivot-button-view-model')) {
+        continue
+      }
+      candidates.push(button)
     }
 
-    const update = () => {
-      frame = 0
-      if (signal.aborted) return
-      const shorts = $('ytd-shorts')
-      const container = shorts?.querySelector('#shorts-container')
-      if (container !== observedContainer) {
-        resizeObserver.disconnect()
-        if (container) resizeObserver.observe(container)
-        observedContainer = container
+    for (const button of candidates) {
+      for (const path of button.querySelectorAll('path')) {
+        const d = path.getAttribute?.('d') || ''
+        if (SHORTS_COMMENT_PATH_RE.test(d)) return button
       }
+    }
 
-      const nextLayouts = []
-      const current = new Set()
-      if (container && !document.fullscreenElement &&
-          !shorts.hasAttribute('is-fullscreen') &&
-          !shorts.hasAttribute('is-watch-while-mode')) {
-        const bounds = container.getBoundingClientRect()
-        for (const reel of shorts.querySelectorAll('ytd-reel-video-renderer')) {
-          if (reel.hasAttribute('extract-overlay') ||
-              reel.hasAttribute('is-fullscreen') ||
-              reel.hasAttribute('is-watch-while-mode')) continue
-          const video = reel.querySelector('#short-video-container')
-          const overlay = reel.querySelector('.overlay')
-          const metadata = overlay?.querySelector('.ytReelPlayerOverlayViewModelMetadataContainer')
-          if (!video || !metadata) continue
-          const rect = video.getBoundingClientRect()
-          if (rect.width <= 0 || rect.height <= 0 ||
-              rect.bottom <= bounds.top || rect.top >= bounds.bottom) continue
-          // Leave a gap next to the video and keep a usable text column. On
-          // genuinely narrow windows retain YouTube's original layout.
-          const left = Math.max(0, bounds.left) + 16
-          const width = Math.min(480, Math.floor(rect.left - left - 16))
-          if (width < 240) continue
-          const offset = rect.left - 16 - width - overlay.getBoundingClientRect().left
-          current.add(reel)
-          nextLayouts.push({ reel, left: `${offset}px`, width: `${width}px` })
+    for (const button of candidates) {
+      const label = button.getAttribute?.('aria-label') || ''
+      if (SHORTS_COMMENT_LABEL_RE.test(label)) return button
+    }
+
+    return candidates[0] || null
+  }
+
+  const findShortsDescriptionTitleTarget = (reel) => {
+    if (!reel) return null
+    return (
+      reel.querySelector('yt-shorts-video-title-view-model h1[role="link"]') ||
+      reel.querySelector('.ytShortsVideoTitleViewModelShortsVideoTitle') ||
+      reel.querySelector('yt-shorts-video-title-view-model')
+    )
+  }
+
+  const findShortsMoreActionsButton = (reel) => {
+    if (!reel) return null
+    for (const button of reel.querySelectorAll('button')) {
+      if (button.closest?.('reel-action-bar-view-model, .ytReelPlayerOverlayViewModelMetadataContainer')) {
+        continue
+      }
+      const label = button.getAttribute?.('aria-label') || ''
+      if (SHORTS_MORE_ACTIONS_LABEL_RE.test(label)) return button
+      if (button.closest?.('#menu-button')) return button
+      for (const path of button.querySelectorAll('path')) {
+        const d = path.getAttribute?.('d') || ''
+        if (SHORTS_THREE_DOTS_PATH_RE.test(d)) return button
+      }
+    }
+    return null
+  }
+
+  const isDropdownVisible = (dropdown) => {
+    if (!dropdown || dropdown.hasAttribute?.('hidden')) return false
+    if (dropdown.getAttribute?.('aria-hidden') === 'true') return false
+    if (dropdown.style?.display === 'none') return false
+    return true
+  }
+
+  const findDescriptionMenuItem = () => {
+    const menus = []
+    const dropdowns = [...document.querySelectorAll('tp-yt-iron-dropdown')]
+    for (const dropdown of dropdowns) {
+      if (!isDropdownVisible(dropdown)) continue
+      const menu = dropdown.querySelector('yt-list-view-model[role="menu"]')
+      if (menu) menus.push(menu)
+    }
+    if (!dropdowns.length) {
+      const fallbackMenu = document.querySelector('yt-list-view-model[role="menu"]')
+      if (fallbackMenu && isDropdownVisible(fallbackMenu)) menus.push(fallbackMenu)
+    }
+
+    for (const menu of menus) {
+      const items = menu.querySelectorAll('yt-list-item-view-model')
+      if (!items.length) continue
+      for (const item of items) {
+        for (const path of item.querySelectorAll('path')) {
+          const d = path.getAttribute?.('d') || ''
+          if (SHORTS_DESC_PATH_RE.test(d)) {
+            return item.querySelector('button, [role="menuitem"]') || item
+          }
         }
       }
-      for (const reel of adjusted.keys()) {
-        if (!current.has(reel)) restore(reel)
+      for (const item of items) {
+        const text = (item.textContent || '').trim()
+        if (SHORTS_DESC_TEXT_RE.test(text)) {
+          return item.querySelector('button, [role="menuitem"]') || item
+        }
       }
-      for (const { reel, left, width } of nextLayouts) {
-        const prev = adjusted.get(reel)
-        if (prev && prev.left === left && prev.width === width) continue
-        reel.style.setProperty('--yt-side-metadata-left', left)
-        reel.style.setProperty('--yt-side-metadata-width', width)
-        reel.setAttribute('data-yt-side-metadata', '')
-        adjusted.set(reel, { left, width })
+      const first = items[0]
+      return first.querySelector('button, [role="menuitem"]') || first
+    }
+    return null
+  }
+
+  const findNativePanelCloseButton = (panel) => {
+    if (!panel) return null
+    return (
+      panel.querySelector('#visibility-button button') ||
+      panel.querySelector('yt-video-title-header-view-model .ytVideoTitleHeaderViewModelHeaderButton button') ||
+      panel.querySelector('yt-floating-button-view-model button')
+    )
+  }
+
+  const canAutoOpenShortsPanel = (shorts, reel) => {
+    if (!shorts || !shorts.querySelector('#anchored-panel')) return false
+    if (shortsPanelDismissed) return false
+    if (
+      document.fullscreenElement ||
+      shorts.hasAttribute('is-fullscreen') ||
+      reel?.hasAttribute('is-fullscreen')
+    ) {
+      return false
+    }
+    if (
+      shorts.hasAttribute('small-screen-persistent-panel') ||
+      shorts.querySelector('#anchored-panel-scrim')
+    ) {
+      return false
+    }
+    const width = window.innerWidth
+    if (Number.isFinite(width) && width > 0 && width < SHORTS_MIN_SIDE_PANEL_WIDTH) {
+      return false
+    }
+    return true
+  }
+
+  const startShortsPanelController = (signal) => {
+    let frame = 0
+    let currentShortKey = getShortKey()
+    let desiredTab = 'comments'
+    let pendingTarget = null
+    let pendingUntil = 0
+    let autoOpenAttempts = 0
+    let autoOpenExhausted = false
+    let waitingAutoRetry = false
+    let autoOpenTimer = 0
+    let menuFallbackTimer = 0
+    let menuPollTimer = 0
+    let internalClick = false
+    let lastActiveTab = null
+
+    const tabBar = document.createElement('div')
+    tabBar.id = 'yt-shorts-panel-tabs'
+    tabBar.hidden = true
+
+    const tablist = document.createElement('div')
+    tablist.className = 'yt-shorts-panel-tablist'
+    tablist.setAttribute('role', 'tablist')
+    tablist.setAttribute('focusgroup', 'tablist nomemory')
+    tablist.setAttribute('aria-label', 'Shorts 面板')
+
+    const makeTab = (id, label, selected) => {
+      const tab = document.createElement('button')
+      tab.type = 'button'
+      tab.className = 'yt-shorts-panel-tab'
+      tab.setAttribute('role', 'tab')
+      tab.dataset.tab = id
+      tab.setAttribute('aria-selected', String(selected))
+      tab.setAttribute('tabindex', selected ? '0' : '-1')
+      if (selected) tab.setAttribute('focusgroupstart', '')
+      tab.textContent = label
+      return tab
+    }
+
+    const commentsTab = makeTab('comments', '留言', true)
+    const descTab = makeTab('description', '影片資訊', false)
+    const tabs = [commentsTab, descTab]
+    tablist.append(commentsTab, descTab)
+
+    const closeBtn = document.createElement('button')
+    closeBtn.type = 'button'
+    closeBtn.className = 'yt-shorts-panel-close'
+    closeBtn.setAttribute('aria-label', '關閉')
+
+    const closeSvg = document.createElementNS(SVG_NS, 'svg')
+    closeSvg.setAttribute('width', '20')
+    closeSvg.setAttribute('height', '20')
+    closeSvg.setAttribute('viewBox', '0 0 24 24')
+    closeSvg.setAttribute('aria-hidden', 'true')
+    closeSvg.setAttribute('focusable', 'false')
+
+    const closePath = document.createElementNS(SVG_NS, 'path')
+    closePath.setAttribute('d', data.svg.close)
+    closePath.setAttribute('fill', 'currentColor')
+    closeSvg.appendChild(closePath)
+    closeBtn.appendChild(closeSvg)
+
+    tabBar.append(tablist, closeBtn)
+
+    const updateTabSelection = (activeTab) => {
+      if (lastActiveTab === activeTab) return
+      lastActiveTab = activeTab
+      const fallbackTab = activeTab === 'description' ? descTab : commentsTab
+      for (const tab of tabs) {
+        const selected = tab.dataset.tab === activeTab
+        const focusable = activeTab ? selected : tab === fallbackTab
+        const selectedStr = String(selected)
+        if (tab.getAttribute('aria-selected') !== selectedStr) {
+          tab.setAttribute('aria-selected', selectedStr)
+        }
+        const nextTabIndex = focusable ? '0' : '-1'
+        if (tab.getAttribute('tabindex') !== nextTabIndex) {
+          tab.setAttribute('tabindex', nextTabIndex)
+        }
+        if (selected) {
+          if (!tab.hasAttribute('focusgroupstart')) tab.setAttribute('focusgroupstart', '')
+        } else if (tab.hasAttribute('focusgroupstart')) {
+          tab.removeAttribute('focusgroupstart')
+        }
       }
     }
+
+    const clearAutoOpenTimer = () => {
+      if (autoOpenTimer) {
+        clearTimeout(autoOpenTimer)
+        autoOpenTimer = 0
+      }
+    }
+
+    const clearMenuTimers = () => {
+      if (menuFallbackTimer) {
+        clearTimeout(menuFallbackTimer)
+        menuFallbackTimer = 0
+      }
+      if (menuPollTimer) {
+        clearInterval(menuPollTimer)
+        menuPollTimer = 0
+      }
+    }
+
+    const clearAllTimers = () => {
+      clearAutoOpenTimer()
+      clearMenuTimers()
+    }
+
+    const clearShortsTabsState = (shorts, anchoredPanel) => {
+      if (!tabBar.hidden) tabBar.hidden = true
+      if (shorts?.hasAttribute('data-yt-shorts-tabs')) {
+        shorts.removeAttribute('data-yt-shorts-tabs')
+      }
+      if (anchoredPanel?.hasAttribute('data-yt-shorts-tabs')) {
+        anchoredPanel.removeAttribute('data-yt-shorts-tabs')
+      }
+    }
+
+    const triggerInternalClick = (element) => {
+      if (!element) return
+      internalClick = true
+      try {
+        element.click()
+      } finally {
+        internalClick = false
+      }
+    }
+
+    const openComments = (reel) => {
+      const btn = findShortsCommentsButton(reel)
+      if (!btn) return 'missing'
+      if (isControlDisabled(btn)) {
+        autoOpenExhausted = true
+        return 'disabled'
+      }
+      triggerInternalClick(btn)
+      return 'clicked'
+    }
+
+    const openDescription = (shorts, reel) => {
+      clearMenuTimers()
+      if (getExpandedShortsPanel(shorts)?.getAttribute('target-id') === SHORTS_PANEL_DESCRIPTION) {
+        return
+      }
+
+      const startMenuFallback = () => {
+        menuFallbackTimer = 0
+        if (signal.aborted || desiredTab !== 'description' || shortsPanelDismissed) return
+        const latestShorts = $('ytd-shorts')
+        const latestReel = getActiveShortsReel(latestShorts)
+        if (getExpandedShortsPanel(latestShorts)?.getAttribute('target-id') === SHORTS_PANEL_DESCRIPTION) {
+          return
+        }
+        const moreBtn = findShortsMoreActionsButton(latestReel)
+        if (!moreBtn) return
+        triggerInternalClick(moreBtn)
+
+        const firstTry = findDescriptionMenuItem()
+        if (firstTry) {
+          triggerInternalClick(firstTry)
+          return
+        }
+
+        let polls = 0
+        menuPollTimer = setInterval(() => {
+          polls++
+          if (
+            signal.aborted ||
+            desiredTab !== 'description' ||
+            shortsPanelDismissed ||
+            getExpandedShortsPanel($('ytd-shorts'))?.getAttribute('target-id') === SHORTS_PANEL_DESCRIPTION
+          ) {
+            clearMenuTimers()
+            return
+          }
+          const item = findDescriptionMenuItem()
+          if (item) {
+            clearMenuTimers()
+            triggerInternalClick(item)
+            return
+          }
+          if (polls >= SHORTS_DESC_MENU_MAX_POLLS) {
+            clearMenuTimers()
+          }
+        }, SHORTS_DESC_MENU_POLL_MS)
+      }
+
+      const titleTarget = findShortsDescriptionTitleTarget(reel)
+      if (titleTarget) {
+        triggerInternalClick(titleTarget)
+        if (getExpandedShortsPanel(shorts)?.getAttribute('target-id') === SHORTS_PANEL_DESCRIPTION) {
+          return
+        }
+        menuFallbackTimer = setTimeout(startMenuFallback, SHORTS_DESC_FALLBACK_MS)
+        return
+      }
+
+      startMenuFallback()
+    }
+
+    const scheduleAutoOpenRetry = () => {
+      if (autoOpenTimer || autoOpenExhausted || signal.aborted) return
+      if (autoOpenAttempts >= SHORTS_AUTO_OPEN_MAX_ATTEMPTS) {
+        autoOpenExhausted = true
+        waitingAutoRetry = false
+        return
+      }
+      autoOpenAttempts++
+      autoOpenTimer = setTimeout(() => {
+        autoOpenTimer = 0
+        waitingAutoRetry = false
+        if (!signal.aborted) sync()
+      }, SHORTS_AUTO_OPEN_RETRY_MS)
+    }
+
+    const ensureDesiredPanel = (shorts, reel) => {
+      if (desiredTab !== 'comments' || autoOpenExhausted || waitingAutoRetry) return
+      const status = openComments(reel)
+      if (status === 'disabled') {
+        clearAutoOpenTimer()
+        return
+      }
+      if (status === 'clicked') {
+        const expanded = getExpandedShortsPanel(shorts)
+        if (expanded?.getAttribute('target-id') === SHORTS_PANEL_COMMENTS) {
+          clearAutoOpenTimer()
+          waitingAutoRetry = false
+          return
+        }
+        waitingAutoRetry = true
+      }
+      scheduleAutoOpenRetry()
+    }
+
+    const sync = () => {
+      frame = 0
+      if (signal.aborted) return
+
+      const nextShortKey = getShortKey()
+      if (nextShortKey !== currentShortKey) {
+        currentShortKey = nextShortKey
+        desiredTab = 'comments'
+        pendingTarget = null
+        pendingUntil = 0
+        autoOpenAttempts = 0
+        autoOpenExhausted = false
+        waitingAutoRetry = false
+        clearAllTimers()
+      }
+
+      const shorts = $('ytd-shorts')
+      const anchoredPanel = shorts?.querySelector('#anchored-panel')
+      if (!shorts || !anchoredPanel) {
+        clearShortsTabsState(shorts, anchoredPanel || tabBar.parentElement)
+        return
+      }
+
+      const reel = getActiveShortsReel(shorts)
+      let expandedPanel = getExpandedShortsPanel(shorts)
+      let expandedId = expandedPanel?.getAttribute('target-id') || ''
+
+      if (
+        desiredTab === 'comments' &&
+        expandedId !== SHORTS_PANEL_COMMENTS &&
+        !pendingTarget &&
+        canAutoOpenShortsPanel(shorts, reel) &&
+        !autoOpenExhausted
+      ) {
+        ensureDesiredPanel(shorts, reel)
+        expandedPanel = getExpandedShortsPanel(shorts)
+        expandedId = expandedPanel?.getAttribute('target-id') || ''
+      }
+
+      if (!expandedId) {
+        clearShortsTabsState(shorts, anchoredPanel)
+        return
+      }
+
+      clearAutoOpenTimer()
+      waitingAutoRetry = false
+
+      if (tabBar.parentElement !== anchoredPanel || anchoredPanel.firstChild !== tabBar) {
+        anchoredPanel.insertBefore(tabBar, anchoredPanel.firstChild || null)
+      }
+      if (!shorts.hasAttribute('data-yt-shorts-tabs')) {
+        shorts.setAttribute('data-yt-shorts-tabs', '')
+      }
+      if (!anchoredPanel.hasAttribute('data-yt-shorts-tabs')) {
+        anchoredPanel.setAttribute('data-yt-shorts-tabs', '')
+      }
+      if (tabBar.hidden) tabBar.hidden = false
+
+      const actualTab =
+        expandedId === SHORTS_PANEL_COMMENTS
+          ? 'comments'
+          : expandedId === SHORTS_PANEL_DESCRIPTION
+            ? 'description'
+            : ''
+
+      if (actualTab === desiredTab) {
+        clearMenuTimers()
+      }
+      if (pendingTarget && (pendingTarget === actualTab || Date.now() >= pendingUntil)) {
+        pendingTarget = null
+        pendingUntil = 0
+      }
+
+      const displayTab = pendingTarget && Date.now() < pendingUntil ? pendingTarget : actualTab
+      updateTabSelection(displayTab)
+    }
+
     const schedule = () => {
-      if (!frame && !signal.aborted) frame = requestAnimationFrame(update)
+      if (!frame && !signal.aborted) frame = requestAnimationFrame(sync)
     }
+
+    tablist.addEventListener('keydown', (event) => {
+      const index = tabs.indexOf(event.target)
+      if (index === -1) return
+      let nextIndex = -1
+      if (event.key === 'ArrowRight') nextIndex = (index + 1) % tabs.length
+      else if (event.key === 'ArrowLeft') nextIndex = (index - 1 + tabs.length) % tabs.length
+      else if (event.key === 'Home') nextIndex = 0
+      else if (event.key === 'End') nextIndex = tabs.length - 1
+      if (nextIndex === -1) return
+
+      event.preventDefault()
+      event.stopPropagation()
+      const nextTab = tabs[nextIndex]
+      for (const tab of tabs) {
+        tab.setAttribute('tabindex', tab === nextTab ? '0' : '-1')
+      }
+      nextTab.focus?.()
+      nextTab.scrollIntoView?.({ block: 'nearest', inline: 'nearest', container: 'nearest' })
+    }, { signal })
+
+    commentsTab.addEventListener('click', () => {
+      shortsPanelDismissed = false
+      desiredTab = 'comments'
+      autoOpenExhausted = false
+      waitingAutoRetry = false
+      clearAllTimers()
+      const shorts = $('ytd-shorts')
+      const reel = getActiveShortsReel(shorts)
+      const status = openComments(reel)
+      if (status === 'disabled') {
+        pendingTarget = null
+        pendingUntil = 0
+        sync()
+        return
+      }
+      pendingTarget = 'comments'
+      pendingUntil = Date.now() + SHORTS_PENDING_GRACE_MS
+      updateTabSelection('comments')
+      commentsTab.scrollIntoView?.({ block: 'nearest', inline: 'nearest', container: 'nearest' })
+      sync()
+    }, { signal })
+
+    descTab.addEventListener('click', () => {
+      shortsPanelDismissed = false
+      desiredTab = 'description'
+      pendingTarget = 'description'
+      pendingUntil = Date.now() + SHORTS_PENDING_GRACE_MS
+      autoOpenExhausted = false
+      waitingAutoRetry = false
+      clearAllTimers()
+      updateTabSelection('description')
+      descTab.scrollIntoView?.({ block: 'nearest', inline: 'nearest', container: 'nearest' })
+      const shorts = $('ytd-shorts')
+      const reel = getActiveShortsReel(shorts)
+      openDescription(shorts, reel)
+      sync()
+    }, { signal })
+
+    closeBtn.addEventListener('click', () => {
+      shortsPanelDismissed = true
+      pendingTarget = null
+      pendingUntil = 0
+      waitingAutoRetry = false
+      clearAllTimers()
+      const expanded = getExpandedShortsPanel($('ytd-shorts'))
+      const nativeClose = findNativePanelCloseButton(expanded)
+      if (nativeClose) triggerInternalClick(nativeClose)
+      sync()
+    }, { signal })
+
+    const onDocumentClick = (event) => {
+      if (internalClick) return
+      const target = eventTarget(event)
+      if (!(target instanceof Node) || tabBar.contains?.(target)) return
+
+      const nativeCloseHost = target.closest?.(
+        '#anchored-panel #visibility-button, #anchored-panel .ytVideoTitleHeaderViewModelHeaderButton, #anchored-panel yt-floating-button-view-model'
+      )
+      if (nativeCloseHost || target.id === 'anchored-panel-scrim') {
+        shortsPanelDismissed = true
+        pendingTarget = null
+        pendingUntil = 0
+        waitingAutoRetry = false
+        clearAllTimers()
+        return
+      }
+
+      const shorts = $('ytd-shorts')
+      const reel = getActiveShortsReel(shorts)
+      const commentsBtn = findShortsCommentsButton(reel)
+      if (commentsBtn && (target === commentsBtn || commentsBtn.contains?.(target))) {
+        shortsPanelDismissed = false
+        desiredTab = 'comments'
+        pendingTarget = 'comments'
+        pendingUntil = Date.now() + SHORTS_PENDING_GRACE_MS
+        autoOpenExhausted = false
+        waitingAutoRetry = false
+        clearAllTimers()
+        schedule()
+        return
+      }
+
+      const dropdownItem = target.closest?.(
+        'tp-yt-iron-dropdown yt-list-item-view-model, yt-list-view-model[role="menu"] yt-list-item-view-model'
+      )
+      if (dropdownItem) {
+        const descItem = findDescriptionMenuItem()
+        if (descItem && (dropdownItem === descItem || dropdownItem.contains?.(descItem))) {
+          shortsPanelDismissed = false
+          desiredTab = 'description'
+          pendingTarget = 'description'
+          pendingUntil = Date.now() + SHORTS_PENDING_GRACE_MS
+          autoOpenExhausted = false
+          waitingAutoRetry = false
+          clearAutoOpenTimer()
+          schedule()
+        }
+      }
+    }
+
+    const isSelfTabBarMutation = (mutation) => {
+      if (mutation.type === 'attributes' && mutation.attributeName === 'data-yt-shorts-tabs') {
+        return true
+      }
+      if (mutation.type === 'childList') {
+        const nodes = [...(mutation.addedNodes || []), ...(mutation.removedNodes || [])]
+        if (
+          nodes.length > 0 &&
+          nodes.every((node) => node === tabBar || node?.id === 'yt-shorts-panel-tabs' || node?.closest?.('#yt-shorts-panel-tabs'))
+        ) {
+          return true
+        }
+      }
+      return false
+    }
+
     const isRelevantShortsMutation = (mutations) => {
       if (!mutations?.length) return true
       for (const mutation of mutations) {
-        const target = mutation.target?.nodeType === 1 ? mutation.target : mutation.target?.parentElement
+        if (isSelfTabBarMutation(mutation)) continue
+        const target = mutation.target?.nodeType === 1
+          ? mutation.target
+          : mutation.target?.parentElement
+        if (target?.closest?.('#yt-shorts-panel-tabs')) continue
         if (target?.closest?.('ytd-shorts')) return true
         for (const list of [mutation.addedNodes, mutation.removedNodes]) {
           for (const node of list || []) {
             if (node?.nodeType !== 1) continue
-            if (node.matches?.('ytd-shorts, ytd-reel-video-renderer') ||
-                node.querySelector?.('ytd-shorts, ytd-reel-video-renderer')) return true
+            if (node === tabBar || node.id === 'yt-shorts-panel-tabs' || node.closest?.('#yt-shorts-panel-tabs')) {
+              continue
+            }
+            if (
+              node.matches?.('ytd-shorts, ytd-reel-video-renderer, #anchored-panel') ||
+              node.querySelector?.('ytd-shorts, ytd-reel-video-renderer, #anchored-panel')
+            ) {
+              return true
+            }
           }
         }
       }
       return false
     }
-    const onLayoutTransition = (event) => {
-      // Closing comments clears the mode attribute before the player's
-      // right transition completes. Its position changes without resizing
-      // the container, so measure again once it reaches its final position.
-      if (['right', 'left', 'inset-inline-end', 'transform', 'width', 'margin-right'].includes(event.propertyName) &&
-          event.target?.closest?.('ytd-shorts')) schedule()
-    }
-    const resizeObserver = new ResizeObserver(schedule)
+
     const observer = new MutationObserver((mutations) => {
       if (isRelevantShortsMutation(mutations)) schedule()
     })
@@ -1263,26 +1981,50 @@
       childList: true,
       subtree: true,
       attributes: true,
-      attributeFilter: ['extract-overlay', 'is-fullscreen', 'is-watch-while-mode'],
+      attributeFilter: [
+        'visibility',
+        'target-id',
+        'is-watch-while-mode',
+        'small-screen-persistent-panel',
+        'is-fullscreen',
+        'is-active',
+        'disabled',
+        'aria-disabled',
+      ],
     })
+
+    const onScroll = () => {
+      if (getShortKey() !== currentShortKey) schedule()
+    }
+
     window.addEventListener('resize', schedule, { signal })
-    document.addEventListener('scroll', schedule, { capture: true, passive: true, signal })
+    window.addEventListener('popstate', schedule, { signal })
     document.addEventListener('fullscreenchange', schedule, { signal })
-    document.addEventListener('transitionend', onLayoutTransition, { capture: true, signal })
-    document.addEventListener('transitioncancel', onLayoutTransition, { capture: true, signal })
+    document.addEventListener('yt-page-data-updated', schedule, { signal })
+    document.addEventListener('click', onDocumentClick, { capture: true, signal })
+    document.addEventListener('scroll', onScroll, { capture: true, passive: true, signal })
+
     signal.addEventListener('abort', () => {
       cancelAnimationFrame(frame)
+      clearAllTimers()
       observer.disconnect()
-      resizeObserver.disconnect()
-      for (const reel of adjusted.keys()) restore(reel)
+      const shorts = $('ytd-shorts')
+      const anchoredPanel = shorts?.querySelector('#anchored-panel') || tabBar.parentElement
+      clearShortsTabsState(shorts, anchoredPanel)
+      tabBar.remove()
     }, { once: true })
+
     schedule()
+
+    return {
+      onNavigate: sync,
+    }
   }
 
   const startShortsVolumeControl = () => {
     const controller = new AbortController()
     const { signal } = controller
-    startShortsMetadataLayout(signal)
+    const panelController = startShortsPanelController(signal)
 
     // Register before the Shorts player exists; it has no theater button or
     // regular progress bar, and may be replaced as the feed advances.
@@ -1314,14 +2056,17 @@
       else syncShortsAudio(event, true)
     }, { capture: true, signal })
 
-    return () => {
-      controller.abort()
-      if (floatingBarTimer) clearTimeout(floatingBarTimer)
-      floatingBarTimer = 0
-      if (floatingBar) floatingBar.style.display = 'none'
-      moviePlayer = null
-      videoPlayer = null
-      floatingBar = null
+    return {
+      onNavigate: panelController.onNavigate,
+      dispose: () => {
+        controller.abort()
+        if (floatingBarTimer) clearTimeout(floatingBarTimer)
+        floatingBarTimer = 0
+        if (floatingBar) floatingBar.style.display = 'none'
+        moviePlayer = null
+        videoPlayer = null
+        floatingBar = null
+      },
     }
   }
 
@@ -1468,14 +2213,27 @@
   const handleNavigation = async () => {
     const token = ++navigationToken
 
+    if (isShortsPage()) {
+      if (activeShortsSession) {
+        activeShortsSession.onNavigate()
+        return
+      }
+      pendingWaitCancel?.()
+      cleanup?.()
+      cleanup = null
+      const session = startShortsVolumeControl()
+      activeShortsSession = session
+      cleanup = () => {
+        if (activeShortsSession === session) activeShortsSession = null
+        session.dispose()
+      }
+      return
+    }
+
     pendingWaitCancel?.()
     cleanup?.()
     cleanup = null
-
-    if (isShortsPage()) {
-      cleanup = startShortsVolumeControl()
-      return
-    }
+    shortsPanelDismissed = false
 
     if (!isWatchPage()) return
 
