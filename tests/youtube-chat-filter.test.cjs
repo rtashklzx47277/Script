@@ -155,7 +155,7 @@ function boot({ saved, savedProfiles, storage: customStorage, blocked = false, t
     document, location: { pathname: '/live_chat', href: 'https://www.youtube.com/live_chat?v=sample_video', origin: 'https://www.youtube.com' }, console, URL,
     indexedDB: database,
     ...(scheduler ? { scheduler } : {}),
-    ...(performance ? { performance } : {}),
+    ...(performance !== undefined ? { performance } : { performance: { now: () => 0 } }),
     Date: now ? class extends Date { static now() { return now() } } : Date,
     window: { parent: parentWindow, addEventListener(name, fn) {
       const previous = listeners.get(name)

@@ -170,7 +170,7 @@ function boot({ saved, blocked = false, trustedTypes = false, withResizeObserver
     document, location: { pathname: '/sample_channel', href: 'https://www.twitch.tv/sample_channel' }, console, URL,
     indexedDB: database,
     ...(scheduler ? { scheduler } : {}),
-    ...(performance ? { performance } : {}),
+    ...(performance !== undefined ? { performance } : { performance: { now: () => 0 } }),
     Date: now ? class extends Date { static now() { return now() } } : Date,
     window: { addEventListener(name, fn) { listeners.set(name, fn) } },
     setTimeout(fn, delay) { const id = ++nextTimer; timers.set(id, { fn, delay }); return id },

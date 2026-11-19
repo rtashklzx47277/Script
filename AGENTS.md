@@ -9,10 +9,13 @@ These rules apply to this public `Script` repository (`origin/main`).
 ## Verification & Versioning
 
 - When modifying any `.user.js` behavior, increment its `@version` metadata header and update `README.md` when user-facing behavior or documentation changes.
-- Before committing, run the test suite and verify all tests pass:
+- Before committing, run the full test suite and verify all tests pass:
   ```sh
   node --test tests/*.test.cjs
   ```
+- All test suites in this repository complete within a few seconds; if any test command stalls past 10 seconds or falls back to a background task with no new output, do not wait passively—kill it immediately and diagnose the stuck test or command.
+- In unit test harnesses that mock `setTimeout` without auto-firing (e.g., `boot()` in `tests/twitch-chat.test.cjs` and `tests/youtube-chat-filter.test.cjs`), always pair mocked timers with a deterministic default clock (`performance.now`) so time-budgeted yield loops (`restoreHistory`) cannot deadlock on real wall-clock delays under parallel load.
+- Commands that require outbound network access (such as `npx.cmd -y modern-web-guidance@latest ...`) can hang waiting on network timeouts inside an offline sandbox; run them with network access (or `--offline` when cached) instead of waiting on an offline sandboxed call.
 
 ## Git Workflow
 
