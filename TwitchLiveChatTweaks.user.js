@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        Twitch Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.8.0
+// @version     0.8.1
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
 // @description 依頻道主、管理員、VIP 與全域帳號包含／排除名單篩選 Twitch 直播與 VOD 聊天，保留最近 1000 則／7 天紀錄並支援跨日分隔、搜尋與自動跟隨。
@@ -16,8 +16,8 @@
   'use strict'
 
   const MESSAGE_SELECTOR = '[data-a-target="chat-line-message"], .vod-message, [data-test-selector="message-layout"]'
-  const USER_SELECTOR = '[data-a-target="chat-message-username"], .chat-author__display-name, [data-test-selector="message-author"]'
-  const BODY_SELECTOR = '[data-a-target="chat-line-message-body"], [data-test-selector="message-text"], [data-a-target="chat-message-text"]'
+  const USER_SELECTOR = '[data-a-target="chat-message-username"], .chat-author__display-name, [data-test-selector="message-author"], [data-test-selector="message-username"]'
+  const BODY_SELECTOR = '[data-a-target="chat-line-message-body"], [data-test-selector="message-text"]'
   const STORAGE_KEY = 'twitch-live-chat-tweaks-settings-v1'
   const MAX_MESSAGES = 1000
   const MAX_CHANNELS = 5
@@ -509,7 +509,9 @@
   const readMessage = (line, channel) => {
     const author = $(USER_SELECTOR, line)
     // Use the author's badges only: quoted replies can contain another user's badges.
-    const authorContainer = author?.closest('.chat-line__username-container, .vod-message__header, [data-test-selector="message-header"]') || author?.parentElement
+    const authorLink = author?.closest?.('.video-chat__message-author')
+    const authorContainer = author?.closest('.chat-line__username-container, [data-test-selector="message-header"]') ||
+      authorLink?.parentElement || author?.closest('.vod-message__header') || author?.parentElement
     const user = (
       author?.getAttribute('data-a-user') ||
       author?.closest?.('[data-a-user]')?.getAttribute('data-a-user') ||
@@ -518,13 +520,14 @@
       loginFromHref(author?.closest?.('a')?.getAttribute('href') || $$('a', authorContainer || line).find(a => a.getAttribute('href'))?.getAttribute('href')) ||
       ''
     ).toLowerCase()
-    const fragmentParent = $('.text-fragment', line)?.parentElement
-    const body = $(BODY_SELECTOR, line) || (fragmentParent && fragmentParent !== authorContainer ? fragmentParent : null)
+    const contentParent = $('[data-a-target="chat-message-text"], .text-fragment, .chat-line__message--emote-button', line)?.parentElement ||
+      $('.video-chat__message', line)?.lastElementChild
+    const body = $(BODY_SELECTOR, line) || (contentParent && contentParent !== authorContainer ? contentParent : null)
     if (!user || !author || !body || body.contains?.(author)) return null
     const badges = $$('[data-a-target="chat-badge"] img, img.chat-badge', authorContainer).filter(badge => !body.contains?.(badge))
     const moderator = badges.some(badge =>
       (badge.getAttribute('src') || '').includes(MODERATOR_BADGE) ||
-      /^(moderator|管理員|モデレーター)$/i.test(badge.getAttribute('alt') || ''))
+      /^(moderator|管理員(?:徽章)?|モデレーター)$/i.test((badge.getAttribute('alt') || '').trim()))
     const broadcaster = (Boolean(channel) && user === channel) || badges.some(badge =>
       (badge.getAttribute('src') || '').includes(BROADCASTER_BADGE) ||
       (badge.getAttribute('srcset') || '').includes(BROADCASTER_BADGE) ||
@@ -1312,6 +1315,7 @@
     mounted.button.remove()
     mounted.tooltip?.remove()
     mounted.panel.remove()
+    mounted.header.classList.remove('ttc-vod-header')
     mounted.host.classList.remove('ttc-host', 'ttc-active')
     mounted.scroller.classList.remove('ttc-source')
     mounted = null
@@ -1324,7 +1328,7 @@
     const vodWrapper = stream && $('.video-chat__message-list-wrapper', stream)
     const scroller = stream && (
       $('[data-a-target="chat-scroller"]', stream) ||
-      (vodWrapper && ($('.scrollable-area', vodWrapper) || $('ul', vodWrapper) || $('div', vodWrapper) || vodWrapper))
+      (vodWrapper && ($('.scrollable-area', vodWrapper) || vodWrapper))
     )
     const host = scroller && (scroller.parentElement && scroller.parentElement !== stream && !scroller.parentElement.contains?.(header)
       ? scroller.parentElement : scroller)
@@ -1348,7 +1352,10 @@
     const community = $('[data-test-selector="chat-viewer-list"]', header)
     const actions = community?.parentElement?.parentElement
     if (actions && header.contains(actions)) actions.insertBefore(button, community.parentElement)
-    else header.appendChild(button)
+    else {
+      if (header.matches?.('.video-chat__header')) header.classList.add('ttc-vod-header')
+      header.appendChild(button)
+    }
     button.addEventListener('click', () => setEnabled(state, !state.history.enabled))
     button.addEventListener('mouseenter', () => showTooltip(state))
     button.addEventListener('mouseleave', () => scheduleHideTooltip(state))
@@ -1388,7 +1395,8 @@
   const style = document.createElement('style')
   style.textContent = `
     .ttc-toggle { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 32px; width: 32px; height: 32px; padding: 0; border: 0; border-radius: 50%; color: inherit; background: transparent; cursor: pointer; }
-    .video-chat__header > .ttc-toggle { margin-left: auto; }
+    .ttc-vod-header { position: relative; box-sizing: border-box; padding-inline: 48px; }
+    .ttc-vod-header > .ttc-toggle { position: absolute; inset-inline-end: 8px; inset-block-start: 50%; transform: translateY(-50%); }
     .ttc-toggle:not(:last-child) { margin-right: 8px; }
     .ttc-toggle:hover { background: var(--color-background-button-text-hover, #ffffff22); }
     .ttc-toggle:active { background: var(--color-background-button-text-active, #ffffff33); }

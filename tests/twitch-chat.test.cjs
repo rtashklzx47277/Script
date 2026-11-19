@@ -53,6 +53,7 @@ function boot({ saved, blocked = false, trustedTypes = false, withResizeObserver
       const list = () => new Set((self.className || '').split(/\s+/).filter(Boolean))
       const commit = set => { self.className = [...set].join(' ') }
       return {
+        contains(name) { return list().has(name) },
         add(...names) { const set = list(); for (const name of names) set.add(name); commit(set) },
         remove(...names) { const set = list(); for (const name of names) set.delete(name); commit(set) },
         toggle(name, force) {
@@ -73,6 +74,7 @@ function boot({ saved, blocked = false, trustedTypes = false, withResizeObserver
     set textContent(value) { this._textContent = String(value); this.replaceChildren() }
     get childNodes() { return [...(this._textContent ? [{ nodeType: 3, textContent: this._textContent }] : []), ...this.children] }
     get firstChild() { return this.children[0] }
+    get lastElementChild() { return this.children.at(-1) || null }
     addEventListener(name, fn) {
       this.listenerCounts.set(name, (this.listenerCounts.get(name) || 0) + 1)
       this.listeners.set(name, fn)
@@ -92,6 +94,8 @@ function boot({ saved, blocked = false, trustedTypes = false, withResizeObserver
           return this.tagName === 'img' && (this.className === 'chat-badge' ||
             this.parentElement?.getAttribute('data-a-target') === 'chat-badge')
         }
+        const tagClass = part.match(/^([a-z0-9-]+)\.([a-z0-9_-]+)$/i)
+        if (tagClass) return this.tagName === tagClass[1].toLowerCase() && (this.className || '').split(' ').includes(tagClass[2])
         return part === this.tagName
       })
     }
@@ -1272,7 +1276,8 @@ test('Twitch VOD chat: isolate per-VOD archive scope from live/other VODs, detec
   vodChat.className = 'video-chat'
   const vodHeader = vodChat.appendChild(new vodEnv.Element('div'))
   vodHeader.className = 'video-chat__header'
-  const wrapper = vodChat.appendChild(new vodEnv.Element('div'))
+  const vodBodyContainer = vodChat.appendChild(new vodEnv.Element('div'))
+  const wrapper = vodBodyContainer.appendChild(new vodEnv.Element('div'))
   wrapper.className = 'video-chat__message-list-wrapper'
   const scroller = wrapper.appendChild(new vodEnv.Element('ul'))
 
@@ -1295,11 +1300,46 @@ test('Twitch VOD chat: isolate per-VOD archive scope from live/other VODs, detec
   fragment.className = 'text-fragment'
   fragment.textContent = 'vod replay hello'
 
+  // Live Twitch VOD DOM: timestamp in vod-message__header, badges & video-chat__message-author siblings, ':' + content span in video-chat__message
+  const modLine = scroller.appendChild(new vodEnv.Element('div'))
+  modLine.className = 'vod-message'
+  const tsHeader = modLine.appendChild(new vodEnv.Element('div'))
+  tsHeader.className = 'vod-message__header'
+  tsHeader.textContent = '1:47'
+  const modContentRow = modLine.appendChild(new vodEnv.Element('div'))
+  const modBadgeHolder = modContentRow.appendChild(new vodEnv.Element('span'))
+  const modBadge = modBadgeHolder.appendChild(new vodEnv.Element('img'))
+  modBadge.className = 'chat-badge'
+  modBadge.setAttribute('alt', '管理員徽章')
+  const modAuthorLink = modContentRow.appendChild(new vodEnv.Element('a'))
+  modAuthorLink.className = 'video-chat__message-author'
+  modAuthorLink.setAttribute('href', '/vod_mod')
+  const modName = modAuthorLink.appendChild(new vodEnv.Element('span'))
+  modName.setAttribute('data-a-target', 'chat-message-username')
+  modName.setAttribute('data-a-user', 'vod_mod')
+  modName.textContent = '管理員甲'
+  const modMsgBox = modContentRow.appendChild(new vodEnv.Element('div'))
+  modMsgBox.className = 'video-chat__message'
+  const colon = modMsgBox.appendChild(new vodEnv.Element('span'))
+  colon.textContent = ':'
+  const modMsgBody = modMsgBox.appendChild(new vodEnv.Element('span'))
+  const modFrag = modMsgBody.appendChild(new vodEnv.Element('span'))
+  modFrag.className = 'text-fragment'
+  modFrag.setAttribute('data-a-target', 'chat-message-text')
+  modFrag.textContent = 'vod hi '
+  const modEmote = modMsgBody.appendChild(new vodEnv.Element('img'))
+  modEmote.className = 'chat-image'
+  modEmote.setAttribute('alt', 'cmonBruh')
+  modEmote.setAttribute('src', 'https://static-cdn.jtvnw.net/emoticons/v2/84608/default/dark/1.0')
+
   vodEnv.api.refresh()
   const state = vodEnv.api.mounted
   assert.ok(state)
   assert.equal(state.history.channel, 'vod:987654321')
   assert.equal(state.history.scope, 'vod:987654321')
+  assert.equal(vodHeader.classList.contains('ttc-vod-header'), true)
+  assert.equal(state.scroller, wrapper)
+  assert.equal(state.host, vodBodyContainer)
   assert.notEqual(state.host, vodChat)
   assert.equal(state.host.contains(vodHeader), false)
   await state.history.restorePromise
@@ -1311,9 +1351,14 @@ test('Twitch VOD chat: isolate per-VOD archive scope from live/other VODs, detec
     { target: fragment, addedNodes: [] },
   ], state.history)
   vodEnv.api.setEnabled(state, true)
-  assert.equal(state.history.messages.length, 1)
+  assert.equal(state.history.messages.length, 2)
   assert.equal(state.history.messages[0].broadcaster, true)
-  assert.equal(state.count.textContent, '1 則')
+  assert.equal(state.history.messages[1].moderator, true)
+  assert.equal(state.count.textContent, '2 則')
   assert.equal(state.list.children[0].querySelector('strong').textContent, '實況主 (streamer_one)')
+  assert.equal(state.list.children[1].querySelector('strong').textContent, '管理員甲 (vod_mod)')
+  assert.equal(state.list.children[1].children.at(-1).textContent, 'vod hi ')
+  assert.ok(state.list.children[1].querySelector('img.chat-image'))
   vodEnv.api.unmount()
+  assert.equal(vodHeader.classList.contains('ttc-vod-header'), false)
 })
