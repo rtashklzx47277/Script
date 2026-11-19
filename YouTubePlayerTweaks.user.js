@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Player Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.2.22
+// @version     0.2.23
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubePlayerTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubePlayerTweaks.user.js
 // @description 提供 YouTube 原解析度 PNG 截圖、滾輪音量與速度調整、直播追平、擴大直播回看範圍，並於 Shorts 隱藏影片內資訊與預設右側頁籤面板。
@@ -197,6 +197,13 @@
     const styleElement = document.createElement('style')
     styleElement.textContent = css
     ;(document.head || document.documentElement).appendChild(styleElement)
+    if (document.readyState === 'loading') {
+      document.addEventListener(
+        'DOMContentLoaded',
+        () => document.head?.appendChild(styleElement),
+        { once: true }
+      )
+    }
   }
 
   const SVG_NS = 'http://www.w3.org/2000/svg'
@@ -253,9 +260,20 @@
   addStyle(`
     /* Always hide in-video Shorts metadata and keep native info/comments inside
        the right-side panel with a top tab switcher. */
-    ytd-shorts ytd-reel-video-renderer .ytReelPlayerOverlayViewModelMetadataContainer,
-    ytd-shorts ytd-reel-video-renderer #metapanel {
+    html body ytd-shorts #shorts-container #experiment-overlay .ytReelPlayerOverlayViewModelMetadataContainer,
+    html body ytd-shorts #shorts-container .ytReelPlayerOverlayViewModelHostExtractOverlay .ytReelPlayerOverlayViewModelMetadataContainer,
+    html body ytd-shorts #shorts-container .ytReelPlayerOverlayViewModelMetadataContainer,
+    html body ytd-shorts #shorts-container .ytReelPlayerOverlayViewModelMetadataContainerMetapanel,
+    html body ytd-shorts #shorts-container yt-reel-metapanel-view-model,
+    html body ytd-shorts .ytReelPlayerOverlayViewModelMetadataContainer,
+    html body ytd-shorts .ytReelPlayerOverlayViewModelMetadataContainerMetapanel,
+    html body ytd-shorts yt-reel-metapanel-view-model,
+    html body ytd-shorts ytd-reel-player-header-renderer,
+    html body ytd-shorts #metapanel {
       display: none !important;
+      visibility: hidden !important;
+      opacity: 0 !important;
+      pointer-events: none !important;
     }
 
     ytd-shorts[data-yt-shorts-tabs]:not([small-screen-persistent-panel]) {
@@ -292,14 +310,14 @@
       align-items: stretch;
       justify-content: space-between;
       padding: 0 8px 0 12px;
-      background-color: var(--yt-spec-base-background, #212121);
+      background-color: var(--yt-spec-raised-background, #212121);
       color: var(--yt-spec-text-primary, #f1f1f1);
       border-bottom: 1px solid var(--yt-spec-10-percent-layer, rgba(255, 255, 255, 0.1));
       border-radius: 12px 12px 0 0;
     }
 
     html:not([dark]) #yt-shorts-panel-tabs {
-      background-color: var(--yt-spec-base-background, #fff);
+      background-color: var(--yt-spec-raised-background, #fff);
       color: var(--yt-spec-text-primary, #0f0f0f);
       border-bottom-color: var(--yt-spec-10-percent-layer, rgba(0, 0, 0, 0.1));
     }
@@ -456,7 +474,9 @@
     location.pathname === '/watch' ||
     location.pathname.startsWith('/live/')
 
-  const isShortsPage = () => location.pathname.startsWith('/shorts/')
+  const isShortsPage = () =>
+    location.pathname === '/shorts' ||
+    location.pathname.startsWith('/shorts/')
 
   const eventTarget = (event) => event?.composedPath?.()[0] || event?.target
 
@@ -1299,6 +1319,7 @@
   const SHORTS_PANEL_EXPANDED = 'ENGAGEMENT_PANEL_VISIBILITY_EXPANDED'
   const SHORTS_MIN_SIDE_PANEL_WIDTH = 960
   const SHORTS_AUTO_OPEN_MAX_ATTEMPTS = 12
+  const SHORTS_MISSING_POLL_MAX = 24
   const SHORTS_AUTO_OPEN_RETRY_MS = 250
   const SHORTS_DESC_FALLBACK_MS = 180
   const SHORTS_DESC_MENU_POLL_MS = 50
@@ -1362,12 +1383,15 @@
     element.hasAttribute?.('disabled') ||
     element.getAttribute?.('aria-disabled') === 'true'
 
-  const findShortsCommentsButton = (reel) => {
-    if (!reel) return null
-    const legacy = reel.querySelector('#comments-button button') || reel.querySelector('#comments-button')
+  const findShortsCommentsButton = (reel, shorts) => {
+    const scope = reel || shorts
+    if (!scope) return null
+    const legacy = scope.querySelector('#comments-button button') || scope.querySelector('#comments-button')
     if (legacy) return legacy
 
-    const actionBar = reel.querySelector('reel-action-bar-view-model')
+    const actionBar =
+      reel?.querySelector('reel-action-bar-view-model') ||
+      shorts?.querySelector('reel-action-bar-view-model')
     if (!actionBar) return null
 
     const candidates = []
@@ -1472,8 +1496,24 @@
     )
   }
 
+  const isElementVisible = (element) => {
+    if (!element) return false
+    if (
+      element.hidden ||
+      element.hasAttribute?.('hidden') ||
+      element.getAttribute?.('aria-hidden') === 'true' ||
+      element.style?.display === 'none' ||
+      element.style?.visibility === 'hidden'
+    ) {
+      return false
+    }
+    const rect = element.getBoundingClientRect?.()
+    return Boolean(rect && rect.width > 0 && rect.height > 0)
+  }
+
   const canAutoOpenShortsPanel = (shorts, reel) => {
     if (!shorts || !shorts.querySelector('#anchored-panel')) return false
+    if (document.visibilityState === 'hidden') return false
     if (shortsPanelDismissed) return false
     if (
       document.fullscreenElement ||
@@ -1484,7 +1524,7 @@
     }
     if (
       shorts.hasAttribute('small-screen-persistent-panel') ||
-      shorts.querySelector('#anchored-panel-scrim')
+      isElementVisible(shorts.querySelector('#anchored-panel-scrim'))
     ) {
       return false
     }
@@ -1502,6 +1542,7 @@
     let pendingTarget = null
     let pendingUntil = 0
     let autoOpenAttempts = 0
+    let missingButtonPolls = 0
     let autoOpenExhausted = false
     let waitingAutoRetry = false
     let autoOpenTimer = 0
@@ -1624,8 +1665,8 @@
       }
     }
 
-    const openComments = (reel) => {
-      const btn = findShortsCommentsButton(reel)
+    const openComments = (reel, shorts) => {
+      const btn = findShortsCommentsButton(reel, shorts)
       if (!btn) return 'missing'
       if (isControlDisabled(btn)) {
         autoOpenExhausted = true
@@ -1696,14 +1737,19 @@
       startMenuFallback()
     }
 
-    const scheduleAutoOpenRetry = () => {
+    const scheduleAutoOpenRetry = (countAttempt) => {
       if (autoOpenTimer || autoOpenExhausted || signal.aborted) return
-      if (autoOpenAttempts >= SHORTS_AUTO_OPEN_MAX_ATTEMPTS) {
-        autoOpenExhausted = true
-        waitingAutoRetry = false
-        return
+      if (countAttempt) {
+        if (autoOpenAttempts >= SHORTS_AUTO_OPEN_MAX_ATTEMPTS) {
+          autoOpenExhausted = true
+          waitingAutoRetry = false
+          return
+        }
+        autoOpenAttempts++
+      } else {
+        if (missingButtonPolls >= SHORTS_MISSING_POLL_MAX) return
+        missingButtonPolls++
       }
-      autoOpenAttempts++
       autoOpenTimer = setTimeout(() => {
         autoOpenTimer = 0
         waitingAutoRetry = false
@@ -1713,12 +1759,13 @@
 
     const ensureDesiredPanel = (shorts, reel) => {
       if (desiredTab !== 'comments' || autoOpenExhausted || waitingAutoRetry) return
-      const status = openComments(reel)
+      const status = openComments(reel, shorts)
       if (status === 'disabled') {
         clearAutoOpenTimer()
         return
       }
       if (status === 'clicked') {
+        missingButtonPolls = 0
         const expanded = getExpandedShortsPanel(shorts)
         if (expanded?.getAttribute('target-id') === SHORTS_PANEL_COMMENTS) {
           clearAutoOpenTimer()
@@ -1726,8 +1773,10 @@
           return
         }
         waitingAutoRetry = true
+        scheduleAutoOpenRetry(true)
+        return
       }
-      scheduleAutoOpenRetry()
+      scheduleAutoOpenRetry(false)
     }
 
     const sync = () => {
@@ -1741,6 +1790,7 @@
         pendingTarget = null
         pendingUntil = 0
         autoOpenAttempts = 0
+        missingButtonPolls = 0
         autoOpenExhausted = false
         waitingAutoRetry = false
         clearAllTimers()
@@ -1839,7 +1889,7 @@
       clearAllTimers()
       const shorts = $('ytd-shorts')
       const reel = getActiveShortsReel(shorts)
-      const status = openComments(reel)
+      const status = openComments(reel, shorts)
       if (status === 'disabled') {
         pendingTarget = null
         pendingUntil = 0
@@ -1900,7 +1950,7 @@
 
       const shorts = $('ytd-shorts')
       const reel = getActiveShortsReel(shorts)
-      const commentsBtn = findShortsCommentsButton(reel)
+      const commentsBtn = findShortsCommentsButton(reel, shorts)
       if (commentsBtn && (target === commentsBtn || commentsBtn.contains?.(target))) {
         shortsPanelDismissed = false
         desiredTab = 'comments'
@@ -2000,6 +2050,7 @@
     window.addEventListener('resize', schedule, { signal })
     window.addEventListener('popstate', schedule, { signal })
     document.addEventListener('fullscreenchange', schedule, { signal })
+    document.addEventListener('visibilitychange', schedule, { signal })
     document.addEventListener('yt-page-data-updated', schedule, { signal })
     document.addEventListener('click', onDocumentClick, { capture: true, signal })
     document.addEventListener('scroll', onScroll, { capture: true, passive: true, signal })
@@ -2247,7 +2298,14 @@
     cleanup = dispose
   }
 
+  const syncShortsRoute = () => {
+    if (isShortsPage() && !activeShortsSession) handleNavigation()
+    else if (!isShortsPage() && activeShortsSession) handleNavigation()
+  }
+
   document.addEventListener('yt-navigate-finish', handleNavigation)
+  document.addEventListener('yt-page-data-updated', syncShortsRoute)
+  window.addEventListener('popstate', syncShortsRoute)
 
   if (isWatchPage() || isShortsPage()) {
     handleNavigation()

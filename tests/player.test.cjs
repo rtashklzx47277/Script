@@ -411,7 +411,7 @@ function boot(file, mode = 'worker', pathname = '/', { trustedTypes = false, set
   const source = fs.readFileSync(path.join(__dirname, '..', file), 'utf8')
   assert.match(source, /\}\)\(\)\s*$/)
   vm.createContext(context)
-  setupWindow?.(context.window)
+  setupWindow?.(context.window, context.document)
   vm.runInContext(source.replace(/\}\)\(\)\s*$/, exposure + '})()'), context, { filename: file })
 
   return {
@@ -511,6 +511,8 @@ function addShortsPanelFixture(env, options = {}) {
     innerWidth = 1440,
     smallScreen = false,
     fullscreen = false,
+    visibleScrim = false,
+    deferActionBar = false,
     commentsLabel = '3,414 件のコメントを表示',
     commentsPath = 'M1 6a4 4 0 014-4h14a4 4 0 014 4v10a4 4 0',
     commentsDisabled = false,
@@ -532,6 +534,13 @@ function addShortsPanelFixture(env, options = {}) {
 
   const panelContainer = shorts.appendChild(new env.Element())
   panelContainer.id = 'shorts-panel-container'
+  // Real YouTube Shorts DOM keeps #anchored-panel-scrim mounted even on wide
+  // desktop viewports (hidden with a 0x0 bounding rect unless modal mode is active).
+  const scrim = panelContainer.appendChild(new env.Element())
+  scrim.id = 'anchored-panel-scrim'
+  scrim.rect = visibleScrim
+    ? { left: 0, top: 0, right: innerWidth, bottom: 900, width: innerWidth, height: 900 }
+    : { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 }
   const anchoredPanel = panelContainer.appendChild(new env.Element())
   anchoredPanel.id = 'anchored-panel'
 
@@ -613,32 +622,40 @@ function addShortsPanelFixture(env, options = {}) {
 
   const actionsContainer = overlay.appendChild(new env.Element())
   actionsContainer.className = 'ytReelPlayerOverlayViewModelActionsContainer'
-  const actionBar = actionsContainer.appendChild(new env.Element('reel-action-bar-view-model'))
 
-  const addAction = (wrapperTag, label, pathD) => {
-    const host = actionBar.appendChild(new env.Element(wrapperTag))
-    const bvm = wrapperTag === 'button-view-model' ? host : host.appendChild(new env.Element('button-view-model'))
-    const btn = bvm.appendChild(new env.Element('button'))
-    btn.setAttribute('aria-label', label)
-    const svg = btn.appendChild(new env.Element('svg'))
-    const p = svg.appendChild(new env.Element('path'))
-    p.setAttribute('d', pathD)
-    return btn
-  }
-
-  addAction('like-button-view-model', '和另外 61萬 人都喜歡這部影片', 'M16.25 2.5A6.56 6.56 0 0012 4.062')
-  const commentsBtn = addAction('button-view-model', commentsLabel, commentsPath)
-  if (commentsDisabled) {
-    commentsBtn.disabled = true
-    commentsBtn.setAttribute('disabled', 'true')
-    commentsBtn.setAttribute('aria-disabled', 'true')
-  }
+  let commentsBtn = null
   let commentClicks = 0
-  commentsBtn.addEventListener('click', () => {
-    commentClicks++
-    openCommentsPanel()
-  })
-  addAction('button-view-model', '分享', 'M10 3.158V7.51c-5.428.223')
+  const mountActionBar = () => {
+    if (commentsBtn) return commentsBtn
+    const actionBar = actionsContainer.appendChild(new env.Element('reel-action-bar-view-model'))
+
+    const addAction = (wrapperTag, label, pathD) => {
+      const host = actionBar.appendChild(new env.Element(wrapperTag))
+      const bvm = wrapperTag === 'button-view-model' ? host : host.appendChild(new env.Element('button-view-model'))
+      const btn = bvm.appendChild(new env.Element('button'))
+      btn.setAttribute('aria-label', label)
+      const svg = btn.appendChild(new env.Element('svg'))
+      const p = svg.appendChild(new env.Element('path'))
+      p.setAttribute('d', pathD)
+      return btn
+    }
+
+    addAction('like-button-view-model', '和另外 61萬 人都喜歡這部影片', 'M16.25 2.5A6.56 6.56 0 0012 4.062')
+    commentsBtn = addAction('button-view-model', commentsLabel, commentsPath)
+    if (commentsDisabled) {
+      commentsBtn.disabled = true
+      commentsBtn.setAttribute('disabled', 'true')
+      commentsBtn.setAttribute('aria-disabled', 'true')
+    }
+    commentsBtn.addEventListener('click', () => {
+      commentClicks++
+      openCommentsPanel()
+    })
+    addAction('button-view-model', '分享', 'M10 3.158V7.51c-5.428.223')
+    return commentsBtn
+  }
+
+  if (!deferActionBar) mountActionBar()
 
   const moreBtn = reel.appendChild(new env.Element('button'))
   moreBtn.setAttribute('aria-label', 'その他の操作')
@@ -665,8 +682,9 @@ function addShortsPanelFixture(env, options = {}) {
   env.selectors.set('ytd-shorts', shorts)
 
   return {
-    shorts, anchoredPanel, slot0, slot1, reel, metaContainer, titleLink,
-    commentsBtn, moreBtn, dropdown, descMenuBtn, commentsCloseBtn, descCloseBtn,
+    shorts, scrim, anchoredPanel, slot0, slot1, reel, metaContainer, titleLink,
+    get commentsBtn() { return commentsBtn },
+    mountActionBar, moreBtn, dropdown, descMenuBtn, commentsCloseBtn, descCloseBtn,
     openCommentsPanel, openDescriptionPanel, closeAnyPanel,
     getCommentClicks: () => commentClicks,
     getMenuDescClicks: () => menuDescClicks,
@@ -681,7 +699,7 @@ function addShortsPanelFixture(env, options = {}) {
 test('YouTube Shorts: hides in-video metadata unconditionally, auto-opens Comments on desktop, and builds accessible Trusted Types tabs', () => {
   const env = boot(scripts[0], 'worker', '/shorts/example', { trustedTypes: true })
   const css = env.styles[0].textContent
-  assert.match(css, /ytd-shorts ytd-reel-video-renderer \.ytReelPlayerOverlayViewModelMetadataContainer,\s*ytd-shorts ytd-reel-video-renderer #metapanel\s*\{\s*display:\s*none !important;/)
+  assert.match(css, /html body ytd-shorts #shorts-container #experiment-overlay \.ytReelPlayerOverlayViewModelMetadataContainer,[\s\S]*?html body ytd-shorts #metapanel\s*\{\s*display:\s*none !important;/)
   assert.doesNotMatch(css, /#anchored-panel\[data-yt-shorts-tabs\][^}]*overflow:\s*hidden/)
 
   const fx = addShortsPanelFixture(env, { commentsLabel: '' })
@@ -1592,6 +1610,80 @@ test('YouTube Shorts: close dismissal persists across Shorts, disabled comments 
   assert.equal(fxDisabled.getCommentClicks(), 0)
   assert.equal(fxDisabled.expandedTargetId(), '')
   assert.equal(envDisabled.timers.size, 0)
+})
+
+test('YouTube Shorts: hidden #anchored-panel-scrim on desktop allows auto-open while visible scrim blocks it', () => {
+  const envHidden = boot(scripts[0], 'worker', '/shorts/desktop')
+  const fxHidden = addShortsPanelFixture(envHidden, { visibleScrim: false })
+  assert.ok(fxHidden.shorts.querySelector('#anchored-panel-scrim'))
+  envHidden.render()
+  assert.equal(fxHidden.getCommentClicks(), 1)
+  assert.equal(fxHidden.expandedTargetId(), 'engagement-panel-comments-section')
+
+  const envVisible = boot(scripts[0], 'worker', '/shorts/modal')
+  const fxVisible = addShortsPanelFixture(envVisible, { visibleScrim: true })
+  envVisible.render()
+  assert.equal(fxVisible.getCommentClicks(), 0)
+  assert.equal(fxVisible.expandedTargetId(), '')
+})
+
+test('YouTube Shorts: bare /shorts route and yt-page-data-updated activate and clean up without yt-navigate-finish', () => {
+  const envBare = boot(scripts[0], 'worker', '/shorts')
+  const fxBare = addShortsPanelFixture(envBare)
+  envBare.render()
+  assert.equal(fxBare.getCommentClicks(), 1)
+  assert.equal(fxBare.expandedTargetId(), 'engagement-panel-comments-section')
+
+  const envSpa = boot(scripts[0], 'worker', '/')
+  const fxSpa = addShortsPanelFixture(envSpa)
+  envSpa.location.pathname = '/shorts'
+  envSpa.emit('yt-page-data-updated', {})
+  envSpa.render()
+  assert.equal(fxSpa.getCommentClicks(), 1)
+  assert.equal(fxSpa.expandedTargetId(), 'engagement-panel-comments-section')
+
+  envSpa.location.pathname = '/'
+  envSpa.emit('popstate', {})
+  assert.equal(envSpa.observers[0].connected, false)
+  assert.equal(envSpa.timers.size, 0)
+})
+
+test('YouTube Shorts: background tabs defer auto-open until visible and missing-button polls do not exhaust late hydration', () => {
+  const envBg = boot(scripts[0], 'worker', '/shorts/bg', {
+    setupWindow: (_win, doc) => { doc.visibilityState = 'hidden' },
+  })
+  const fxBg = addShortsPanelFixture(envBg)
+  envBg.render()
+  assert.equal(fxBg.getCommentClicks(), 0)
+
+  envBg.document.visibilityState = 'visible'
+  envBg.emit('visibilitychange', {})
+  envBg.render()
+  assert.equal(fxBg.getCommentClicks(), 1)
+  assert.equal(fxBg.expandedTargetId(), 'engagement-panel-comments-section')
+
+  const envLate = boot(scripts[0], 'worker', '/shorts/late')
+  const fxLate = addShortsPanelFixture(envLate, { deferActionBar: true })
+  envLate.render()
+  for (let i = 0; i < 26; i++) envLate.flush(250)
+  assert.equal(fxLate.getCommentClicks(), 0)
+  assert.equal(envLate.timers.size, 0, 'missing-button polling stops after SHORTS_MISSING_POLL_MAX')
+
+  fxLate.mountActionBar()
+  envLate.observers[0].callback([{ type: 'childList', target: fxLate.reel, addedNodes: [fxLate.reel], removedNodes: [] }])
+  envLate.render()
+  assert.equal(fxLate.getCommentClicks(), 1, 'late action bar still auto-opens without permanent exhaustion')
+  assert.equal(fxLate.expandedTargetId(), 'engagement-panel-comments-section')
+})
+
+test('YouTube: addStyle re-appends stylesheet after head resources on DOMContentLoaded when document is loading', () => {
+  const env = boot(scripts[0], 'worker', '/', {
+    setupWindow: (_win, doc) => { doc.readyState = 'loading' },
+  })
+  assert.equal(env.styles.length, 1)
+  env.emit('DOMContentLoaded', {})
+  assert.equal(env.styles.length, 2)
+  assert.equal(env.styles[1], env.styles[0])
 })
 
 test('Twitch: body MutationObserver ignores chat subtree churn without querying players', () => {
