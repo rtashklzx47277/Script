@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Player Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.2.23
+// @version     0.2.24
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubePlayerTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubePlayerTweaks.user.js
 // @description 提供 YouTube 原解析度 PNG 截圖、滾輪音量與速度調整、直播追平、擴大直播回看範圍，並於 Shorts 隱藏影片內資訊與預設右側頁籤面板。
@@ -258,21 +258,27 @@
   }
 
   addStyle(`
-    /* Always hide in-video Shorts metadata and keep native info/comments inside
-       the right-side panel with a top tab switcher. */
+    /* Hide in-video Shorts metadata without display: none so the sibling
+       action bar stays in its native flex position outside the video. */
     html body ytd-shorts #shorts-container #experiment-overlay .ytReelPlayerOverlayViewModelMetadataContainer,
     html body ytd-shorts #shorts-container .ytReelPlayerOverlayViewModelHostExtractOverlay .ytReelPlayerOverlayViewModelMetadataContainer,
     html body ytd-shorts #shorts-container .ytReelPlayerOverlayViewModelMetadataContainer,
-    html body ytd-shorts #shorts-container .ytReelPlayerOverlayViewModelMetadataContainerMetapanel,
-    html body ytd-shorts #shorts-container yt-reel-metapanel-view-model,
     html body ytd-shorts .ytReelPlayerOverlayViewModelMetadataContainer,
     html body ytd-shorts .ytReelPlayerOverlayViewModelMetadataContainerMetapanel,
     html body ytd-shorts yt-reel-metapanel-view-model,
     html body ytd-shorts ytd-reel-player-header-renderer,
     html body ytd-shorts #metapanel {
-      display: none !important;
       visibility: hidden !important;
       opacity: 0 !important;
+      pointer-events: none !important;
+      background: none !important;
+      filter: none !important;
+      box-shadow: none !important;
+    }
+
+    html body ytd-shorts .ytReelPlayerOverlayViewModelMetadataContainer *,
+    html body ytd-shorts yt-reel-metapanel-view-model * {
+      visibility: hidden !important;
       pointer-events: none !important;
     }
 
@@ -1271,6 +1277,10 @@
     }
   }
 
+  const SHORTS_REEL_SELECTOR = 'ytd-reel-video-renderer, ytd-reel-video-renderer-cow'
+  const SHORTS_ACTIVE_REEL_SELECTOR =
+    'ytd-reel-video-renderer[is-active], ytd-reel-video-renderer-cow[is-active]'
+
   const handleShortsWheel = (event) => {
     if (!isShortsPage() || event.ctrlKey || event.deltaY === 0) return
     if (!(event.target instanceof Node) || isEditableTarget(eventTarget(event))) return
@@ -1282,7 +1292,7 @@
     // pointer each time, including after an in-feed switch without navigation.
     // Its extracted overlay is outside the video container, so use geometry.
     for (const player of shorts.querySelectorAll('.html5-video-player')) {
-      const reel = player.closest('ytd-reel-video-renderer')
+      const reel = player.closest(SHORTS_REEL_SELECTOR)
       const area = reel?.querySelector('#short-video-container') || player
       const rect = area.getBoundingClientRect()
       if (
@@ -1343,9 +1353,9 @@
 
   const getActiveShortsReel = (shorts) => {
     if (!shorts) return null
-    const explicit = shorts.querySelector('ytd-reel-video-renderer[is-active]')
+    const explicit = shorts.querySelector(SHORTS_ACTIVE_REEL_SELECTOR)
     if (explicit) return explicit
-    const reels = shorts.querySelectorAll('ytd-reel-video-renderer')
+    const reels = shorts.querySelectorAll(SHORTS_REEL_SELECTOR)
     if (reels.length === 1) return reels[0]
     if (!reels.length) return null
     const bounds = shorts.querySelector('#shorts-container')?.getBoundingClientRect?.()
@@ -1418,19 +1428,25 @@
     return candidates[0] || null
   }
 
-  const findShortsDescriptionTitleTarget = (reel) => {
-    if (!reel) return null
+  const findShortsDescriptionTitleTarget = (reel, shorts) => {
+    const scope = reel || shorts
+    if (!scope) return null
     return (
-      reel.querySelector('yt-shorts-video-title-view-model h1[role="link"]') ||
-      reel.querySelector('.ytShortsVideoTitleViewModelShortsVideoTitle') ||
-      reel.querySelector('yt-shorts-video-title-view-model')
+      scope.querySelector('yt-shorts-video-title-view-model h1[role="link"]') ||
+      scope.querySelector('.ytShortsVideoTitleViewModelShortsVideoTitle') ||
+      scope.querySelector('yt-shorts-video-title-view-model')
     )
   }
 
-  const findShortsMoreActionsButton = (reel) => {
-    if (!reel) return null
-    for (const button of reel.querySelectorAll('button')) {
-      if (button.closest?.('reel-action-bar-view-model, .ytReelPlayerOverlayViewModelMetadataContainer')) {
+  const findShortsMoreActionsButton = (reel, shorts) => {
+    const scope = reel || shorts
+    if (!scope) return null
+    for (const button of scope.querySelectorAll('button')) {
+      if (
+        button.closest?.(
+          'reel-action-bar-view-model, .ytReelPlayerOverlayViewModelMetadataContainer, #anchored-panel'
+        )
+      ) {
         continue
       }
       const label = button.getAttribute?.('aria-label') || ''
@@ -1690,7 +1706,7 @@
         if (getExpandedShortsPanel(latestShorts)?.getAttribute('target-id') === SHORTS_PANEL_DESCRIPTION) {
           return
         }
-        const moreBtn = findShortsMoreActionsButton(latestReel)
+        const moreBtn = findShortsMoreActionsButton(latestReel, latestShorts)
         if (!moreBtn) return
         triggerInternalClick(moreBtn)
 
@@ -1724,7 +1740,7 @@
         }, SHORTS_DESC_MENU_POLL_MS)
       }
 
-      const titleTarget = findShortsDescriptionTitleTarget(reel)
+      const titleTarget = findShortsDescriptionTitleTarget(reel, shorts)
       if (titleTarget) {
         triggerInternalClick(titleTarget)
         if (getExpandedShortsPanel(shorts)?.getAttribute('target-id') === SHORTS_PANEL_DESCRIPTION) {
@@ -2013,8 +2029,8 @@
               continue
             }
             if (
-              node.matches?.('ytd-shorts, ytd-reel-video-renderer, #anchored-panel') ||
-              node.querySelector?.('ytd-shorts, ytd-reel-video-renderer, #anchored-panel')
+              node.matches?.('ytd-shorts, ytd-reel-video-renderer, ytd-reel-video-renderer-cow, #anchored-panel') ||
+              node.querySelector?.('ytd-shorts, ytd-reel-video-renderer, ytd-reel-video-renderer-cow, #anchored-panel')
             ) {
               return true
             }
@@ -2092,9 +2108,9 @@
       const player = target.closest?.('.html5-video-player')
       if (!shorts || !player || typeof player.getVolume !== 'function') return
       if (requireActive) {
-        const reel = target.closest?.('ytd-reel-video-renderer')
+        const reel = target.closest?.(SHORTS_REEL_SELECTOR)
         const active = reel?.hasAttribute?.('is-active') ||
-          (!shorts.querySelector?.('ytd-reel-video-renderer[is-active]') && target.paused === false)
+          (!shorts.querySelector?.(SHORTS_ACTIVE_REEL_SELECTOR) && target.paused === false)
         if (!active) return
       }
       moviePlayer = player

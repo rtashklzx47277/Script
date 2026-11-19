@@ -513,6 +513,7 @@ function addShortsPanelFixture(env, options = {}) {
     fullscreen = false,
     visibleScrim = false,
     deferActionBar = false,
+    reelTag = 'ytd-reel-video-renderer',
     commentsLabel = '3,414 件のコメントを表示',
     commentsPath = 'M1 6a4 4 0 014-4h14a4 4 0 014 4v10a4 4 0',
     commentsDisabled = false,
@@ -602,7 +603,7 @@ function addShortsPanelFixture(env, options = {}) {
   descCloseBtn.addEventListener('click', closeAnyPanel)
   floatingCloseBtn.addEventListener('click', closeAnyPanel)
 
-  const reel = innerContainer.appendChild(new env.Element('ytd-reel-video-renderer'))
+  const reel = innerContainer.appendChild(new env.Element(reelTag))
   const video = reel.appendChild(new env.Element())
   video.id = 'short-video-container'
   video.rect = { left: 480, top: 64, right: 795, bottom: 640, width: 315, height: 576 }
@@ -657,7 +658,9 @@ function addShortsPanelFixture(env, options = {}) {
 
   if (!deferActionBar) mountActionBar()
 
-  const moreBtn = reel.appendChild(new env.Element('button'))
+  const menuButtonHost = reel.appendChild(new env.Element())
+  menuButtonHost.id = 'menu-button'
+  const moreBtn = menuButtonHost.appendChild(new env.Element('button'))
   moreBtn.setAttribute('aria-label', 'その他の操作')
   const dropdown = new env.Element('tp-yt-iron-dropdown')
   dropdown.style.display = 'none'
@@ -699,7 +702,13 @@ function addShortsPanelFixture(env, options = {}) {
 test('YouTube Shorts: hides in-video metadata unconditionally, auto-opens Comments on desktop, and builds accessible Trusted Types tabs', () => {
   const env = boot(scripts[0], 'worker', '/shorts/example', { trustedTypes: true })
   const css = env.styles[0].textContent
-  assert.match(css, /html body ytd-shorts #shorts-container #experiment-overlay \.ytReelPlayerOverlayViewModelMetadataContainer,[\s\S]*?html body ytd-shorts #metapanel\s*\{\s*display:\s*none !important;/)
+  const metadataRule = css.match(/html body ytd-shorts #shorts-container #experiment-overlay \.ytReelPlayerOverlayViewModelMetadataContainer,[\s\S]*?html body ytd-shorts #metapanel\s*\{([^}]*)\}/)
+  assert.ok(metadataRule)
+  assert.match(metadataRule[1], /visibility:\s*hidden !important;/)
+  assert.match(metadataRule[1], /pointer-events:\s*none !important;/)
+  assert.match(metadataRule[1], /background:\s*none !important;/)
+  assert.doesNotMatch(metadataRule[1], /display:\s*none/)
+  assert.match(css, /\.ytReelPlayerOverlayViewModelMetadataContainer \*,[\s\S]*?yt-reel-metapanel-view-model \*\s*\{[^}]*visibility:\s*hidden !important;[^}]*pointer-events:\s*none !important;/)
   assert.doesNotMatch(css, /#anchored-panel\[data-yt-shorts-tabs\][^}]*overflow:\s*hidden/)
 
   const fx = addShortsPanelFixture(env, { commentsLabel: '' })
@@ -1684,6 +1693,55 @@ test('YouTube: addStyle re-appends stylesheet after head resources on DOMContent
   env.emit('DOMContentLoaded', {})
   assert.equal(env.styles.length, 2)
   assert.equal(env.styles[1], env.styles[0])
+})
+
+test('YouTube Shorts: supports ytd-reel-video-renderer-cow for auto-open, Description tab, menu fallback, Short reset, and wheel volume', async () => {
+  const env = boot(scripts[0], 'worker', '/shorts/cow1')
+  const fx = addShortsPanelFixture(env, { reelTag: 'ytd-reel-video-renderer-cow' })
+  env.render()
+  assert.equal(fx.expandedTargetId(), 'engagement-panel-comments-section')
+
+  const [commentsTab, descTab] = fx.anchoredPanel.querySelectorAll('[role="tab"]')
+  descTab.click()
+  assert.equal(fx.expandedTargetId(), 'engagement-panel-structured-description')
+  assert.equal(descTab.getAttribute('aria-selected'), 'true')
+
+  commentsTab.click()
+  assert.equal(fx.expandedTargetId(), 'engagement-panel-comments-section')
+
+  env.location.pathname = '/shorts/cow2'
+  await env.listeners.get('yt-navigate-finish')()
+  assert.equal(fx.expandedTargetId(), 'engagement-panel-comments-section')
+
+  // Menu fallback inside ytd-reel-video-renderer-cow picks #menu-button without clicking #anchored-panel buttons.
+  const envFallback = boot(scripts[0], 'worker', '/shorts/cow-fallback')
+  const fxFallback = addShortsPanelFixture(envFallback, {
+    reelTag: 'ytd-reel-video-renderer-cow',
+    omitTitle: true,
+  })
+  const sortBtn = fxFallback.slot0.querySelector('#header').appendChild(new envFallback.Element('button'))
+  let sortClicks = 0
+  sortBtn.addEventListener('click', () => { sortClicks++ })
+  envFallback.render()
+  const [, fallbackDescTab] = fxFallback.anchoredPanel.querySelectorAll('[role="tab"]')
+  fallbackDescTab.click()
+  assert.equal(sortClicks, 0)
+  assert.equal(fxFallback.getMenuDescClicks(), 1)
+  assert.equal(fxFallback.expandedTargetId(), 'engagement-panel-structured-description')
+
+  // Wheel volume control resolves ytd-reel-video-renderer-cow reels too.
+  const player = fx.reel.querySelector('#short-video-container').appendChild(new env.Element())
+  player.className = 'html5-video-player'
+  const videoEl = player.appendChild(new env.Element('video'))
+  player.volume = 50
+  player.getVolume = () => player.volume
+  player.setVolume = (value) => { player.volume = value }
+  player.unMute = () => {}
+  fx.shorts.queries.set('.html5-video-player', [player])
+  const area = fx.reel.querySelector('#short-video-container')
+  env.emit('wheel', wheel(area, { clientX: 500, clientY: 100 }))
+  assert.equal(player.volume, 45)
+  assert.equal(videoEl.tagName, 'video')
 })
 
 test('Twitch: body MutationObserver ignores chat subtree churn without querying players', () => {
