@@ -191,7 +191,8 @@ function boot({ saved, savedProfiles, storage: customStorage, blocked = false, t
   vm.runInContext(source.replace('    // End YouTube chat filtering.', `
     globalThis.api = { TARGET_PROFILES_KEY, normalizeAccount, getChannel, getHistory, loadSettings, saveSettings,
       readMessage, matchesFilter, captureLine, captureTree, captureMutations, renderMessages, changeTargetUsers,
-      SC_COLOR_TIERS, classifySupportColors, getRecordColorTier, matchesSupportFilter, updateSupportFilterUI,
+      SC_COLOR_TIERS, SUPPORT_FILTER_KEY, loadSupportFilter, saveSupportFilter,
+      classifySupportColors, getRecordColorTier, matchesSupportFilter, updateSupportFilterUI,
       scheduleMessageRender, releaseMessageViews, handleMessageVisibility,
       archiveTree, restoreTree, archiveRecord, restoreRecord, restoreHistory, flushHistory, pruneHistories, pruneArchive,
       applySupportAuthor, resolveSupportAuthor, locateSupportRecord,
@@ -2491,7 +2492,7 @@ test('YouTube panel accessibility and restoreHistory yielding: explicit labels, 
   assert.equal(envErr.api.mounted.panel.querySelector('.ytcf-history-status').getAttribute('role'), 'status')
 })
 
-test('YouTube SC type & color filters: default checked state, plain labels without counts, gift redemption ignore, and independent color selection', () => {
+test('YouTube SC type & color filters: default checked state, Chinese labels without counts, superchat parent indeterminate selection, and gift redemption ignore', () => {
   const env = boot({ trustedTypes: true })
   const header = env.document.body.appendChild(new env.Element('yt-live-chat-header-renderer'))
   header.appendChild(new env.Element('button')).id = 'live-chat-header-context-menu'
@@ -2519,13 +2520,13 @@ test('YouTube SC type & color filters: default checked state, plain labels witho
   assert.equal(env.api.captureLine(rcpt2.line, history), false)
 
   const tiers = [
-    ['blue', '1565c0', '1e88e5'],
-    ['cyan', '00b8d4', '00e5ff'],
-    ['green', '00bfa5', '1de9b6'],
-    ['yellow', 'ffb300', 'ffca28'],
-    ['orange', 'e65100', 'f57c00'],
-    ['magenta', 'c2185b', 'e91e63'],
-    ['red', 'd00000', 'e62117'],
+    ['blue', '1565c0', '1e88e5', '藍色'],
+    ['cyan', '00b8d4', '00e5ff', '淺藍'],
+    ['green', '00bfa5', '1de9b6', '綠色'],
+    ['yellow', 'ffb300', 'ffca28', '黃色'],
+    ['orange', 'e65100', 'f57c00', '橙色'],
+    ['magenta', 'c2185b', 'e91e63', '洋紅'],
+    ['red', 'd00000', 'e62117', '紅色'],
   ]
   for (const [key, headerHex, bodyHex] of tiers) {
     const paid = superChatMessage(env, '@donor', `msg-${key}`, 'NT$150', `sc-${key}`)
@@ -2533,7 +2534,7 @@ test('YouTube SC type & color filters: default checked state, plain labels witho
     env.api.captureLine(paid.line, history)
   }
 
-  // Open SC mode and check default UI state
+  // Open SC mode and check default UI state with Chinese labels
   env.api.setEnabled(state, true, true)
   const scSearch = panel.querySelector('.ytcf-sc-search')
   const fieldset = panel.querySelector('.ytcf-sc-filters')
@@ -2546,39 +2547,57 @@ test('YouTube SC type & color filters: default checked state, plain labels witho
   const labelFor = input => panel.querySelectorAll('label').find(l => l.getAttribute('for') === input.getAttribute('id'))
 
   assert.equal(typeBox('giftRecipients'), null)
-  assert.equal(typeBox('superchat'), null)
   assert.equal(panel.querySelectorAll('.ytcf-sc-count').length, 0)
-  const colorGroup = panel.querySelector('.ytcf-sc-filter-row--colors')
-  assert.equal(colorGroup.getAttribute('role'), 'group')
-  assert.equal(colorGroup.getAttribute('aria-label'), 'Super Chat 顏色')
-  assert.equal(labelFor(typeBox('membership')).textContent, 'membership')
-  assert.equal(labelFor(typeBox('milestone')).textContent, 'milestone')
-  assert.equal(labelFor(typeBox('membershipGift')).textContent, 'membershipGift')
-  for (const [key] of tiers) {
+  assert.equal(labelFor(typeBox('membership')).textContent, '會員加入')
+  assert.equal(labelFor(typeBox('milestone')).textContent, '會員里程碑')
+  assert.equal(labelFor(typeBox('membershipGift')).textContent, '會員贈禮')
+  assert.equal(labelFor(typeBox('superchat')).textContent, '超級留言')
+  for (const [key, , , colorLabel] of tiers) {
     const input = colorBox(key)
     const label = labelFor(input)
     assert.equal(input.checked, true)
+    assert.equal(label.getAttribute('title'), `超級留言 ${colorLabel}`)
     const swatch = label.querySelector('.ytcf-sc-swatch')
     assert.ok(swatch)
     assert.equal(swatch.getAttribute('aria-hidden'), 'true')
     assert.equal(swatch.getAttribute('style'), null, 'swatch avoids inline style attributes for strict CSP')
     assert.ok(!/[()]/.test(label.textContent), `color label ${label.textContent} omits parenthesized counts`)
-    assert.ok(label.textContent.trim().length > 0, `color label retains accessible text name`)
+    assert.equal(label.textContent, colorLabel)
   }
+  assert.equal(typeBox('superchat').checked, true)
+  assert.equal(typeBox('superchat').indeterminate, false)
   assert.equal(state.count.textContent, '11 則')
 
   // Uncheck membership
   typeBox('membership').checked = false
   typeBox('membership').listeners.get('change')()
   assert.equal(state.count.textContent, '10 則')
-  assert.equal(labelFor(typeBox('membership')).textContent, 'membership')
+  assert.equal(labelFor(typeBox('membership')).textContent, '會員加入')
 
-  // Uncheck all SC colors except red -> keeps milestone(1) + membershipGift(2) + red SC(1) = 4
-  for (const [key] of tiers) {
-    if (key === 'red') continue
-    colorBox(key).checked = false
-    colorBox(key).listeners.get('change')()
-  }
+  // Uncheck one color -> superchat parent becomes indeterminate (checked=false, indeterminate=true)
+  colorBox('blue').checked = false
+  colorBox('blue').listeners.get('change')()
+  assert.equal(typeBox('superchat').checked, false)
+  assert.equal(typeBox('superchat').indeterminate, true)
+  assert.equal(state.count.textContent, '9 則')
+
+  // Click superchat while indeterminate -> checks all 7 colors again
+  typeBox('superchat').checked = true
+  typeBox('superchat').listeners.get('change')()
+  assert.equal(typeBox('superchat').indeterminate, false)
+  assert.equal(colorBox('blue').checked, true)
+  assert.equal(state.count.textContent, '10 則')
+
+  // Click superchat to uncheck all 7 colors -> 1 more click on red isolates red SC cleanly
+  typeBox('superchat').checked = false
+  typeBox('superchat').listeners.get('change')()
+  for (const [key] of tiers) assert.equal(colorBox(key).checked, false)
+  assert.equal(state.count.textContent, '3 則') // milestone(1) + membershipGift(2)
+
+  colorBox('red').checked = true
+  colorBox('red').listeners.get('change')()
+  assert.equal(typeBox('superchat').checked, false)
+  assert.equal(typeBox('superchat').indeterminate, true)
   assert.equal(state.count.textContent, '4 則')
   assert.ok(state.list.children.some(row => row.textContent.includes('msg-red')))
   assert.ok(!state.list.children.some(row => row.textContent.includes('msg-blue')))
@@ -2588,7 +2607,7 @@ test('YouTube SC type & color filters: default checked state, plain labels witho
   env.api.setEnabled(state, true, false)
   assert.equal(scSearch.hidden, true)
   assert.equal(state.list.children.filter(row => row.textContent.includes('msg-')).length, 7)
-  // Switching back to SC preserves temporary per-page selections
+  // Switching back to SC preserves selections
   env.api.setEnabled(state, true, true)
   assert.equal(scSearch.hidden, false)
   assert.equal(state.count.textContent, '4 則')
@@ -2596,9 +2615,24 @@ test('YouTube SC type & color filters: default checked state, plain labels witho
   assert.equal(colorBox('red').checked, true)
 })
 
-test('YouTube SC type & color filters: classify Super Stickers, search/locate together, inspect archived trees lazily, drop legacy giftRecipients, and reset across reloads', async () => {
+test('YouTube SC type & color filters: persist selections across reloads, sync tabs, classify Super Stickers lazily, and fall back when corrupt or blocked', async () => {
   const database = fakeIndexedDB()
-  const seed = boot({ database, trustedTypes: true })
+  const sharedStorage = new Map()
+  const mountChat = env => {
+    const header = env.document.body.appendChild(new env.Element('yt-live-chat-header-renderer'))
+    header.appendChild(new env.Element('button')).id = 'live-chat-header-context-menu'
+    const scroller = env.document.body.appendChild(new env.Element('div')).appendChild(new env.Element('div'))
+    scroller.id = 'item-scroller'
+    scroller.appendChild(new env.Element('div')).id = 'items'
+    env.location.href = 'https://www.youtube.com/live_chat?v=sc-filter-persist'
+    const history = env.api.getHistory(env.api.getChannel())
+    return history.restorePromise.then(() => {
+      env.api.refresh()
+      return env.api.mounted
+    })
+  }
+
+  const seed = boot({ database, storage: sharedStorage, trustedTypes: true })
   seed.location.href = 'https://www.youtube.com/live_chat?v=sc-filter-persist'
   const seedHistory = seed.api.getHistory(seed.api.getChannel())
   await seedHistory.restorePromise
@@ -2608,10 +2642,41 @@ test('YouTube SC type & color filters: classify Super Stickers, search/locate to
   const orangeSc = superChatMessage(seed, '@donor', 'orange needle', 'NT$750', 'sc-orange')
   orangeSc.line.data = { headerBackgroundColor: 0xffe65100, bodyBackgroundColor: 0xfff57c00 }
   seed.api.captureLine(orangeSc.line, seedHistory)
+  const redSc = superChatMessage(seed, '@donor', 'red rose', 'NT$3,000', 'sc-red')
+  redSc.line.data = { headerBackgroundColor: 0xffd00000, bodyBackgroundColor: 0xffe62117 }
+  seed.api.captureLine(redSc.line, seedHistory)
+  const member = membershipMessage(seed, { id: 'm-saved', subtext: 'Welcome!' })
+  const milestone = membershipMessage(seed, { id: 'ms-saved', primary: 'Member for 6 months', text: 'yay' })
   const gift = membershipMessage(seed, { tag: 'ytd-sponsorships-live-chat-gift-purchase-announcement-renderer', id: 'g-saved' })
   gift.line.data = { primaryText: { simpleText: 'Gifted 3 memberships' } }
+  seed.api.captureLine(member.line, seedHistory)
+  seed.api.captureLine(milestone.line, seedHistory)
   seed.api.captureLine(gift.line, seedHistory)
   await seed.api.flushHistory(seedHistory)
+
+  // Save partial filter via UI checkboxes (uncheck membership/milestone and all colors except magenta/red)
+  seed.api.refresh()
+  const seedHeader = seed.document.body.appendChild(new seed.Element('yt-live-chat-header-renderer'))
+  seedHeader.appendChild(new seed.Element('button')).id = 'live-chat-header-context-menu'
+  const seedScroller = seed.document.body.appendChild(new seed.Element('div')).appendChild(new seed.Element('div'))
+  seedScroller.id = 'item-scroller'
+  seedScroller.appendChild(new seed.Element('div')).id = 'items'
+  seed.api.refresh()
+  const seedState = seed.api.mounted
+  seed.api.setEnabled(seedState, true, true)
+  const seedType = type => seedState.panel.querySelector(`[data-sc-type="${type}"]`)
+  const seedColor = key => seedState.panel.querySelector(`[data-sc-color="${key}"]`)
+  seedType('membership').checked = false
+  seedType('membership').listeners.get('change')()
+  seedType('milestone').checked = false
+  seedType('milestone').listeners.get('change')()
+  for (const key of ['blue', 'cyan', 'green', 'yellow', 'orange']) {
+    seedColor(key).checked = false
+    seedColor(key).listeners.get('change')()
+  }
+  assert.equal(seedState.count.textContent, '2 則') // red SC + membershipGift
+  assert.equal(sharedStorage.get('youtube-live-chat-tweaks-settings-v1'), undefined, 'SC filter stays separate from target-user settings')
+  assert.ok(sharedStorage.get(seed.api.SUPPORT_FILTER_KEY))
 
   // Simulate pre-existing IndexedDB records lacking scColor plus a legacy giftRecipients item from 0.8.11
   let template
@@ -2626,39 +2691,38 @@ test('YouTube SC type & color filters: classify Super Stickers, search/locate to
     ...template, storageId: 'r-legacy', id: 'r-legacy', supportEvent: 'giftRecipients', superChat: false,
   })
 
-  // Fresh boot (simulates reload): nothing stored in localStorage, resets to all checked, classifies lazily without hydrating offscreen views
-  const fresh = boot({ database, trustedTypes: true })
-  assert.equal(fresh.storage.get('youtube-live-chat-tweaks-settings-v1'), undefined)
-  const h = fresh.document.body.appendChild(new fresh.Element('yt-live-chat-header-renderer'))
-  h.appendChild(new fresh.Element('button')).id = 'live-chat-header-context-menu'
-  const s = fresh.document.body.appendChild(new fresh.Element('div')).appendChild(new fresh.Element('div'))
-  s.id = 'item-scroller'
-  s.appendChild(new fresh.Element('div')).id = 'items'
-  fresh.location.href = 'https://www.youtube.com/live_chat?v=sc-filter-persist'
-  const restored = fresh.api.getHistory(fresh.api.getChannel())
-  await restored.restorePromise
+  // Fresh boot (simulates reload): restores previous selections, classifies archived trees lazily, drops legacy giftRecipients
+  const fresh = boot({ database, storage: sharedStorage, trustedTypes: true })
+  const state = await mountChat(fresh)
+  const restored = state.history
 
   // Verify lazy tree color classification drops legacy giftRecipients and avoids hydrating views before opening
-  assert.equal(restored.messages.length, 3)
+  assert.equal(restored.messages.length, 6)
   assert.equal(fresh.api.getRecordColorTier(restored.messages[0]), 'green')
   assert.equal(fresh.api.getRecordColorTier(restored.messages[1]), 'orange')
   assert.equal(fresh.api.matchesSupportFilter(restored.messages[0], { colors: { green: true, cyan: false } }), true)
   assert.equal(fresh.api.matchesSupportFilter(restored.messages[0], { colors: { green: false, cyan: true } }), false)
   assert.equal(restored.messages.every(r => r._hasView === false), true)
 
-  fresh.api.refresh()
-  const state = fresh.api.mounted
   fresh.api.setEnabled(state, true, true)
   const colorBox = key => state.panel.querySelector(`[data-sc-color="${key}"]`)
   const typeBox = type => state.panel.querySelector(`[data-sc-type="${type}"]`)
-  assert.equal(typeBox('superchat'), null)
-  assert.equal(colorBox('green').checked, true)
-  assert.equal(state.count.textContent, '3 則')
-
-  // Exclude green (hides Super Sticker), search "needle" matches orange SC
-  colorBox('green').checked = false
-  colorBox('green').listeners.get('change')()
+  assert.equal(typeBox('membership').checked, false)
+  assert.equal(typeBox('milestone').checked, false)
+  assert.equal(typeBox('membershipGift').checked, true)
+  assert.equal(typeBox('superchat').checked, false)
+  assert.equal(typeBox('superchat').indeterminate, true)
+  assert.equal(colorBox('blue').checked, false)
+  assert.equal(colorBox('green').checked, false)
+  assert.equal(colorBox('orange').checked, false)
+  assert.equal(colorBox('magenta').checked, true)
+  assert.equal(colorBox('red').checked, true)
   assert.equal(state.count.textContent, '2 則')
+
+  // Enable orange -> updates persisted state & search matches orange needle, excludes green sticker
+  colorBox('orange').checked = true
+  colorBox('orange').listeners.get('change')()
+  assert.equal(state.count.textContent, '3 則')
   state.supportSearch.value = '拍手'
   state.supportSearch.listeners.get('input')()
   assert.equal(state.count.textContent, '0 則符合')
@@ -2667,10 +2731,44 @@ test('YouTube SC type & color filters: classify Super Stickers, search/locate to
   state.supportSearch.listeners.get('input')()
   assert.equal(state.count.textContent, '1 則符合')
 
-  // Locate re-enables filter cleanly if called for a filtered-out item
+  // Locate re-enables green cleanly AND persists it across subsequent reloads
   state.list.clientHeight = 200
   state.list.scrollTop = 0
   assert.equal(fresh.api.locateSupportRecord(state, 'st-green'), true)
   assert.equal(colorBox('green').checked, true)
-  assert.equal(state.count.textContent, '3 則')
+  assert.equal(state.count.textContent, '4 則')
+  assert.equal(JSON.parse(sharedStorage.get(fresh.api.SUPPORT_FILTER_KEY)).colors.green, true)
+
+  // Cross-tab storage sync updates another open tab immediately
+  const tabB = boot({ database, storage: sharedStorage, trustedTypes: true })
+  const stateB = await mountChat(tabB)
+  tabB.api.setEnabled(stateB, true, true)
+  assert.equal(stateB.count.textContent, '4 則')
+  typeBox('membership').checked = true
+  typeBox('membership').listeners.get('change')()
+  tabB.listeners.get('storage')({ key: tabB.api.SUPPORT_FILTER_KEY })
+  assert.equal(stateB.panel.querySelector('[data-sc-type="membership"]').checked, true)
+  assert.equal(stateB.count.textContent, '5 則')
+
+  // Corrupt JSON in localStorage falls back cleanly to all checked
+  sharedStorage.set(fresh.api.SUPPORT_FILTER_KEY, '{broken-json')
+  const corruptEnv = boot({ storage: sharedStorage })
+  assert.deepEqual(JSON.parse(JSON.stringify(corruptEnv.api.loadSupportFilter())), {
+    membership: true,
+    milestone: true,
+    membershipGift: true,
+    colors: { blue: true, cyan: true, green: true, yellow: true, orange: true, magenta: true, red: true },
+  })
+
+  // Blocked localStorage retains support filter in-memory across channels on the same page
+  const blockedEnv = boot({ blocked: true, trustedTypes: true })
+  const blockedState = await mountChat(blockedEnv)
+  blockedEnv.api.setEnabled(blockedState, true, true)
+  const blockedGift = blockedState.panel.querySelector('[data-sc-type="membershipGift"]')
+  blockedGift.checked = false
+  blockedGift.listeners.get('change')()
+  blockedEnv.location.href = 'https://www.youtube.com/live_chat?v=another-video'
+  const secondHistory = blockedEnv.api.getHistory(blockedEnv.api.getChannel())
+  await secondHistory.restorePromise
+  assert.equal(secondHistory.supportFilter.membershipGift, false)
 })

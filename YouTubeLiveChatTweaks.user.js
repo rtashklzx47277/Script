@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.8.14
+// @version     0.8.15
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @description 提供 YouTube 聊天室用戶資訊卡、獨立 SC／會員事件紀錄與類型顏色篩選、全域角色與帳號包含／排除篩選、表情複製、重新載入與自動跟隨。
@@ -587,6 +587,7 @@
     const MESSAGE_SELECTOR = NATIVE_MESSAGE_SELECTOR
     const STORAGE_KEY = 'youtube-live-chat-tweaks-settings-v1'
     const TARGET_PROFILES_KEY = 'youtube-live-chat-tweaks-target-profiles-v1'
+    const SUPPORT_FILTER_KEY = 'youtube-live-chat-tweaks-support-filter-v1'
     const MAX_CHANNELS = 5
     const ARCHIVE_DB = 'youtube-live-chat-tweaks-history-v1'
     const RETENTION_MS = 7 * 24 * 60 * 60 * 1000
@@ -618,6 +619,47 @@
       membershipGift: true,
       colors: Object.fromEntries(SC_COLOR_TIERS.map(tier => [tier.key, true])),
     })
+    const cloneSupportFilter = filter => ({
+      membership: filter?.membership !== false,
+      milestone: filter?.milestone !== false,
+      membershipGift: filter?.membershipGift !== false,
+      colors: Object.fromEntries(SC_COLOR_TIERS.map(tier => [tier.key, filter?.colors?.[tier.key] !== false])),
+    })
+    const normalizeSupportFilter = raw => {
+      const filter = createDefaultSupportFilter()
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return filter
+      filter.membership = raw.membership !== false
+      filter.milestone = raw.milestone !== false
+      filter.membershipGift = raw.membershipGift !== false
+      const colors = raw.colors
+      if (colors && typeof colors === 'object' && !Array.isArray(colors)) {
+        for (const tier of SC_COLOR_TIERS) filter.colors[tier.key] = colors[tier.key] !== false
+      }
+      return filter
+    }
+    const loadSupportFilter = () => {
+      if (pageSupportFilter) return cloneSupportFilter(pageSupportFilter)
+      try {
+        const raw = localStorage.getItem(SUPPORT_FILTER_KEY)
+        return raw ? normalizeSupportFilter(JSON.parse(raw)) : createDefaultSupportFilter()
+      } catch (_) {
+        return createDefaultSupportFilter()
+      }
+    }
+    const saveSupportFilter = filter => {
+      const normalized = normalizeSupportFilter(filter)
+      for (const item of histories.values()) {
+        item.supportFilter = cloneSupportFilter(normalized)
+      }
+      try {
+        localStorage.setItem(SUPPORT_FILTER_KEY, JSON.stringify(normalized))
+        pageSupportFilter = null
+        return true
+      } catch (_) {
+        pageSupportFilter = normalized
+        return false
+      }
+    }
     const histories = new Map()
     const profiles = new Map()
     const profileRequests = new Map()
@@ -635,6 +677,7 @@
       ? scheduler.yield()
       : new Promise(resolve => setTimeout(resolve, 0)))
     let pageSettings = null
+    let pageSupportFilter = null
     let unresolvedScope = ''
     let mounted = null
     isFilteredChat = () => !!mounted?.history.enabled
@@ -1381,7 +1424,7 @@
         history = {
           channel, settings: loadSettings(channel), messages: [], nodes: new WeakMap(), ids: new Map(),
           byStorageId: new Map(), enabled: false, supportOnly: false, supportSearch: '',
-          supportFilter: createDefaultSupportFilter(),
+          supportFilter: loadSupportFilter(),
           follow: true, dirty: new Set(), removed: new Set(),
           scope, saveQueue: new Map(), archiveReady: false, archiveError: false,
         }
@@ -2238,20 +2281,28 @@
     }
     const updateSupportFilterUI = state => {
       if (!state?.panel || !state.supportFilterUI) return
-      const filter = state.history.supportFilter || (state.history.supportFilter = createDefaultSupportFilter())
+      const filter = state.history.supportFilter || (state.history.supportFilter = loadSupportFilter())
       const ui = state.supportFilterUI
       for (const key of ['membership', 'milestone', 'membershipGift']) {
         const item = ui.types[key]
         if (item) item.input.checked = filter[key] !== false
       }
+      let checkedColors = 0
       for (const tier of SC_COLOR_TIERS) {
         const item = ui.colors[tier.key]
-        if (item) item.input.checked = filter.colors?.[tier.key] !== false
+        if (!item) continue
+        const active = filter.colors?.[tier.key] !== false
+        if (active) checkedColors++
+        item.input.checked = active
+      }
+      if (ui.superchat) {
+        ui.superchat.input.checked = checkedColors === SC_COLOR_TIERS.length
+        ui.superchat.input.indeterminate = checkedColors > 0 && checkedColors < SC_COLOR_TIERS.length
       }
     }
     const renderSupportSearch = (state, query) => {
       const { history, list, empty, count, latest } = state
-      const filter = history.supportFilter || (history.supportFilter = createDefaultSupportFilter())
+      const filter = history.supportFilter || (history.supportFilter = loadSupportFilter())
       updateSupportFilterUI(state)
       if (!state.inSearchMode) {
         releaseMessageViews(state)
@@ -2314,7 +2365,7 @@
       if (query) { renderSupportSearch(state, query); return }
       if (state.inSearchMode) releaseMessageViews(state)
       if (history.supportOnly) {
-        history.supportFilter ||= createDefaultSupportFilter()
+        history.supportFilter ||= loadSupportFilter()
         updateSupportFilterUI(state)
         const hasAnySupport = history.messages.some(record => record.retained && record.supportEvent)
         empty.textContent = hasAnySupport ? '找不到符合篩選條件的 SC 或會員紀錄。' : '尚未收到 SC 或會員事件。'
@@ -2447,13 +2498,14 @@
       const record = history.byStorageId?.get(storageId) ||
         history.messages.find(row => row.storageId === storageId)
       if (!record || !record.retained || !record.supportEvent || record.createdAt + RETENTION_MS <= Date.now()) return false
-      history.supportFilter ||= createDefaultSupportFilter()
+      history.supportFilter ||= loadSupportFilter()
       if (!matchesSupportFilter(record, history.supportFilter)) {
         if (record.supportEvent === 'superChat' || record.supportEvent === 'superSticker') {
           const tier = getRecordColorTier(record)
           if (tier) history.supportFilter.colors[tier] = true
           else for (const item of SC_COLOR_TIERS) history.supportFilter.colors[item.key] = true
         } else history.supportFilter[record.supportEvent] = true
+        saveSupportFilter(history.supportFilter)
         updateSupportFilterUI(state)
       }
       history.supportSearch = ''
@@ -2768,7 +2820,7 @@
       panel.setAttribute('aria-label', '指定用戶聊天室')
       const makeScCheckbox = ({ id, attrName, attrValue, text = '', swatch = null }) => {
         const input = element('input', { type: 'checkbox', id, [attrName]: attrValue })
-        const label = element('label', { for: id, ...(swatch ? { title: `Super Chat ${swatch.label}` } : {}) }, swatch
+        const label = element('label', { for: id, ...(swatch ? { title: `超級留言 ${swatch.label}` } : {}) }, swatch
           ? [
               element('span', { class: `ytcf-sc-swatch ytcf-sc-swatch--${swatch.key}`, 'aria-hidden': 'true' }),
               element('span', { class: 'ytcf-visually-hidden' }, [swatch.label]),
@@ -2778,10 +2830,11 @@
         return { option, input }
       }
       const supportTypes = {
-        membership: makeScCheckbox({ id: 'ytcf-sc-filter-membership', attrName: 'data-sc-type', attrValue: 'membership', text: 'membership' }),
-        milestone: makeScCheckbox({ id: 'ytcf-sc-filter-milestone', attrName: 'data-sc-type', attrValue: 'milestone', text: 'milestone' }),
-        membershipGift: makeScCheckbox({ id: 'ytcf-sc-filter-membership-gift', attrName: 'data-sc-type', attrValue: 'membershipGift', text: 'membershipGift' }),
+        membership: makeScCheckbox({ id: 'ytcf-sc-filter-membership', attrName: 'data-sc-type', attrValue: 'membership', text: '會員加入' }),
+        milestone: makeScCheckbox({ id: 'ytcf-sc-filter-milestone', attrName: 'data-sc-type', attrValue: 'milestone', text: '會員里程碑' }),
+        membershipGift: makeScCheckbox({ id: 'ytcf-sc-filter-membership-gift', attrName: 'data-sc-type', attrValue: 'membershipGift', text: '會員贈禮' }),
       }
+      const superchatToggle = makeScCheckbox({ id: 'ytcf-sc-filter-superchat', attrName: 'data-sc-type', attrValue: 'superchat', text: '超級留言' })
       const supportColors = Object.fromEntries(SC_COLOR_TIERS.map(tier => [tier.key, makeScCheckbox({
         id: `ytcf-sc-color-${tier.key}`, attrName: 'data-sc-color', attrValue: tier.key, swatch: tier,
       })]))
@@ -2790,7 +2843,8 @@
         element('div', { class: 'ytcf-sc-filter-row' }, [
           supportTypes.membership.option, supportTypes.milestone.option, supportTypes.membershipGift.option,
         ]),
-        element('div', { class: 'ytcf-sc-filter-row ytcf-sc-filter-row--colors', role: 'group', 'aria-label': 'Super Chat 顏色' }, [
+        element('div', { class: 'ytcf-sc-filter-row ytcf-sc-filter-row--colors' }, [
+          superchatToggle.option,
           ...SC_COLOR_TIERS.map(tier => supportColors[tier.key].option),
         ]),
       ])
@@ -2871,22 +2925,30 @@
       state.count = $('.ytcf-count', panel)
       state.latest = $('.ytcf-latest', panel)
       state.supportSearch = $('[name="search-support"]', panel)
-      state.supportFilterUI = { types: supportTypes, colors: supportColors }
+      state.supportFilterUI = { types: supportTypes, superchat: superchatToggle, colors: supportColors }
       const applySupportFilterChange = () => {
         clearLocatedRecord(state)
+        saveSupportFilter(state.history.supportFilter)
         updateSupportFilterUI(state)
         if (state.history.enabled && state.history.supportOnly) renderMessages(state, true)
       }
       for (const [key, item] of Object.entries(supportTypes)) {
         item.input.addEventListener('change', () => {
-          state.history.supportFilter ||= createDefaultSupportFilter()
+          state.history.supportFilter ||= loadSupportFilter()
           state.history.supportFilter[key] = Boolean(item.input.checked)
           applySupportFilterChange()
         })
       }
+      superchatToggle.input.addEventListener('change', () => {
+        const filter = state.history.supportFilter ||= loadSupportFilter()
+        const checked = Boolean(superchatToggle.input.checked)
+        superchatToggle.input.indeterminate = false
+        for (const tier of SC_COLOR_TIERS) filter.colors[tier.key] = checked
+        applySupportFilterChange()
+      })
       for (const tier of SC_COLOR_TIERS) {
         supportColors[tier.key].input.addEventListener('change', () => {
-          const filter = state.history.supportFilter ||= createDefaultSupportFilter()
+          const filter = state.history.supportFilter ||= loadSupportFilter()
           filter.colors[tier.key] = Boolean(supportColors[tier.key].input.checked)
           applySupportFilterChange()
         })
@@ -3105,6 +3167,17 @@
       if (history.enabled) renderMessages(mounted, true)
     }
 
+    const syncSupportFilter = () => {
+      pageSupportFilter = null
+      const filter = loadSupportFilter()
+      for (const history of histories.values()) {
+        history.supportFilter = cloneSupportFilter(filter)
+      }
+      if (!mounted) return
+      updateSupportFilterUI(mounted)
+      if (mounted.history.enabled && mounted.history.supportOnly) renderMessages(mounted, true)
+    }
+
     const style = document.createElement('style')
     style.textContent = `
       #yt-chat-tweaks-filter-button, #yt-chat-tweaks-sc-button { display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box; flex: 0 0 40px; width: 40px; height: 40px; min-width: 40px; min-height: 40px; margin: 0; padding: 8px; border: 0; border-radius: 50%; color: inherit; background: transparent; cursor: pointer; }
@@ -3266,6 +3339,7 @@
     ;(document.head || document.documentElement).appendChild(style)
     window.addEventListener('storage', event => {
       if (event.key === STORAGE_KEY || event.key === null) syncSettings()
+      if (event.key === SUPPORT_FILTER_KEY || event.key === null) syncSupportFilter()
       if (event.key === TARGET_PROFILES_KEY || event.key === null) reloadTargetProfiles()
     })
     window.addEventListener('resize', schedulePanelPosition)
