@@ -1663,16 +1663,29 @@ test('Twitch replies: capture viewer replies to active targets, toggle globally,
   assert.equal(history.ids.has('r-ord'), false)
   assert.equal(history.ids.has('m-mention'), false)
 
-  // Viewer replies to visible targets attach directly beneath the parent row inside collapsed drawers,
-  // while unseen targets use a compact quoted group; all default to closed.
-  const modDrawer = state.list.children[state.list.children.indexOf(history.ids.get('p-mod').view) + 1]
-  assert.equal(modDrawer.tagName, 'details')
-  assert.equal(modDrawer.className, 'ttc-replies')
-  assert.equal(modDrawer.open, false)
-  assert.equal(modDrawer.querySelector('.ttc-replies-summary').textContent, '1 則回覆')
-  assert.equal(history.ids.get('p-mod').view.classList.contains('ttc-has-replies'), true)
+  // Viewer replies to visible targets wrap the parent view and inline toggle inside .ttc-thread-head,
+  // with a collapsed hidden="until-found" .ttc-replies panel beneath; unseen targets use .ttc-reply-group.
+  const modView = history.ids.get('p-mod').view
+  const modThread = modView.closest('.ttc-thread')
+  assert.ok(modThread)
+  const modHead = modThread.querySelector('.ttc-thread-head')
+  assert.equal(modView.parentElement, modHead)
+  const modToggle = modHead.children[modHead.children.indexOf(modView) + 1]
+  assert.equal(modToggle.tagName, 'button')
+  assert.equal(modToggle.className, 'ttc-replies-toggle')
+  assert.equal(modToggle.getAttribute('aria-expanded'), 'false')
+  assert.equal(modToggle.textContent, '1 則回覆')
+  const modPanel = modThread.querySelector('.ttc-replies')
+  assert.equal(modToggle.getAttribute('aria-controls'), modPanel.getAttribute('id'))
+  assert.equal(modPanel.getAttribute('hidden'), 'until-found')
+  assert.equal(modPanel.hidden, 'until-found')
+  assert.equal(modView.classList.contains('ttc-has-replies'), true)
   assert.equal(state.list.querySelectorAll('.ttc-reply-group').length, 2)
   assert.equal(state.list.querySelectorAll('.ttc-replies').length, 4)
+
+  // Ensure injected CSS preserves hidden="until-found" instead of forcing display: none !important
+  const cssText = env.document.head.querySelector('style').textContent
+  assert.match(cssText, /\.ttc-panel \[hidden\]:not\(\[hidden="until-found" i\]\)/)
 
   // Toggling VIP off hides both vip_a and viewer_3's reply to vip_a
   const vipCheckbox = state.panel.querySelector('[name="vip"]')
@@ -1684,13 +1697,15 @@ test('Twitch replies: capture viewer replies to active targets, toggle globally,
   vipCheckbox.listeners.get('change')()
   assert.equal(state.count.textContent, '6 則')
 
-  // Unchecking replies checkbox removes drawers and hides viewer replies, stops capturing new ones, persists globally
+  // Unchecking replies checkbox unwraps parents, removes drawers, stops capturing new ones, persists globally
   repliesCheckbox.checked = false
   repliesCheckbox.listeners.get('change')()
   assert.equal(history.settings.replies, false)
   assert.equal(state.count.textContent, '2 則')
   assert.equal(state.list.querySelectorAll('.ttc-replies').length, 0)
+  assert.equal(state.list.querySelectorAll('.ttc-thread').length, 0)
   assert.equal(state.list.querySelectorAll('.ttc-reply-group').length, 0)
+  assert.equal(history.ids.get('p-mod').view.parentElement, state.list)
   assert.equal(history.ids.get('p-mod').view.classList.contains('ttc-has-replies'), false)
 
   const whileOff = withReplyFiber('viewer_8', '關閉後回覆', 'r-while-off', {
@@ -1804,10 +1819,10 @@ test('Twitch replies: backfill parent roles after restore, fallback to fiber ID 
   const restoredReply = state.history.ids.get('fiber-only-id')
   assert.ok(restoredReply)
   const parentView = state.history.ids.get('vip-old-1').view
-  const attachedDrawer = state.list.children[state.list.children.indexOf(parentView) + 1]
-  assert.equal(attachedDrawer.tagName, 'details')
-  assert.equal(attachedDrawer.querySelector('.ttc-replies-summary').textContent, '1 則回覆')
-  assert.equal(restoredReply.view.parentElement, attachedDrawer.querySelector('.ttc-replies-list'))
+  const attachedThread = parentView.closest('.ttc-thread')
+  assert.ok(attachedThread)
+  assert.equal(attachedThread.querySelector('.ttc-replies-toggle').textContent, '1 則回覆')
+  assert.equal(restoredReply.view.parentElement, attachedThread.querySelector('.ttc-replies-list'))
   assert.equal(state.list.querySelectorAll('.ttc-reply-group').length, 0)
   const quote = restoredReply.view.querySelector('.ttc-reply')
   assert.equal(quote.querySelector('img'), null)
@@ -1817,7 +1832,7 @@ test('Twitch replies: backfill parent roles after restore, fallback to fiber ID 
   env.api.unmount()
 })
 
-test('Twitch reply drawers: keep target-to-target top-level, persist open state on edits/appends without full scan, and flatten in search', async () => {
+test('Twitch reply drawers: keep target-to-target top-level, persist open state on edits/appends without full scan, support beforematch, and flatten in search', async () => {
   const database = fakeIndexedDB()
   const seed = boot({ database })
   const seedHistory = seed.api.getHistory('sample_channel')
@@ -1884,20 +1899,32 @@ test('Twitch reply drawers: keep target-to-target top-level, persist open state 
 
   assert.equal(vipReply.line.parentElement, scroller)
   assert.equal(history.ids.get('t-vip-reply').view.parentElement, state.list, 'target-to-target reply stays top-level')
-  const liveDrawer = state.list.children[state.list.children.indexOf(history.ids.get('p-live').view) + 1]
-  assert.equal(liveDrawer.tagName, 'details')
-  assert.equal(liveDrawer.open, false)
-  assert.equal(liveDrawer.querySelector('.ttc-replies-summary').textContent, '1 則回覆')
+  const liveView = history.ids.get('p-live').view
+  const liveThread = liveView.closest('.ttc-thread')
+  assert.ok(liveThread)
+  const liveHead = liveThread.querySelector('.ttc-thread-head')
+  const liveToggle = liveHead.children[liveHead.children.indexOf(liveView) + 1]
+  const livePanel = liveThread.querySelector('.ttc-replies')
+  assert.equal(liveToggle.tagName, 'button')
+  assert.equal(liveToggle.getAttribute('aria-expanded'), 'false')
+  assert.equal(liveToggle.textContent, '1 則回覆')
+  assert.equal(livePanel.getAttribute('hidden'), 'until-found')
 
-  // Orphan replies merged into a single .ttc-reply-group
+  // Orphan replies merged into a single .ttc-reply-group with inline toggle next to quote
   assert.equal(state.list.querySelectorAll('.ttc-reply-group').length, 1)
   const orphanGroup = state.list.querySelector('.ttc-reply-group')
-  assert.equal(orphanGroup.querySelector('.ttc-replies-summary').textContent, '2 則回覆')
+  const orphanHead = orphanGroup.querySelector('.ttc-thread-head')
+  assert.equal(orphanHead.classList.contains('ttc-orphan-head'), true)
+  assert.equal(orphanHead.children[0].className, 'ttc-reply')
+  assert.equal(orphanHead.children[1].className, 'ttc-replies-toggle')
+  assert.equal(orphanHead.children[1].textContent, '2 則回覆')
   assert.equal(orphanGroup.querySelector('.ttc-reply-author').textContent, '@實況主 (sample_channel)')
 
-  // Open the live drawer and verify open state persists across incremental updates, edits, and NO full history scan
-  liveDrawer.open = true
-  liveDrawer.listeners.get('toggle')()
+  // Click toggle to open live drawer and verify open state persists across incremental updates, edits, and NO full history scan
+  liveToggle.listeners.get('click')()
+  assert.equal(liveToggle.getAttribute('aria-expanded'), 'true')
+  assert.equal(livePanel.getAttribute('hidden'), null)
+  assert.equal(livePanel.hidden, false)
   assert.equal(state.openReplyThreads.has('id:p-live'), true)
 
   history.messages[Symbol.iterator] = () => { throw Error('unexpected full history scan') }
@@ -1914,12 +1941,21 @@ test('Twitch reply drawers: keep target-to-target top-level, persist open state 
   env.api.renderMessages(state)
   delete history.messages[Symbol.iterator]
 
-  const drawerAfterInc = state.list.children[state.list.children.indexOf(history.ids.get('p-live').view) + 1]
-  assert.equal(drawerAfterInc, liveDrawer, 'incremental update reuses the same drawer node')
-  assert.equal(drawerAfterInc.open, true)
-  assert.equal(drawerAfterInc.querySelector('.ttc-replies-summary').textContent, '2 則回覆')
+  const threadAfterInc = history.ids.get('p-live').view.closest('.ttc-thread')
+  assert.equal(threadAfterInc, liveThread, 'incremental update reuses the same thread wrapper')
+  assert.equal(threadAfterInc.querySelector('.ttc-replies-toggle').getAttribute('aria-expanded'), 'true')
+  assert.equal(threadAfterInc.querySelector('.ttc-replies').getAttribute('hidden'), null)
+  assert.equal(threadAfterInc.querySelector('.ttc-replies-toggle').textContent, '2 則回覆')
   assert.equal(history.ids.get('p-live').view.children.at(-1).textContent, '現場公告(已更新)')
   assert.equal(history.ids.get('v-reply-1').view.children.at(-1).textContent, '觀眾回覆一(已編輯)')
+
+  // Find-in-page beforematch on hidden="until-found" orphan panel opens it and syncs aria-expanded
+  const orphanPanel = orphanGroup.querySelector('.ttc-replies')
+  orphanPanel.listeners.get('beforematch')()
+  assert.equal(orphanHead.children[1].getAttribute('aria-expanded'), 'true')
+  assert.equal(orphanPanel.getAttribute('hidden'), null)
+  assert.equal(orphanPanel.hidden, false)
+  assert.equal(state.openReplyThreads.has('id:unseen-bc-1'), true)
 
   // Search mode flattens matching replies in state.list with .ttc-reply visible; clearing restores drawers & open state
   state.messageSearch.value = '觀眾回覆'
@@ -1931,22 +1967,23 @@ test('Twitch reply drawers: keep target-to-target top-level, persist open state 
 
   state.messageSearch.value = ''
   state.messageSearch.listeners.get('input')()
-  const restoredLiveDrawer = state.list.children[state.list.children.indexOf(history.ids.get('p-live').view) + 1]
-  assert.equal(restoredLiveDrawer.open, true, 'open state restored after exiting search')
-  assert.equal(restoredLiveDrawer.querySelector('.ttc-replies-summary').textContent, '2 則回覆')
+  const restoredLiveThread = history.ids.get('p-live').view.closest('.ttc-thread')
+  assert.equal(restoredLiveThread.querySelector('.ttc-replies-toggle').getAttribute('aria-expanded'), 'true', 'open state restored after exiting search')
+  assert.equal(restoredLiveThread.querySelector('.ttc-replies').getAttribute('hidden'), null)
+  assert.equal(restoredLiveThread.querySelector('.ttc-replies-toggle').textContent, '2 則回覆')
 
-  // Restoring old-mod-msg from IndexedDB attaches orphanOld1 and orphanOld2 directly below old-mod-msg
+  // Restoring old-mod-msg from IndexedDB attaches orphanOld1 and orphanOld2 inline after old-mod-msg
   await history.restorePromise
   const oldParentView = history.ids.get('old-mod-msg').view
-  const oldDrawer = state.list.children[state.list.children.indexOf(oldParentView) + 1]
-  assert.equal(oldDrawer.tagName, 'details')
-  assert.equal(oldDrawer.open, false)
-  assert.equal(oldDrawer.querySelector('.ttc-replies-summary').textContent, '2 則回覆')
+  const oldThread = oldParentView.closest('.ttc-thread')
+  assert.ok(oldThread)
+  assert.equal(oldThread.querySelector('.ttc-replies-toggle').getAttribute('aria-expanded'), 'false')
+  assert.equal(oldThread.querySelector('.ttc-replies-toggle').textContent, '2 則回覆')
   assert.equal(state.list.querySelectorAll('.ttc-reply-group').length, 1, 'only unseen-bc-1 remains an orphan group')
   env.api.unmount()
 })
 
-test('Twitch reply drawers: preserve cross-day date dividers across drawers, handle parent eviction, and clean up empty drawers', async () => {
+test('Twitch reply drawers: preserve cross-day date dividers across threads, handle parent eviction, and unwrap on empty drawer cleanup', async () => {
   const database = fakeIndexedDB()
   const day1 = new Date(2026, 10, 17, 23, 50, 0).getTime()
   const day2 = new Date(2026, 10, 18, 0, 10, 0).getTime()
@@ -1968,7 +2005,7 @@ test('Twitch reply drawers: preserve cross-day date dividers across drawers, han
     return msg
   }
 
-  // Day 1: Mod parent + viewer reply + same-day Mod message -> second Mod must NOT get duplicate date divider after drawer
+  // Day 1: Mod parent + viewer reply + same-day Mod message -> thread wrapper carries 2026/11/17; second Mod must NOT repeat divider
   const mod1 = env.message('mod_a', 'day1 first', 'Moderator', 'd1-mod1')
   env.api.captureLine(mod1.line, history)
   const rep1 = makeReply('viewer_1', 'day1 reply', 'd1-rep1', {
@@ -1988,22 +2025,27 @@ test('Twitch reply drawers: preserve cross-day date dividers across drawers, han
   env.api.captureLine(mod3.line, history)
 
   env.api.renderMessages(state, true)
-  assert.equal(history.ids.get('d1-mod1').view.getAttribute('data-date'), '2026/11/17')
-  assert.equal(history.ids.get('d1-mod2').view.getAttribute('data-date'), null, 'same-day row after drawer must not repeat divider')
+  const mod1View = history.ids.get('d1-mod1').view
+  const mod1Thread = mod1View.closest('.ttc-thread')
+  assert.equal(mod1Thread.getAttribute('data-date'), '2026/11/17')
+  assert.equal(mod1View.getAttribute('data-date'), null)
+  assert.equal(history.ids.get('d1-mod2').view.getAttribute('data-date'), null, 'same-day row after thread must not repeat divider')
   const day2Group = state.list.querySelector('.ttc-reply-group')
   assert.equal(day2Group.getAttribute('data-date'), '2026/11/18')
   assert.equal(history.ids.get('d2-mod3').view.getAttribute('data-date'), null, 'same-day row after orphan group must not repeat divider')
 
-  // Removing the last reply removes the drawer and .ttc-has-replies from d1-mod1
+  // Removing the last reply unwraps d1-mod1 back into state.list, keeps its 2026/11/17 divider, and clears .ttc-has-replies
   history.settings.excludedUsers = ['viewer_1']
   env.api.renderMessages(state)
-  assert.equal(history.ids.get('d1-mod1').view.classList.contains('ttc-has-replies'), false)
+  assert.equal(mod1View.parentElement, state.list)
+  assert.equal(mod1View.getAttribute('data-date'), '2026/11/17')
+  assert.equal(mod1View.classList.contains('ttc-has-replies'), false)
   assert.equal(state.list.querySelectorAll('.ttc-replies').length, 1, 'only day2 orphan group drawer remains')
   history.settings.excludedUsers = []
   env.api.renderMessages(state, true)
-  assert.equal(history.ids.get('d1-mod1').view.classList.contains('ttc-has-replies'), true)
+  assert.equal(mod1View.classList.contains('ttc-has-replies'), true)
 
-  // Evicting d1-mod1 from 1000-cap while d1-rep1 remains converts d1-rep1's drawer into an orphan .ttc-reply-group
+  // Evicting d1-mod1 from 1000-cap while d1-rep1 remains converts d1-rep1's thread into an orphan .ttc-reply-group
   const rep1Record = history.ids.get('d1-rep1')
   const mod1Record = history.ids.get('d1-mod1')
   history.messages = history.messages.filter(r => r !== mod1Record)

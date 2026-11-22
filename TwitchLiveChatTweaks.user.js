@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        Twitch Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.10.0
+// @version     0.10.1
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
 // @description 依頻道主、管理員、VIP、回覆篩選目標與全域帳號包含／排除名單篩選 Twitch 直播與 VOD 聊天，保留回覆目標引言與最近 1000 則／7 天紀錄，支援跨日分隔、搜尋與自動跟隨。
@@ -56,7 +56,7 @@
       node.setAttribute(name, text)
       if (name === 'class' && typeof node.className === 'string') node.className = text
       if (name === 'id') node.id = text
-      if (name === 'hidden') node.hidden = true
+      if (name === 'hidden') node.hidden = value === 'until-found' ? 'until-found' : true
     }
     for (const child of children) {
       node.appendChild(typeof child === 'string' ? document.createTextNode(child) : child)
@@ -1044,6 +1044,7 @@
     latest.hidden = history.follow
   }
 
+  let nextReplyDrawerId = 0
   const isCollapsedReply = (record, settings) =>
     Boolean(record?.reply) &&
     !matchesTarget(record, settings) &&
@@ -1053,18 +1054,26 @@
     while (cur && !viewDates.has(cur)) cur = siblingView(cur, delta)
     return cur || null
   }
-  const setDetailsOpen = (details, open) => {
+  const setDrawerOpen = (drawer, open) => {
     const next = Boolean(open)
-    details.open = next
-    if (next) details.setAttribute('open', '')
-    else details.removeAttribute('open')
+    drawer.open = next
+    drawer.toggle.setAttribute('aria-expanded', String(next))
+    if (next) {
+      drawer.panel.hidden = false
+      drawer.panel.removeAttribute('hidden')
+    } else {
+      drawer.panel.hidden = 'until-found'
+      drawer.panel.setAttribute('hidden', 'until-found')
+    }
   }
   const resolveReplyThread = (record, history, settings, list) => {
     const parentId = record.reply?.parentId
     if (parentId) {
       const parent = history.ids.get(parentId)
-      const mountedParent = parent?.retained && parent.visible &&
-        parent.renderedView?.parentElement === list && matchesTarget(parent, settings)
+      const mountedParent = parent?.retained && parent.visible && parent.renderedView &&
+        (parent.renderedView.parentElement === list ||
+          parent.renderedView.closest?.('.ttc-thread')?.parentElement === list) &&
+        matchesTarget(parent, settings)
         ? parent
         : null
       return { key: `id:${parentId}`, parentRecord: mountedParent }
@@ -1072,48 +1081,83 @@
     return { key: `quote:${record.reply.parentUser}\n${record.reply.parentText}`, parentRecord: null }
   }
   const updateDrawerSummary = drawer => {
-    drawer.summary.textContent = `${drawer.replies.size} 則回覆`
+    drawer.toggle.textContent = `${drawer.replies.size} 則回覆`
   }
   const ensureReplyDrawer = (state, key, parentRecord, sampleReply, createdAt) => {
     state.replyDrawers ||= new Map()
     state.openReplyThreads ||= new Set()
     const existing = state.replyDrawers.get(key)
     if (existing) return existing
-    const summary = element('summary', { class: 'ttc-replies-summary' }, ['0 則回覆'])
+    const panelId = `ttc-replies-${++nextReplyDrawerId}`
+    const toggle = element('button', {
+      type: 'button',
+      class: 'ttc-replies-toggle',
+      'aria-expanded': 'false',
+      'aria-controls': panelId,
+    }, ['0 則回覆'])
     const replyList = element('div', { class: 'ttc-replies-list' })
-    const details = element('details', { class: 'ttc-replies' }, [summary, replyList])
-    setDetailsOpen(details, state.openReplyThreads.has(key))
-    details.addEventListener('toggle', () => {
-      const isOpen = Boolean(details.open)
-      if (isOpen) state.openReplyThreads.add(key)
+    const panel = element('div', { class: 'ttc-replies', id: panelId, hidden: 'until-found' }, [replyList])
+    let head
+    let wrapper
+    if (parentRecord) {
+      head = element('div', { class: 'ttc-thread-head' }, [toggle])
+      wrapper = element('div', { class: 'ttc-thread' }, [head, panel])
+      parentRecord.renderedView.replaceWith(wrapper)
+      head.insertBefore(parentRecord.renderedView, toggle)
+      parentRecord.renderedView.classList.add('ttc-has-replies')
+      parentRecord.renderedView.removeAttribute('data-date')
+      viewDates.set(wrapper, formatDateKey(parentRecord.createdAt))
+      syncDateMarker(wrapper, adjacentDatedRow(wrapper, -1))
+    } else {
+      head = element('div', { class: 'ttc-thread-head ttc-orphan-head' }, [makeReplyView(sampleReply), toggle])
+      wrapper = element('div', { class: 'ttc-reply-group' }, [head, panel])
+      viewDates.set(wrapper, formatDateKey(createdAt))
+      state.list.appendChild(wrapper)
+      syncDateMarker(wrapper, adjacentDatedRow(wrapper, -1))
+    }
+    const drawer = {
+      key, wrapper, head, toggle, panel, list: replyList,
+      group: parentRecord ? null : wrapper, parentRecord: parentRecord || null,
+      open: false, replies: new Set(),
+    }
+    setDrawerOpen(drawer, state.openReplyThreads.has(key))
+    toggle.addEventListener('click', () => {
+      const next = !drawer.open
+      if (next) state.openReplyThreads.add(key)
       else state.openReplyThreads.delete(key)
+      setDrawerOpen(drawer, next)
       if (mounted === state) scheduleListFollow(state)
     })
-    let group = null
-    if (parentRecord) {
-      state.list.insertBefore(details, siblingView(parentRecord.renderedView, 1))
-      parentRecord.renderedView.classList.add('ttc-has-replies')
-    } else {
-      group = element('div', { class: 'ttc-reply-group' }, [makeReplyView(sampleReply), details])
-      viewDates.set(group, formatDateKey(createdAt))
-      state.list.appendChild(group)
-      syncDateMarker(group, adjacentDatedRow(group, -1))
-    }
-    const drawer = { key, details, summary, list: replyList, group, parentRecord: parentRecord || null, replies: new Set() }
-    state.messageResizeObserver?.observe(details)
+    panel.addEventListener('beforematch', () => {
+      state.openReplyThreads.add(key)
+      setDrawerOpen(drawer, true)
+      if (mounted === state) scheduleListFollow(state)
+    })
+    state.messageResizeObserver?.observe(panel)
     state.replyDrawers.set(key, drawer)
     return drawer
   }
-  const removeDrawer = (state, drawer) => {
-    state.messageResizeObserver?.unobserve(drawer.details)
+  const removeDrawer = (state, drawer, unwrapParent = true) => {
+    state.messageResizeObserver?.unobserve(drawer.panel)
     if (drawer.group) {
-      const nextDated = adjacentDatedRow(drawer.group, 1)
-      drawer.group.remove()
+      const nextDated = adjacentDatedRow(drawer.wrapper, 1)
+      drawer.wrapper.remove()
       if (nextDated?.parentElement === state.list) syncDateMarker(nextDated, adjacentDatedRow(nextDated, -1))
     } else {
-      drawer.details.remove()
-      drawer.parentRecord?.renderedView?.classList.remove('ttc-has-replies')
+      const parentView = drawer.parentRecord?.renderedView
+      parentView?.classList.remove('ttc-has-replies')
       drawer.parentRecord?.view?.classList.remove('ttc-has-replies')
+      if (unwrapParent && parentView && parentView.parentElement === drawer.head && drawer.wrapper.parentElement === state.list) {
+        drawer.wrapper.replaceWith(parentView)
+        viewDates.set(parentView, formatDateKey(drawer.parentRecord.createdAt))
+        syncDateMarker(parentView, adjacentDatedRow(parentView, -1))
+        const nextDated = adjacentDatedRow(parentView, 1)
+        if (nextDated?.parentElement === state.list) syncDateMarker(nextDated, parentView)
+      } else {
+        const nextDated = adjacentDatedRow(drawer.wrapper, 1)
+        drawer.wrapper.remove()
+        if (nextDated?.parentElement === state.list) syncDateMarker(nextDated, adjacentDatedRow(nextDated, -1))
+      }
     }
     state.replyDrawers?.delete(drawer.key)
   }
@@ -1127,7 +1171,7 @@
     else removeDrawer(state, drawer)
   }
   const clearReplyDrawers = state => {
-    for (const drawer of [...(state.replyDrawers?.values() || [])]) removeDrawer(state, drawer)
+    for (const drawer of [...(state.replyDrawers?.values() || [])]) removeDrawer(state, drawer, false)
     state.replyDrawers?.clear()
   }
 
@@ -1156,11 +1200,12 @@
     let needsReorder = false
     for (const record of history.removed) {
       const wasVisible = Boolean(record.renderedView?.parentElement && record.visible)
+      const existingDrawer = !full && record.id ? state.replyDrawers.get(`id:${record.id}`) : null
       if (record.renderedView) state.messageResizeObserver?.unobserve(record.renderedView)
       if (!full && wasVisible) state.visibleCount--
       record.renderedView?.remove()
       if (record.replyThreadKey) detachFromDrawer(state, record)
-      else if (!full && record.id && state.replyDrawers.has(`id:${record.id}`)) needsReorder = true
+      else if (existingDrawer) needsReorder = true
       record.renderedView = null
       record.visible = false
       record.replyThreadKey = ''
@@ -1173,12 +1218,16 @@
       const show = matchesFilter(record, history.settings)
       state.visibleCount += Number(show) - (full ? 0 : Number(!!wasVisible))
       if (!show) {
+        const existingDrawer = !full && record.id ? state.replyDrawers.get(`id:${record.id}`) : null
         if (oldView) {
-          const nextDated = !full && oldView.parentElement === list ? adjacentDatedRow(oldView, 1) : null
+          const datedAnchor = oldView.parentElement === list
+            ? oldView
+            : (existingDrawer && !existingDrawer.group ? existingDrawer.wrapper : null)
+          const nextDated = !full && datedAnchor ? adjacentDatedRow(datedAnchor, 1) : null
           state.messageResizeObserver?.unobserve(oldView)
           oldView.remove()
           if (record.replyThreadKey) detachFromDrawer(state, record)
-          else if (!full && record.id && state.replyDrawers.has(`id:${record.id}`)) needsReorder = true
+          else if (existingDrawer) needsReorder = true
           if (nextDated?.parentElement === list) syncDateMarker(nextDated, adjacentDatedRow(nextDated, -1))
         }
         record.renderedView = null
@@ -1214,6 +1263,28 @@
         detachFromDrawer(state, record)
         needsReorder = true
       }
+      const existingDrawer = !full && record.id ? state.replyDrawers.get(`id:${record.id}`) : null
+      if (existingDrawer && !existingDrawer.group) {
+        record.view.hidden = false
+        record.view.classList.add('ttc-has-replies')
+        record.view.removeAttribute('data-date')
+        if (oldView && oldView !== record.view) {
+          state.messageResizeObserver?.unobserve(oldView)
+          if (oldView.parentElement === existingDrawer.head) oldView.replaceWith(record.view)
+          else oldView.remove()
+        }
+        if (record.view.parentElement !== existingDrawer.head) {
+          existingDrawer.head.insertBefore(record.view, existingDrawer.toggle)
+        }
+        existingDrawer.parentRecord = record
+        viewDates.set(existingDrawer.wrapper, formatDateKey(record.createdAt))
+        syncDateMarker(existingDrawer.wrapper, adjacentDatedRow(existingDrawer.wrapper, -1))
+        record.renderedView = record.view
+        record.visible = true
+        record.replyThreadKey = ''
+        state.messageResizeObserver?.observe(record.view)
+        continue
+      }
       record.view.hidden = false
       viewDates.set(record.view, formatDateKey(record.createdAt))
       if (oldView && oldView !== record.view) {
@@ -1225,14 +1296,7 @@
         if (!full && state.mountedTailOrder && record.order <= state.mountedTailOrder) needsReorder = true
         list.appendChild(record.view)
       }
-      if (record.id && state.replyDrawers.has(`id:${record.id}`)) {
-        const drawer = state.replyDrawers.get(`id:${record.id}`)
-        if (drawer.group) needsReorder = true
-        else {
-          drawer.parentRecord = record
-          record.view.classList.add('ttc-has-replies')
-        }
-      }
+      if (existingDrawer?.group) needsReorder = true
       syncDateMarker(record.view, adjacentDatedRow(record.view, -1))
       if (!full) {
         const nextDated = adjacentDatedRow(record.view, 1)
@@ -1838,7 +1902,7 @@
     .ttc-host { position: relative; }
     .ttc-active > .ttc-source, .ttc-active.ttc-source { visibility: hidden; pointer-events: none; }
     .ttc-panel { position: absolute; inset: 0; z-index: 2147483647; visibility: visible; pointer-events: auto; display: flex; flex-direction: column; box-sizing: border-box; min-height: 0; max-width: none; max-height: none; margin: 0; padding: 0; border: 0; color: var(--color-text-base, #efeff1); background: var(--color-background-base, #18181b); font-size: 13px; }
-    .ttc-panel [hidden], .ttc-panel[hidden] { display: none !important; }
+    .ttc-panel [hidden]:not([hidden="until-found" i]), .ttc-panel[hidden] { display: none !important; }
     .ttc-toolbar { flex: 0 0 auto; padding: 10px; border-bottom: 1px solid var(--color-border-base, #ffffff22); }
     .ttc-options { display: flex; align-items: center; gap: 6px; flex-wrap: nowrap; font-size: 12px; }
     .ttc-message-search { display: block; margin-top: 8px; }
@@ -1861,38 +1925,38 @@
     .ttc-list, .ttc-target-list, .ttc-managing > .ttc-toolbar { --ttc-scrollbar-thumb: rgba(255, 255, 255, 0.45); --ttc-scrollbar-track: transparent; scrollbar-color: var(--ttc-scrollbar-thumb) var(--ttc-scrollbar-track); scrollbar-width: auto; overscroll-behavior: contain; }
     @media (prefers-contrast: more) {
       .ttc-list, .ttc-target-list, .ttc-managing > .ttc-toolbar { --ttc-scrollbar-thumb: #ffffff; --ttc-scrollbar-track: #000000; }
-      .ttc-toggle:focus-visible, .ttc-panel button:focus-visible, .ttc-panel input:focus-visible, .ttc-replies-summary:focus-visible { outline: 2px solid currentColor; }
+      .ttc-toggle:focus-visible, .ttc-panel button:focus-visible, .ttc-panel input:focus-visible, .ttc-replies-toggle:focus-visible { outline: 2px solid currentColor; }
     }
     .ttc-list { flex: 1; min-height: 0; overflow: auto; overflow-anchor: none; padding: 6px 0; }
     .ttc-message { padding: 5px 10px; overflow-wrap: anywhere; line-height: 1.6; content-visibility: auto; contain-intrinsic-size: auto none auto 30px; }
     .ttc-message.ttc-has-reply { contain-intrinsic-size: auto none auto 52px; }
-    .ttc-message.ttc-has-replies { padding-bottom: 2px; }
+    .ttc-thread, .ttc-reply-group { padding: 5px 10px; content-visibility: auto; contain-intrinsic-size: auto none auto 30px; }
+    .ttc-thread:hover { background: var(--color-background-button-text-hover, #ffffff11); }
+    .ttc-thread-head { overflow-wrap: anywhere; line-height: 1.6; }
+    .ttc-thread-head > .ttc-message { display: inline; padding: 0; content-visibility: visible; contain-intrinsic-size: auto; }
+    .ttc-thread-head > .ttc-message:hover { background: transparent; }
+    .ttc-thread-head > .ttc-message > :last-child:not(.ttc-reply) { display: inline; }
     .ttc-reply { display: flex; align-items: baseline; gap: 4px; margin-bottom: 2px; padding-left: 6px; border-left: 2px solid var(--color-border-base, #ffffff33); color: var(--color-text-alt-2, #adadb8); font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; }
     .ttc-reply::before { content: '↩'; content: '↩' / ''; flex: 0 0 auto; opacity: 0.85; }
     .ttc-reply-text { flex: 1; min-inline-size: 0; }
     .ttc-reply-author { font-weight: 600; }
     .ttc-reply-deleted { font-style: italic; }
-    .ttc-reply-group { padding: 5px 10px 0; }
-    .ttc-reply-group > .ttc-reply { margin-bottom: 3px; }
-    .ttc-replies { margin: 0 10px 6px 22px; padding-left: 8px; border-left: 2px solid var(--color-border-base, #ffffff33); }
-    .ttc-reply-group > .ttc-replies { margin: 0 0 6px 12px; }
-    .ttc-replies-summary { display: inline-flex; align-items: center; gap: 4px; padding: 2px 4px; border-radius: 4px; list-style: none; color: var(--color-text-link, #bf94ff); font-size: 12px; font-weight: 600; cursor: pointer; user-select: none; }
-    .ttc-replies-summary::-webkit-details-marker { display: none; }
-    .ttc-replies-summary:hover { background: var(--color-background-button-text-hover, #ffffff11); }
-    .ttc-replies-summary:focus-visible { outline: 2px solid #9147ff; outline-offset: 2px; }
-    .ttc-replies-summary::before { content: '▸'; content: '▸' / ''; display: inline-block; flex-shrink: 0; font-size: 11px; line-height: 1; }
-    .ttc-replies[open] > .ttc-replies-summary::before { transform: rotate(90deg); }
-    .ttc-replies::details-content { interpolate-size: allow-keywords; overflow: clip; contain: layout; }
-    .ttc-replies:not([open])::details-content { block-size: 0; }
+    .ttc-orphan-head { padding-left: 6px; border-left: 2px solid var(--color-border-base, #ffffff33); color: var(--color-text-alt-2, #adadb8); font-size: 12px; line-height: 1.4; }
+    .ttc-orphan-head > .ttc-reply { display: inline; margin: 0; padding: 0; border: 0; }
+    .ttc-orphan-head > .ttc-reply::before { margin-right: 4px; }
+    .ttc-replies-toggle { display: inline-flex; align-items: center; gap: 3px; margin-left: 6px; padding: 1px 5px; border: 0; border-radius: 4px; color: var(--color-text-link, #bf94ff); background: transparent; font: inherit; font-size: 12px; font-weight: 600; line-height: 1.4; white-space: nowrap; vertical-align: baseline; cursor: pointer; user-select: none; }
+    .ttc-replies-toggle:hover { background: var(--color-background-button-text-hover, #ffffff18); }
+    .ttc-replies-toggle:focus-visible { outline: 2px solid #9147ff; outline-offset: 1px; }
+    .ttc-replies-toggle::before { content: '▸'; content: '▸' / ''; display: inline-block; flex-shrink: 0; font-size: 11px; line-height: 1; }
+    .ttc-replies-toggle[aria-expanded="true"]::before { transform: rotate(90deg); }
     @media (prefers-reduced-motion: no-preference) {
-      .ttc-replies-summary::before { transition: transform 0.15s ease; }
-      .ttc-replies::details-content { transition: block-size 0.2s ease, content-visibility 0.2s ease; transition-behavior: allow-discrete; }
+      .ttc-replies-toggle::before { transition: transform 0.15s ease; }
     }
-    .ttc-replies-list { margin-top: 2px; }
+    .ttc-replies-list { margin: 4px 0 2px 12px; padding-left: 8px; border-left: 2px solid var(--color-border-base, #ffffff33); }
     .ttc-replies-list > .ttc-message { padding: 3px 6px; }
     .ttc-replies-list > .ttc-message.ttc-has-reply { contain-intrinsic-size: auto none auto 30px; }
     .ttc-replies-list > .ttc-message > .ttc-reply { display: none; }
-    .ttc-message[data-date]::before, .ttc-reply-group[data-date]::before { content: attr(data-date); display: block; margin: 2px 0 6px; padding: 2px 0 4px; border-bottom: 1px solid var(--color-border-base, #ffffff22); color: var(--color-text-alt-2, #adadb8); font-size: 11px; font-weight: 600; text-align: center; letter-spacing: 0.04em; }
+    .ttc-message[data-date]::before, .ttc-thread[data-date]::before, .ttc-reply-group[data-date]::before { content: attr(data-date); display: block; margin: 2px 0 6px; padding: 2px 0 4px; border-bottom: 1px solid var(--color-border-base, #ffffff22); color: var(--color-text-alt-2, #adadb8); font-size: 11px; font-weight: 600; text-align: center; letter-spacing: 0.04em; }
     .ttc-message:hover { background: var(--color-background-button-text-hover, #ffffff11); }
     .ttc-time { margin-right: 6px; color: var(--color-text-alt-2, #adadb8); font-size: 10px; }
     .ttc-message > img { width: 18px; height: 18px; margin-right: 3px; vertical-align: middle; }
