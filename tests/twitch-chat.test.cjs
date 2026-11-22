@@ -944,6 +944,7 @@ test('Twitch accessibility, visibilitychange merge, and restoreHistory 50ms sche
     ['Broadcaster', 'ttc-role-broadcaster'],
     ['Moderator', 'ttc-role-moderators'],
     ['VIP', 'ttc-role-vip'],
+    ['回覆篩選目標', 'ttc-role-replies'],
     ['新增帳號', 'ttc-input-users'],
     ['搜尋帳號', 'ttc-input-search-users'],
     ['搜尋聊天紀錄', 'ttc-input-search-messages'],
@@ -1361,4 +1362,436 @@ test('Twitch VOD chat: isolate per-VOD archive scope from live/other VODs, detec
   assert.ok(state.list.children[1].querySelector('img.chat-image'))
   vodEnv.api.unmount()
   assert.equal(vodHeader.classList.contains('ttc-vod-header'), false)
+})
+
+test('Twitch replies: preserve reply-target quote in DOM/fiber, handle edits, search, archive restore, nested strip, and deleted parent', async () => {
+  const database = fakeIndexedDB()
+  const seed = boot({ database })
+  const history = seed.api.getHistory('sample_channel')
+  await history.restorePromise
+
+  const attachReplyUi = (line, parentDisplay, parentText, { container = true } = {}) => {
+    const host = container ? Object.assign(new seed.Element(), { className: 'chat-line__message-container' }) : line
+    if (container) line.insertBefore(host, line.firstChild)
+    const p = host.appendChild(new seed.Element('p'))
+    p.setAttribute('title', parentText)
+    p.appendChild(seed.document.createTextNode('回覆 '))
+    const authorSpan = p.appendChild(new seed.Element('span'))
+    authorSpan.setAttribute('dir', 'auto')
+    authorSpan.textContent = `@${parentDisplay}`
+    p.appendChild(seed.document.createTextNode('：'))
+    const textSpan = p.appendChild(new seed.Element('span'))
+    textSpan.setAttribute('dir', 'auto')
+    textSpan.textContent = parentText
+    return p
+  }
+
+  // 1. Filtered Moderator replying to an ordinary viewer with React fiber + DOM <p>
+  const reply1 = seed.message('mod_a', '完全同意', 'Moderator', 'reply-1')
+  attachReplyUi(reply1.line, '來希', '身體要健康唷')
+  reply1.line.__reactFiber$1 = {
+    memoizedProps: {
+      message: {
+        id: 'reply-1',
+        user: { userLogin: 'mod_a', userDisplayName: '管理員A' },
+        reply: {
+          parentMsgId: 'ord-parent-1',
+          parentUserLogin: 'raiki_raibao',
+          parentDisplayName: '來希',
+          parentMessageBody: '身體要健康唷',
+          parentDeleted: false,
+          threadParentUserLogin: 'raiki_raibao',
+        },
+      },
+    },
+  }
+  assert.equal(seed.api.captureLine(reply1.line, history), true)
+
+  // 2. Nested reply prefers DOM cleaned text over raw IRC @mention prefix
+  const reply2 = seed.message('mod_a', '真的', 'Moderator', 'reply-2')
+  attachReplyUi(reply2.line, '小王', '二打五')
+  reply2.line.__reactFiber$1 = {
+    memoizedProps: {
+      message: {
+        id: 'reply-2',
+        user: { userLogin: 'mod_a', userDisplayName: '管理員A' },
+        reply: {
+          parentMsgId: 'nested-1',
+          parentUserLogin: 'wang_user',
+          parentDisplayName: '小王',
+          parentMessageBody: '@thread_root 二打五',
+          parentDeleted: false,
+        },
+      },
+    },
+  }
+  assert.equal(seed.api.captureLine(reply2.line, history), true)
+
+  // 3. Deleted parent message renders deleted notice
+  const reply3 = seed.message('mod_a', '剛剛說什麼', 'Moderator', 'reply-3')
+  reply3.line.__reactFiber$1 = {
+    memoizedProps: {
+      message: {
+        id: 'reply-3',
+        user: { userLogin: 'mod_a', userDisplayName: '管理員A' },
+        reply: {
+          parentMsgId: 'del-1',
+          parentUserLogin: 'gone_user',
+          parentDisplayName: '消失的人',
+          parentMessageBody: '',
+          parentDeleted: true,
+        },
+      },
+    },
+  }
+  assert.equal(seed.api.captureLine(reply3.line, history), true)
+
+  // 4. Pure DOM reply without fiber resolves known display name -> login
+  const knownSpeaker = seed.message('alice_tw', '你好呀', '', 'ord-alice')
+  knownSpeaker.line.querySelector('[data-a-target="chat-message-username"]').textContent = '愛麗絲'
+  assert.equal(seed.api.captureLine(knownSpeaker.line, history), false)
+
+  const reply4 = seed.message('mod_a', '安安', 'Moderator', 'reply-4')
+  const p4 = new seed.Element('p')
+  p4.textContent = 'Replying to @愛麗絲: 你好呀'
+  reply4.line.insertBefore(p4, reply4.line.firstChild)
+  assert.equal(seed.api.captureLine(reply4.line, history), true)
+
+  // Verify DOM presentation & edit preservation
+  const rec1 = history.ids.get('reply-1')
+  assert.equal(rec1.view.classList.contains('ttc-has-reply'), true)
+  const quote1 = rec1.view.querySelector('.ttc-reply')
+  assert.ok(quote1)
+  assert.equal(quote1.querySelector('.ttc-reply-author').textContent, '@來希 (raiki_raibao)')
+  assert.equal(quote1.querySelector('.ttc-reply-body').textContent, '身體要健康唷')
+  assert.equal(rec1.view.children.at(-1).textContent, '完全同意')
+
+  const originalTime = [...rec1.view.children].find(c => c.tagName === 'time').textContent
+  reply1.body.innerHTML = '已編輯回覆'
+  reply1.body.textContent = '已編輯回覆'
+  assert.equal(seed.api.captureLine(reply1.line, history), true)
+  const editedRec1 = history.ids.get('reply-1')
+  assert.equal([...editedRec1.view.children].find(c => c.tagName === 'time').textContent, originalTime)
+  assert.equal(editedRec1.view.children.at(-1).textContent, '已編輯回覆')
+  assert.equal(editedRec1.view.querySelector('.ttc-reply-body').textContent, '身體要健康唷')
+
+  assert.equal(history.ids.get('reply-2').view.querySelector('.ttc-reply-body').textContent, '二打五')
+  const delBody = history.ids.get('reply-3').view.querySelector('.ttc-reply-body')
+  assert.equal(delBody.textContent, '訊息已刪除')
+  assert.equal(delBody.classList.contains('ttc-reply-deleted'), true)
+  assert.equal(history.ids.get('reply-4').view.querySelector('.ttc-reply-author').textContent, '@愛麗絲 (alice_tw)')
+
+  await seed.api.flushHistory(history)
+
+  // Restore in fresh environment and verify search & rendered UI
+  const fresh = boot({ database })
+  const stream = fresh.document.body.appendChild(new fresh.Element('div'))
+  stream.className = 'stream-chat'
+  const header = stream.appendChild(new fresh.Element('div'))
+  header.className = 'stream-chat-header'
+  const host = stream.appendChild(new fresh.Element('div'))
+  const scroller = host.appendChild(new fresh.Element('div'))
+  scroller.setAttribute('data-a-target', 'chat-scroller')
+
+  fresh.api.refresh()
+  const state = fresh.api.mounted
+  await state.history.restorePromise
+  fresh.api.setEnabled(state, true)
+  assert.equal(state.count.textContent, '4 則')
+
+  const restoredRow1 = state.history.ids.get('reply-1').view
+  assert.equal(restoredRow1.classList.contains('ttc-has-reply'), true)
+  assert.equal(restoredRow1.querySelector('.ttc-reply-author').textContent, '@來希 (raiki_raibao)')
+  assert.equal(restoredRow1.querySelector('.ttc-reply-body').textContent, '身體要健康唷')
+
+  for (const query of ['raiki_raibao', '來希', '身體要健康']) {
+    state.messageSearch.value = query
+    state.messageSearch.listeners.get('input')()
+    assert.equal(state.count.textContent, '1 則符合', `search failed for ${query}`)
+  }
+  fresh.api.unmount()
+})
+
+test('Twitch replies: keep filtered target replies even when replying to excluded users, while blocking excluded repliers', async () => {
+  const database = fakeIndexedDB()
+  const env = boot({ database })
+  const history = env.api.getHistory('sample_channel')
+  await history.restorePromise
+  history.settings.excludedUsers = ['bad_user']
+  history.settings.replies = false
+
+  // Filtered Mod replies to excluded bad_user -> MUST still be kept even when replies=false
+  const modRepliesBad = env.message('mod_a', '請不要洗頻', 'Moderator', 'mod-to-bad')
+  modRepliesBad.line.__reactFiber$1 = {
+    memoizedProps: {
+      message: {
+        id: 'mod-to-bad',
+        user: { userLogin: 'mod_a', userDisplayName: '管理員' },
+        reply: {
+          parentMsgId: 'bad-msg-1',
+          parentUserLogin: 'bad_user',
+          parentDisplayName: '壞人',
+          parentMessageBody: '洗頻內容',
+          parentDeleted: false,
+        },
+      },
+    },
+  }
+  assert.equal(env.api.captureLine(modRepliesBad.line, history), true)
+
+  // Excluded user replies to Mod even when replies=true -> MUST NOT be captured
+  history.settings.replies = true
+  const badRepliesMod = env.message('bad_user', '我才沒有', '', 'bad-to-mod')
+  badRepliesMod.line.__reactFiber$1 = {
+    memoizedProps: {
+      message: {
+        id: 'bad-to-mod',
+        user: { userLogin: 'bad_user', userDisplayName: '壞人' },
+        reply: {
+          parentMsgId: 'mod-to-bad',
+          parentUserLogin: 'mod_a',
+          parentDisplayName: '管理員',
+          parentMessageBody: '請不要洗頻',
+          parentDeleted: false,
+        },
+      },
+    },
+  }
+  assert.equal(env.api.captureLine(badRepliesMod.line, history), false)
+
+  const state = { history, list: new env.Element(), empty: {}, count: {}, latest: {} }
+  history.settings.replies = false
+  env.api.renderMessages(state)
+  assert.equal(state.count.textContent, '1 則')
+  assert.equal(state.list.children[0].querySelector('.ttc-reply-author').textContent, '@壞人 (bad_user)')
+  assert.equal(state.list.children[0].querySelector('.ttc-reply-body').textContent, '洗頻內容')
+
+  await env.api.flushHistory(history)
+  const fresh = boot({ database })
+  const restored = fresh.api.getHistory('sample_channel')
+  await restored.restorePromise
+  assert.equal(restored.messages.length, 1)
+  assert.equal(restored.ids.get('mod-to-bad').reply.parentUser, 'bad_user')
+})
+
+test('Twitch replies: capture viewer replies to active targets, toggle globally, respect roles/exclusions, and ignore mentions or icons', () => {
+  const env = boot()
+  const stream = env.document.body.appendChild(new env.Element('div'))
+  stream.className = 'stream-chat'
+  const header = stream.appendChild(new env.Element('div'))
+  header.className = 'stream-chat-header'
+  const host = stream.appendChild(new env.Element('div'))
+  const scroller = host.appendChild(new env.Element('div'))
+  scroller.setAttribute('data-a-target', 'chat-scroller')
+
+  env.api.refresh()
+  const state = env.api.mounted
+  const history = state.history
+  history.settings.users = ['target_user']
+  history.settings.excludedUsers = ['excluded_mod']
+  env.api.saveSettings(history)
+  env.api.setEnabled(state, true)
+
+  const repliesCheckbox = state.panel.querySelector('[name="replies"]')
+  assert.equal(repliesCheckbox.checked, true)
+
+  // Seed Mod and VIP so knownRoles records them; excluded_mod is ignored for replies
+  const modLine = env.message('mod_a', '公告', 'Moderator', 'p-mod')
+  const vipLine = env.message('vip_a', '安安', 'VIP', 'p-vip')
+  const exModLine = env.message('excluded_mod', '略過', 'Moderator', 'p-exmod')
+  const ordLine = env.message('ordinary_parent', '一般發言', '', 'p-ord')
+  for (const m of [modLine, vipLine, exModLine, ordLine]) {
+    scroller.appendChild(m.line)
+    env.api.captureLine(m.line, history)
+  }
+
+  const withReplyFiber = (user, text, id, parent) => {
+    const msg = env.message(user, text, '', id)
+    msg.line.__reactFiber$1 = {
+      memoizedProps: {
+        message: {
+          id,
+          user: { userLogin: user, userDisplayName: user },
+          reply: parent,
+        },
+      },
+    }
+    scroller.appendChild(msg.line)
+    return msg
+  }
+
+  // Ordinary viewers replying to Broadcaster, Moderator, VIP, and included target_user -> captured
+  withReplyFiber('viewer_1', '給實況主', 'r-broadcaster', {
+    parentMsgId: 'p-broadcaster', parentUserLogin: 'sample_channel', parentDisplayName: '實況主', parentMessageBody: '開台', parentDeleted: false,
+  })
+  withReplyFiber('viewer_2', '給管理員', 'r-mod', {
+    parentMsgId: 'p-mod', parentUserLogin: 'mod_a', parentDisplayName: 'ModA', parentMessageBody: '公告', parentDeleted: false,
+  })
+  withReplyFiber('viewer_3', '給VIP', 'r-vip', {
+    parentMsgId: 'p-vip', parentUserLogin: 'vip_a', parentDisplayName: 'VIPA', parentMessageBody: '安安', parentDeleted: false,
+  })
+  withReplyFiber('viewer_4', '給指定用戶', 'r-target', {
+    parentMsgId: 'p-target', parentUserLogin: 'target_user', parentDisplayName: 'Target', parentMessageBody: '嗨', parentDeleted: false,
+  })
+
+  // Ordinary viewer replying to excluded_mod -> NOT captured
+  withReplyFiber('viewer_5', '給排除Mod', 'r-exmod', {
+    parentMsgId: 'p-exmod', parentUserLogin: 'excluded_mod', parentDisplayName: 'ExMod', parentMessageBody: '略過', parentDeleted: false,
+  })
+  // Ordinary viewer replying to ordinary viewer even if thread root is mod_a -> NOT captured
+  withReplyFiber('viewer_6', '同串不同目標', 'r-ord', {
+    parentMsgId: 'p-ord', parentUserLogin: 'ordinary_parent', parentDisplayName: 'Ord', parentMessageBody: '一般發言', parentDeleted: false,
+    threadParentMsgId: 'p-mod', threadParentUserLogin: 'mod_a', threadParentDisplayName: 'ModA',
+  })
+
+  // Plain @mention inside body and hover reply button inside .chat-line__icons -> NOT captured
+  const mentionOnly = env.message('viewer_7', '@mod_a 你好', '', 'm-mention')
+  const icons = mentionOnly.line.appendChild(new env.Element('div'))
+  icons.className = 'chat-line__icons'
+  const iconWrap = icons.appendChild(new env.Element('div'))
+  iconWrap.className = 'chat-line__reply-icon'
+  const iconBtn = iconWrap.appendChild(new env.Element('button'))
+  iconBtn.setAttribute('aria-label', '按此回覆 @mod_a')
+  scroller.appendChild(mentionOnly.line)
+
+  env.api.captureTree(scroller, history)
+  env.api.renderMessages(state, true)
+
+  // 2 direct target lines (mod_a, vip_a) + 4 viewer replies = 6
+  assert.equal(state.count.textContent, '6 則')
+  assert.equal(history.ids.has('r-exmod'), false)
+  assert.equal(history.ids.has('r-ord'), false)
+  assert.equal(history.ids.has('m-mention'), false)
+
+  // Toggling VIP off hides both vip_a and viewer_3's reply to vip_a
+  const vipCheckbox = state.panel.querySelector('[name="vip"]')
+  vipCheckbox.checked = false
+  vipCheckbox.listeners.get('change')()
+  assert.equal(state.count.textContent, '4 則')
+  vipCheckbox.checked = true
+  vipCheckbox.listeners.get('change')()
+  assert.equal(state.count.textContent, '6 則')
+
+  // Unchecking replies checkbox hides viewer replies and stops capturing new ones, persists globally
+  repliesCheckbox.checked = false
+  repliesCheckbox.listeners.get('change')()
+  assert.equal(history.settings.replies, false)
+  assert.equal(state.count.textContent, '2 則')
+
+  const whileOff = withReplyFiber('viewer_8', '關閉後回覆', 'r-while-off', {
+    parentMsgId: 'p-mod', parentUserLogin: 'mod_a', parentDisplayName: 'ModA', parentMessageBody: '公告', parentDeleted: false,
+  })
+  assert.equal(env.api.captureLine(whileOff.line, history), false)
+  assert.equal(history.ids.has('r-while-off'), false)
+  whileOff.line.remove()
+
+  // Reloading persists replies=false across channels; legacy settings without replies default to true
+  const reloaded = boot({ saved: env.storage.get('twitch-live-chat-tweaks-settings-v1') })
+  assert.equal(reloaded.api.loadSettings('other_channel').replies, false)
+  const legacyEnv = boot({ saved: JSON.stringify({ sample_channel: { users: ['alice'] } }) })
+  assert.equal(legacyEnv.api.loadSettings('sample_channel').replies, true)
+
+  // Re-checking replies restores retained viewer replies and syncs via storage event
+  repliesCheckbox.checked = true
+  repliesCheckbox.listeners.get('change')()
+  assert.equal(state.count.textContent, '6 則')
+
+  env.storage.set('twitch-live-chat-tweaks-settings-v1', JSON.stringify({
+    moderators: true, broadcaster: true, vip: true, replies: false, users: ['target_user'], excludedUsers: ['excluded_mod'],
+  }))
+  env.listeners.get('storage')({ key: 'twitch-live-chat-tweaks-settings-v1' })
+  assert.equal(repliesCheckbox.checked, false)
+  assert.equal(state.count.textContent, '2 則')
+  env.api.unmount()
+})
+
+test('Twitch replies: backfill parent roles after restore, fallback to fiber ID safely, and stay inert under Trusted Types', async () => {
+  const database = fakeIndexedDB()
+  const seed = boot({ database })
+  const seedHistory = seed.api.getHistory('sample_channel')
+  await seedHistory.restorePromise
+  const vipParent = seed.message('vip_later', '舊 VIP 發言', 'VIP', 'vip-old-1')
+  vipParent.line.querySelector('[data-a-target="chat-message-username"]').textContent = '尊爵VIP'
+  seed.api.captureLine(vipParent.line, seedHistory)
+  await seed.api.flushHistory(seedHistory)
+
+  const env = boot({ database, trustedTypes: true })
+  const stream = env.document.body.appendChild(new env.Element('div'))
+  stream.className = 'stream-chat'
+  const header = stream.appendChild(new env.Element('div'))
+  header.className = 'stream-chat-header'
+  const host = stream.appendChild(new env.Element('div'))
+  const scroller = host.appendChild(new env.Element('div'))
+  scroller.setAttribute('data-a-target', 'chat-scroller')
+
+  const makeTtMessage = (user, text) => {
+    const line = new env.Element()
+    line.setAttribute('data-a-target', 'chat-line-message')
+    const authorContainer = line.appendChild(new env.Element())
+    authorContainer.className = 'chat-line__username-container'
+    const author = authorContainer.appendChild(new env.Element('span'))
+    author.setAttribute('data-a-target', 'chat-message-username')
+    author.setAttribute('data-a-user', user)
+    author.textContent = user
+    const body = line.appendChild(new env.Element('span'))
+    body.setAttribute('data-a-target', 'chat-line-message-body')
+    body.textContent = text
+    return { line, body, authorContainer }
+  }
+
+  // Live viewer reply sitting in DOM before IndexedDB finishes restoring VIP parent, with no DOM data-id
+  const viewerReply = makeTtMessage('viewer_start', '早安VIP')
+  viewerReply.line.__reactFiber$1 = {
+    memoizedProps: {
+      message: {
+        id: 'fiber-only-id',
+        user: { userLogin: 'viewer_start', userDisplayName: '觀眾' },
+        reply: {
+          parentMsgId: 'vip-old-1',
+          parentUserLogin: 'vip_later',
+          parentDisplayName: '<img src=x onerror=alert(1)>',
+          parentMessageBody: '<script>evil()</script> 舊 VIP 發言',
+          parentDeleted: false,
+        },
+      },
+    },
+  }
+  scroller.appendChild(viewerReply.line)
+
+  // Line whose fiber belongs to a different user must NOT steal that fiber's id/reply
+  const mismatch = makeTtMessage('viewer_mismatch', '一般訊息')
+  mismatch.line.__reactFiber$1 = {
+    memoizedProps: {
+      message: {
+        id: 'wrong-user-id',
+        user: { userLogin: 'someone_else' },
+        reply: {
+          parentMsgId: 'vip-old-1',
+          parentUserLogin: 'sample_channel',
+          parentDisplayName: '實況主',
+          parentMessageBody: 'hijack',
+        },
+      },
+    },
+  }
+  scroller.appendChild(mismatch.line)
+
+  env.api.refresh()
+  const state = env.api.mounted
+  assert.equal(state.history.ids.has('fiber-only-id'), false, 'cannot match VIP before archive restore')
+  assert.equal(env.api.readMessage(mismatch.line, 'sample_channel', state.history).id, '')
+  assert.equal(env.api.readMessage(mismatch.line, 'sample_channel', state.history).reply, null)
+
+  await state.history.restorePromise
+  env.api.setEnabled(state, true)
+
+  assert.equal(state.count.textContent, '2 則')
+  const restoredReply = state.history.ids.get('fiber-only-id')
+  assert.ok(restoredReply)
+  const quote = restoredReply.view.querySelector('.ttc-reply')
+  assert.equal(quote.querySelector('img'), null)
+  assert.equal(quote.querySelector('script'), null)
+  assert.equal(quote.querySelector('.ttc-reply-author').textContent, '@<img src=x onerror=alert(1)> (vip_later)')
+  assert.equal(quote.querySelector('.ttc-reply-body').textContent, '<script>evil()</script> 舊 VIP 發言')
+  env.api.unmount()
 })

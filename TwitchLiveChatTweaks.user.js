@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name        Twitch Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.8.1
+// @version     0.9.0
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
-// @description 依頻道主、管理員、VIP 與全域帳號包含／排除名單篩選 Twitch 直播與 VOD 聊天，保留最近 1000 則／7 天紀錄並支援跨日分隔、搜尋與自動跟隨。
+// @description 依頻道主、管理員、VIP、回覆篩選目標與全域帳號包含／排除名單篩選 Twitch 直播與 VOD 聊天，保留回覆目標引言與最近 1000 則／7 天紀錄，支援跨日分隔、搜尋與自動跟隨。
 // @author      Derek
 // @match       *://www.twitch.tv/*
 // @run-at      document-idle
@@ -21,6 +21,7 @@
   const STORAGE_KEY = 'twitch-live-chat-tweaks-settings-v1'
   const MAX_MESSAGES = 1000
   const MAX_CHANNELS = 5
+  const MAX_DISPLAY_NAMES = 500
   const RETENTION_MS = 7 * 24 * 60 * 60 * 1000
   const ARCHIVE_DB = 'twitch-live-chat-tweaks-history-v1'
   const pageKey = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`
@@ -37,7 +38,7 @@
   const RESERVED_PATHS = new Set(['directory', 'downloads', 'settings', 'subscriptions', 'wallet', 'inventory', 'videos', 'popout', 'moderator', 'search', 'p', 'jobs', 'turbo', 'prime'])
   const histories = new Map()
   const viewDates = new WeakMap()
-  const defaultSettings = () => ({ moderators: true, broadcaster: true, vip: true, users: [], excludedUsers: [] })
+  const defaultSettings = () => ({ moderators: true, broadcaster: true, vip: true, replies: true, users: [], excludedUsers: [] })
   let globalSettings = defaultSettings()
   let mounted = null
   let refreshTimer = 0
@@ -64,6 +65,10 @@
   }
   const element = (tag, attributes, children) => buildElement(tag, attributes, children, false)
   const svgElement = (tag, attributes, children) => buildElement(tag, attributes, children, true)
+  const normalizeLogin = value => {
+    const name = String(value || '').trim().toLowerCase().replace(/^@/, '')
+    return /^[a-z0-9_]{1,25}$/.test(name) ? name : ''
+  }
   const normalizeUsers = (value) => [...new Set(String(value || '')
     .toLowerCase().split(/[\s,，;；]+/).map(name => name.replace(/^@/, ''))
     .filter(name => /^[a-z0-9_]{1,25}$/.test(name)))]
@@ -110,6 +115,7 @@
     moderators: settings.moderators !== false,
     broadcaster: settings.broadcaster !== false,
     vip: settings.vip !== false,
+    replies: settings.replies !== false,
     users: [...(settings.users || [])],
     excludedUsers: [...(settings.excludedUsers || [])],
   })
@@ -117,13 +123,14 @@
   const loadSettings = (channel = '') => {
     try {
       const stored = readSavedSettings()
-      const flat = 'moderators' in stored || 'broadcaster' in stored || 'vip' in stored ||
+      const flat = 'moderators' in stored || 'broadcaster' in stored || 'vip' in stored || 'replies' in stored ||
         Array.isArray(stored.users) || Array.isArray(stored.excludedUsers)
       if (flat) {
         globalSettings = {
           moderators: stored.moderators !== false,
           broadcaster: stored.broadcaster !== false,
           vip: stored.vip !== false,
+          replies: stored.replies !== false,
           users: normalizeUsers(Array.isArray(stored.users) ? stored.users.join(' ') : ''),
           excludedUsers: normalizeUsers(Array.isArray(stored.excludedUsers) ? stored.excludedUsers.join(' ') : ''),
         }
@@ -137,6 +144,7 @@
         moderators: legacyGlobal?.moderators ?? legacyChannel?.moderators ?? !entries.some(entry => entry.moderators === false),
         broadcaster: legacyGlobal?.broadcaster ?? legacyChannel?.broadcaster ?? !entries.some(entry => entry.broadcaster === false),
         vip: legacyGlobal?.vip ?? legacyChannel?.vip ?? !entries.some(entry => entry.vip === false),
+        replies: legacyGlobal?.replies ?? legacyChannel?.replies ?? !entries.some(entry => entry.replies === false),
         users: normalizeUsers(entries.flatMap(entry => Array.isArray(entry.users) ? entry.users : []).join(' ')),
         excludedUsers: normalizeUsers(entries.flatMap(entry => Array.isArray(entry.excludedUsers) ? entry.excludedUsers : []).join(' ')),
       }
@@ -151,6 +159,7 @@
       moderators: history.settings.moderators !== false,
       broadcaster: history.settings.broadcaster !== false,
       vip: history.settings.vip !== false,
+      replies: history.settings.replies !== false,
       users: normalizeUsers((history.settings.users || []).join(' ')),
       excludedUsers: normalizeUsers((history.settings.excludedUsers || []).join(' ')),
     }
@@ -286,10 +295,60 @@
     }
     return node
   }
+  const viewTime = view => (view ? [...view.children].find(child => child.tagName?.toLowerCase() === 'time') || null : null)
+  const sanitizeReply = reply => {
+    if (!reply || typeof reply !== 'object' || Array.isArray(reply)) return null
+    const parentId = typeof reply.parentId === 'string' ? reply.parentId.trim() : ''
+    const parentUser = normalizeLogin(reply.parentUser)
+    const parentDisplayName = typeof reply.parentDisplayName === 'string' ? reply.parentDisplayName.replace(/\s+/g, ' ').trim() : ''
+    const parentText = typeof reply.parentText === 'string' ? reply.parentText.replace(/\s+/g, ' ').trim() : ''
+    const parentDeleted = reply.parentDeleted === true
+    if (!parentUser && !parentDisplayName && !parentText && !parentDeleted) return null
+    return {
+      parentId,
+      parentUser,
+      parentDisplayName,
+      parentText,
+      parentDeleted,
+      parentModerator: reply.parentModerator === true,
+      parentBroadcaster: reply.parentBroadcaster === true,
+      parentVip: reply.parentVip === true,
+    }
+  }
+  const stripLoginSuffix = (name, user) => {
+    const cleaned = String(name || '').replace(/\s+/g, ' ').trim()
+    if (!cleaned || !user) return cleaned
+    const suffix = ` (${user})`
+    if (cleaned.toLowerCase().endsWith(suffix)) return cleaned.slice(0, -suffix.length).trim()
+    return cleaned
+  }
+  const rememberUser = (history, user, displayName, { moderator = false, broadcaster = false, vip = false } = {}) => {
+    const login = normalizeLogin(user)
+    if (!history || !login) return
+    if (history.knownRoles) {
+      if (moderator || broadcaster || vip) {
+        history.knownRoles.set(login, { moderator: Boolean(moderator), broadcaster: Boolean(broadcaster), vip: Boolean(vip) })
+      } else {
+        history.knownRoles.delete(login)
+      }
+    }
+    if (history.displayNames) {
+      const cleanName = stripLoginSuffix(displayName, login)
+      const lower = cleanName.toLowerCase()
+      if (cleanName && lower !== login) {
+        history.displayNames.delete(lower)
+        history.displayNames.set(lower, login)
+        if (history.displayNames.size > MAX_DISPLAY_NAMES) {
+          history.displayNames.delete(history.displayNames.keys().next().value)
+        }
+      }
+    }
+  }
   const archiveRecord = (history, record) => ({
     scope: history.scope, storageId: record.storageId, id: record.id, user: record.user,
     createdAt: record.createdAt, order: record.order, expiresAt: record.createdAt + RETENTION_MS,
     moderator: record.moderator, broadcaster: record.broadcaster, vip: record.vip,
+    reply: sanitizeReply(record.reply),
     fingerprint: record.fingerprint, tree: archiveTree(record.view),
   })
   const validArchiveRecord = (saved, scope) => saved && saved.scope === scope &&
@@ -323,20 +382,47 @@
     if (lower === user || lower.includes(`(${user})`)) return name
     return `${name} (${user})`
   }
+  const makeReplyView = reply => {
+    const quote = element('div', { class: 'ttc-reply' })
+    const text = element('span', { class: 'ttc-reply-text' })
+    const label = formatAuthorLabel(reply.parentDisplayName, reply.parentUser)
+    const bodyText = reply.parentText || (reply.parentDeleted ? '訊息已刪除' : '')
+    if (label) {
+      text.appendChild(document.createTextNode('回覆 '))
+      text.appendChild(element('span', { class: 'ttc-reply-author', dir: 'auto' }, [`@${label}`]))
+      if (bodyText) text.appendChild(document.createTextNode('：'))
+    }
+    if (bodyText) {
+      text.appendChild(element('span', {
+        class: reply.parentDeleted ? 'ttc-reply-body ttc-reply-deleted' : 'ttc-reply-body',
+        dir: 'auto',
+      }, [bodyText]))
+    }
+    quote.appendChild(text)
+    return quote
+  }
   const restoreRecord = saved => {
     if (saved.tree?.tag !== 'div') return null
     const view = restoreTree(saved.tree)
-    if (!view || view.firstChild?.tagName?.toLowerCase() !== 'time') return null
-    view.className = 'ttc-message'
-    const time = view.firstChild
+    const time = viewTime(view)
+    if (!view || !time) return null
+    const reply = sanitizeReply(saved.reply)
+    view.className = reply ? 'ttc-message ttc-has-reply' : 'ttc-message'
+    if (reply && !$('.ttc-reply', view)) view.insertBefore(makeReplyView(reply), view.firstChild)
     if (!time.getAttribute('datetime')) time.setAttribute('datetime', new Date(saved.createdAt).toISOString())
     if (!time.getAttribute('title')) time.setAttribute('title', `${formatDateKey(saved.createdAt)} ${time.textContent}`)
     viewDates.set(view, formatDateKey(saved.createdAt))
     const authorNode = [...view.children].find(child => child.tagName?.toLowerCase() === 'strong')
     if (authorNode) authorNode.textContent = formatAuthorLabel(authorNode.textContent, saved.user)
+    if (reply) {
+      const replyLabel = formatAuthorLabel(reply.parentDisplayName, reply.parentUser)
+      const replyAuthor = $('.ttc-reply-author', view)
+      if (replyAuthor && replyLabel) replyAuthor.textContent = `@${replyLabel}`
+    }
     return { id: saved.id, storageId: saved.storageId, user: saved.user, createdAt: saved.createdAt,
       order: Number.isSafeInteger(saved.order) ? saved.order : 0,
       moderator: saved.moderator === true, broadcaster: saved.broadcaster === true, vip: saved.vip === true,
+      reply,
       fingerprint: saved.fingerprint, view, retained: true }
   }
   const updateArchiveStatus = history => {
@@ -436,9 +522,13 @@
         if (current) {
           current.createdAt = Math.min(current.createdAt, item.createdAt)
           current.order = Number.isSafeInteger(item.order) ? item.order : current.order
-          current.view.firstChild.textContent = restoreTree(item.tree)?.firstChild?.textContent || current.view.firstChild.textContent
-          current.view.firstChild.setAttribute('datetime', new Date(current.createdAt).toISOString())
-          current.view.firstChild.setAttribute('title', `${formatDateKey(current.createdAt)} ${current.view.firstChild.textContent}`)
+          const currentTime = viewTime(current.view)
+          const savedTime = viewTime(restoreTree(item.tree))
+          if (currentTime) {
+            currentTime.textContent = savedTime?.textContent || currentTime.textContent
+            currentTime.setAttribute('datetime', new Date(current.createdAt).toISOString())
+            currentTime.setAttribute('title', `${formatDateKey(current.createdAt)} ${currentTime.textContent}`)
+          }
           viewDates.set(current.view, formatDateKey(current.createdAt))
           current._searchText = ''
           saveRecord(history, current)
@@ -457,6 +547,42 @@
       }
       history.messages.unshift(...restored)
       history.messages.sort((a, b) => a.createdAt - b.createdAt || a.order - b.order)
+      const owner = history.channel.startsWith('vod:') ? getVodOwner() : history.channel
+      for (const record of history.messages) {
+        const authorNode = [...record.view.children].find(child => child.tagName?.toLowerCase() === 'strong')
+        rememberUser(history, record.user, authorNode?.textContent || '', record)
+      }
+      for (const record of history.messages) {
+        if (!record.reply) continue
+        const parentRecord = record.reply.parentId ? history.ids.get(record.reply.parentId) : null
+        const resolvedUser = record.reply.parentUser ||
+          parentRecord?.user ||
+          (record.reply.parentDisplayName ? history.displayNames?.get(record.reply.parentDisplayName.toLowerCase()) : '') ||
+          ''
+        const known = resolvedUser ? history.knownRoles?.get(resolvedUser) : null
+        const nextModerator = Boolean(record.reply.parentModerator || parentRecord?.moderator || known?.moderator)
+        const nextBroadcaster = Boolean(record.reply.parentBroadcaster || (owner && resolvedUser === owner) || parentRecord?.broadcaster || known?.broadcaster)
+        const nextVip = Boolean(record.reply.parentVip || parentRecord?.vip || known?.vip)
+        if (resolvedUser !== record.reply.parentUser ||
+          nextModerator !== record.reply.parentModerator ||
+          nextBroadcaster !== record.reply.parentBroadcaster ||
+          nextVip !== record.reply.parentVip) {
+          record.reply = sanitizeReply({
+            ...record.reply,
+            parentUser: resolvedUser,
+            parentModerator: nextModerator,
+            parentBroadcaster: nextBroadcaster,
+            parentVip: nextVip,
+          })
+          const replyAuthor = $('.ttc-reply-author', record.view)
+          const replyLabel = record.reply ? formatAuthorLabel(record.reply.parentDisplayName, record.reply.parentUser) : ''
+          if (replyAuthor && replyLabel) replyAuthor.textContent = `@${replyLabel}`
+          record._searchText = ''
+          history.dirty.add(record)
+          saveRecord(history, record)
+        }
+      }
+      if (mounted?.history === history && mounted.scroller) captureTree(mounted.scroller, history)
       trimHistory(history)
       history.archiveReady = true
       await flushHistory(history)
@@ -487,7 +613,8 @@
     if (!history) {
       history = {
         channel, settings: loadSettings(channel), messages: [], nodes: new WeakMap(),
-        scope: channel, ids: new Map(), saveQueue: new Map(), deleteQueue: new Set(),
+        scope: channel, ids: new Map(), knownRoles: new Map(), displayNames: new Map(),
+        saveQueue: new Map(), deleteQueue: new Set(),
         archiveReady: false, archiveError: false,
         enabled: false, follow: true, search: '', dirty: new Set(), removed: new Set(),
       }
@@ -506,7 +633,95 @@
     return history
   }
 
-  const readMessage = (line, channel) => {
+  const readFiberMessage = (line, expectedUser = '') => {
+    try {
+      const key = Object.keys(line).find(name => name.startsWith('__reactFiber') || name.startsWith('__reactInternalInstance'))
+      if (!key) return null
+      let current = line[key]
+      for (let step = 0; step < 20 && current; step++) {
+        const message = current.memoizedProps?.message || current.memoizedProps?.msg
+        if (message && typeof message === 'object') {
+          const fiberUser = String(message.user?.userLogin || message.user?.login || '').toLowerCase()
+          if (expectedUser && fiberUser && fiberUser !== expectedUser) {
+            current = current.return
+            continue
+          }
+          if (message.id || message.reply || fiberUser) return message
+        }
+        current = current.return
+      }
+    } catch (_) {}
+    return null
+  }
+
+  const readDomReply = (line, authorContainer, body) => {
+    const ignored = node => Boolean(
+      !node ||
+      authorContainer?.contains?.(node) ||
+      body?.contains?.(node) ||
+      node.closest?.('.chat-line__icons, .chat-line__reply-icon')
+    )
+    const explicit = $$('[data-a-target="chat-line-reply"], [data-test-selector="chat-reply-quote"], .chat-line__reply, .reply-line', line)
+      .find(node => !ignored(node))
+    const pCandidates = $$('p', line).filter(node => !ignored(node))
+    const candidates = explicit ? [explicit, ...pCandidates.filter(p => !explicit.contains?.(p))] : pCandidates
+    const dataNode = explicit || line
+    let parentId = (
+      dataNode.getAttribute?.('data-reply-parent-id') ||
+      dataNode.getAttribute?.('data-parent-msg-id') ||
+      line.getAttribute?.('data-reply-parent-id') ||
+      line.getAttribute?.('data-parent-msg-id') || ''
+    ).trim()
+    let parentUser = normalizeLogin(
+      dataNode.getAttribute?.('data-reply-parent-user') ||
+      dataNode.getAttribute?.('data-parent-user-login') ||
+      line.getAttribute?.('data-reply-parent-user') ||
+      line.getAttribute?.('data-parent-user-login') || ''
+    )
+    let parentDisplayName = (
+      dataNode.getAttribute?.('data-reply-parent-display-name') ||
+      line.getAttribute?.('data-reply-parent-display-name') || ''
+    ).replace(/\s+/g, ' ').trim()
+    let parentText = (
+      dataNode.getAttribute?.('data-reply-parent-text') ||
+      line.getAttribute?.('data-reply-parent-text') || ''
+    ).replace(/\s+/g, ' ').trim()
+
+    for (const candidate of candidates) {
+      const p = candidate.tagName?.toLowerCase() === 'p' ? candidate : $('p', candidate)
+      const textHost = p || candidate
+      const dirSpans = $$('span', textHost).filter(span => span.getAttribute('dir') === 'auto')
+      const authorSpan = dirSpans.find(span => span.textContent.trim().startsWith('@'))
+      const titleText = (textHost.getAttribute?.('title') || candidate.getAttribute?.('title') || '').replace(/\s+/g, ' ').trim()
+      const bodySpan = authorSpan ? dirSpans.find(span => span !== authorSpan) : null
+      const spanBodyText = bodySpan ? bodySpan.textContent.replace(/\s+/g, ' ').trim() : ''
+      const rawText = textHost.textContent.trim()
+      const match = rawText.match(/^(?:回覆|回复|Replying to|Reply to)\s*@([^\s:：]+)\s*[:：]\s*([\s\S]*)$/i) ||
+        rawText.match(/^@([^\s:：]+)\s*(?:への返信|に返信|님에게\s*답장)\s*[:：]\s*([\s\S]*)$/i)
+      const isReplyCandidate = Boolean(explicit || match || (authorSpan && (titleText || bodySpan)))
+      if (!isReplyCandidate) continue
+      if (!parentDisplayName) {
+        if (authorSpan) parentDisplayName = authorSpan.textContent.trim().slice(1).replace(/\s+/g, ' ').trim()
+        else if (match) parentDisplayName = match[1].trim()
+      }
+      if (!parentText) {
+        if (titleText) parentText = titleText
+        else if (spanBodyText) parentText = spanBodyText
+        else if (match) parentText = match[2].replace(/\s+/g, ' ').trim()
+      }
+      if (!parentId) {
+        parentId = (candidate.getAttribute?.('data-reply-parent-id') || candidate.getAttribute?.('data-parent-msg-id') || '').trim()
+      }
+      if (!parentUser) {
+        parentUser = normalizeLogin(candidate.getAttribute?.('data-reply-parent-user') || candidate.getAttribute?.('data-parent-user-login') || '')
+      }
+      if (parentId || parentUser || parentDisplayName || parentText) break
+    }
+    if (!parentId && !parentUser && !parentDisplayName && !parentText) return null
+    return { parentId, parentUser, parentDisplayName, parentText }
+  }
+
+  const readMessage = (line, channel, history = null) => {
     const author = $(USER_SELECTOR, line)
     // Use the author's badges only: quoted replies can contain another user's badges.
     const authorLink = author?.closest?.('.video-chat__message-author')
@@ -536,22 +751,71 @@
       (badge.getAttribute('src') || '').includes(VIP_BADGE) ||
       (badge.getAttribute('srcset') || '').includes(VIP_BADGE) ||
       /^(vip|vip\s*(?:徽章|バッジ))$/i.test((badge.getAttribute('alt') || '').trim()))
-    return { user, moderator, broadcaster, vip, author, body, badges,
-      id: line.getAttribute('data-id') || line.getAttribute('data-message-id') || line.getAttribute('data-a-id') || line.id || '' }
+    const fiberMsg = readFiberMessage(line, user)
+    const id = line.getAttribute('data-id') || line.getAttribute('data-message-id') || line.getAttribute('data-a-id') || line.id ||
+      (typeof fiberMsg?.id === 'string' ? fiberMsg.id : '')
+    const rawReply = fiberMsg?.reply && typeof fiberMsg.reply === 'object' ? fiberMsg.reply : null
+    const domReply = readDomReply(line, authorContainer, body)
+    let reply = null
+    if (rawReply || domReply) {
+      const parentId = String(rawReply?.parentMsgId || domReply?.parentId || '').trim()
+      const parentDisplayName = String(rawReply?.parentDisplayName || domReply?.parentDisplayName || '').replace(/\s+/g, ' ').trim()
+      const parentRecord = parentId ? history?.ids?.get(parentId) : null
+      const parentUser = normalizeLogin(rawReply?.parentUserLogin) ||
+        normalizeLogin(domReply?.parentUser) ||
+        parentRecord?.user ||
+        (parentDisplayName ? history?.displayNames?.get(parentDisplayName.toLowerCase()) : '') ||
+        normalizeLogin(parentDisplayName) ||
+        ''
+      const parentDeleted = Boolean(rawReply?.parentDeleted)
+      const parentText = domReply?.parentText ||
+        String(rawReply?.parentMessageBody || '').replace(/\s+/g, ' ').trim() ||
+        (parentDeleted ? '訊息已刪除' : '')
+      const known = parentUser ? history?.knownRoles?.get(parentUser) : null
+      const parentModerator = Boolean(parentRecord ? parentRecord.moderator : known?.moderator)
+      const parentBroadcaster = Boolean((Boolean(channel) && parentUser && parentUser === channel) ||
+        (parentRecord ? parentRecord.broadcaster : known?.broadcaster))
+      const parentVip = Boolean(parentRecord ? parentRecord.vip : known?.vip)
+      reply = sanitizeReply({
+        parentId,
+        parentUser,
+        parentDisplayName,
+        parentText,
+        parentDeleted,
+        parentModerator,
+        parentBroadcaster,
+        parentVip,
+      })
+    }
+    return { user, moderator, broadcaster, vip, reply, author, body, badges, id }
   }
 
-  const matchesFilter = (message, settings) =>
-    !(settings.excludedUsers || []).includes(message.user) && Boolean(
-      (settings.moderators && message.moderator) ||
-      (settings.broadcaster && message.broadcaster) ||
-      (settings.vip && message.vip) ||
-      settings.users.includes(message.user)
+  const matchesTarget = (target, settings) =>
+    Boolean(target?.user) &&
+    !(settings.excludedUsers || []).includes(target.user) && Boolean(
+      (settings.moderators && target.moderator) ||
+      (settings.broadcaster && target.broadcaster) ||
+      (settings.vip && target.vip) ||
+      (settings.users || []).includes(target.user)
     )
+
+  const matchesReplyTarget = (reply, settings) =>
+    settings.replies !== false && Boolean(reply?.parentUser) && matchesTarget({
+      user: reply.parentUser,
+      moderator: Boolean(reply.parentModerator),
+      broadcaster: Boolean(reply.parentBroadcaster),
+      vip: Boolean(reply.parentVip),
+    }, settings)
+
+  const matchesFilter = (message, settings) =>
+    !(settings.excludedUsers || []).includes(message.user) &&
+    (matchesTarget(message, settings) || matchesReplyTarget(message.reply, settings))
 
   const makeMessageView = (message, createdAt = Date.now()) => {
     // Copy presentation only. Never keep React-owned message nodes or inactive controls.
     const row = document.createElement('div')
-    row.className = 'ttc-message'
+    row.className = message.reply ? 'ttc-message ttc-has-reply' : 'ttc-message'
+    if (message.reply) row.appendChild(makeReplyView(message.reply))
     const time = document.createElement('time')
     time.className = 'ttc-time'
     const date = new Date(createdAt)
@@ -588,27 +852,35 @@
 
   const captureLine = (line, history) => {
     const owner = history.channel.startsWith('vod:') ? getVodOwner() : history.channel
-    const message = readMessage(line, owner)
+    const message = readMessage(line, owner, history)
     if (!message) return false
+    rememberUser(history, message.user, message.author.textContent, message)
     const previous = message.id ? history.ids.get(message.id) : history.nodes.get(line)
     // Only retain messages matching the active filter so unchecked roles and
     // excluded accounts cannot evict matching history from the 1000-message cap.
     if (!(previous?.retained && previous.user === message.user) && !matchesFilter(message, history.settings)) return false
-    const fingerprint = `${message.user}\n${message.moderator}\n${message.broadcaster}\n${message.vip}\n${message.author.textContent}\n${message.body.innerHTML}`
+    const replyKey = message.reply
+      ? `${message.reply.parentId}\n${message.reply.parentUser}\n${message.reply.parentDisplayName}\n${message.reply.parentText}\n${message.reply.parentDeleted}\n${message.reply.parentModerator}\n${message.reply.parentBroadcaster}\n${message.reply.parentVip}`
+      : ''
+    const fingerprint = `${message.user}\n${message.moderator}\n${message.broadcaster}\n${message.vip}\n${replyKey}\n${message.author.textContent}\n${message.body.innerHTML}`
     if (previous?.fingerprint === fingerprint) { history.nodes.set(line, previous); return false }
     const createdAt = previous && previous.user === message.user && previous.retained ? previous.createdAt : Date.now()
     const view = makeMessageView(message, createdAt)
     let record
     if (previous && previous.user === message.user && previous.retained) {
       // Reflect edits/deletion placeholders while the original line is still present.
-      view.firstChild.textContent = previous.view.firstChild.textContent
-      view.firstChild.setAttribute('datetime', new Date(createdAt).toISOString())
-      view.firstChild.setAttribute('title', `${formatDateKey(createdAt)} ${view.firstChild.textContent}`)
+      const prevTime = viewTime(previous.view)
+      const nextTime = viewTime(view)
+      if (prevTime && nextTime) {
+        nextTime.textContent = prevTime.textContent
+        nextTime.setAttribute('datetime', new Date(createdAt).toISOString())
+        nextTime.setAttribute('title', `${formatDateKey(createdAt)} ${nextTime.textContent}`)
+      }
       record = Object.assign(previous, { moderator: message.moderator,
-        broadcaster: message.broadcaster, vip: message.vip, _searchText: '', view, fingerprint })
+        broadcaster: message.broadcaster, vip: message.vip, reply: message.reply, _searchText: '', view, fingerprint })
     } else {
       record = { id: message.id, user: message.user, moderator: message.moderator,
-        broadcaster: message.broadcaster, vip: message.vip, _searchText: '', view, fingerprint, retained: true,
+        broadcaster: message.broadcaster, vip: message.vip, reply: message.reply, _searchText: '', view, fingerprint, retained: true,
         storageId: message.id || `${pageKey}-${++anonymousMessage}`,
         createdAt, order: ++messageOrder }
       history.messages.push(record)
@@ -700,6 +972,9 @@
     if (record._searchText) return record._searchText
     const text = normalizeSearch([
       record.user,
+      record.reply?.parentUser || '',
+      record.reply?.parentDisplayName || '',
+      record.reply?.parentText || '',
       ...[...record.view.childNodes]
         .filter(node => !node.matches?.('.ttc-time'))
         .map(node => node.textContent),
@@ -1159,6 +1434,10 @@
               element('input', { type: 'checkbox', id: 'ttc-role-vip', name: 'vip' }),
               element('label', { for: 'ttc-role-vip' }, ['VIP']),
             ]),
+            element('span', { class: 'ttc-role' }, [
+              element('input', { type: 'checkbox', id: 'ttc-role-replies', name: 'replies' }),
+              element('label', { for: 'ttc-role-replies' }, ['回覆篩選目標']),
+            ]),
           ]),
           element('div', { class: 'ttc-target-modes', role: 'group', 'aria-label': '帳號篩選方式' }, [
             element('button', { type: 'button', class: 'ttc-mode-include' }, ['＋ 包含']),
@@ -1224,10 +1503,12 @@
     const moderators = $('[name="moderators"]', panel)
     const broadcaster = $('[name="broadcaster"]', panel)
     const vip = $('[name="vip"]', panel)
+    const replies = $('[name="replies"]', panel)
     const users = $('[name="users"]', panel)
     moderators.checked = state.history.settings.moderators
     broadcaster.checked = state.history.settings.broadcaster
     vip.checked = state.history.settings.vip
+    replies.checked = state.history.settings.replies
     state.status = $('.ttc-target-status', panel)
     state.targetMode = 'include'
     state.updateSettings = (settings, message = '') => {
@@ -1239,8 +1520,8 @@
       if (state.history.enabled) renderMessages(state, true)
     }
     const applyRoles = () => state.updateSettings({ ...state.history.settings,
-      moderators: moderators.checked, broadcaster: broadcaster.checked, vip: vip.checked })
-    for (const input of [moderators, broadcaster, vip]) input.addEventListener('change', applyRoles)
+      moderators: moderators.checked, broadcaster: broadcaster.checked, vip: vip.checked, replies: replies.checked })
+    for (const input of [moderators, broadcaster, vip, replies]) input.addEventListener('change', applyRoles)
     $('.ttc-users', panel).addEventListener('submit', event => {
       event.preventDefault()
       const exclude = state.targetMode === 'exclude'
@@ -1387,6 +1668,8 @@
     $('[name="moderators"]', panel).checked = history.settings.moderators
     $('[name="broadcaster"]', panel).checked = history.settings.broadcaster
     $('[name="vip"]', panel).checked = history.settings.vip
+    const repliesInput = $('[name="replies"]', panel)
+    if (repliesInput) repliesInput.checked = history.settings.replies
     renderTargets(mounted)
     captureTree(mounted.scroller, history)
     if (history.enabled) renderMessages(mounted, true)
@@ -1416,9 +1699,11 @@
     .ttc-message-search { display: block; margin-top: 8px; }
     .ttc-message-search input[type="search"] { box-sizing: border-box; width: 100%; min-width: 0; height: 30px; padding: 5px 8px; border: 1px solid var(--color-border-base, #ffffff44); border-radius: 4px; color: inherit; background: var(--color-background-input, #ffffff11); font: inherit; }
     .ttc-managing .ttc-message-search { display: none; }
-    .ttc-roles { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; flex-shrink: 0; margin-bottom: 12px; }
+    .ttc-roles { display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap; flex-shrink: 0; margin-bottom: 12px; }
     .ttc-role { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+    .ttc-role label, .ttc-roles input { cursor: pointer; }
     .ttc-roles input { width: 13px; height: 13px; margin: 0; accent-color: #9147ff; }
+    .ttc-roles input:focus-visible { outline-offset: 2px; }
     .ttc-count { margin-left: auto; flex-shrink: 0; white-space: nowrap; color: var(--color-text-alt-2, #adadb8); }
     .ttc-users { display: flex; align-items: center; gap: 6px; }
     .ttc-users label { white-space: nowrap; }
@@ -1435,6 +1720,12 @@
     }
     .ttc-list { flex: 1; min-height: 0; overflow: auto; overflow-anchor: none; padding: 6px 0; }
     .ttc-message { padding: 5px 10px; overflow-wrap: anywhere; line-height: 1.6; content-visibility: auto; contain-intrinsic-size: auto none auto 30px; }
+    .ttc-message.ttc-has-reply { contain-intrinsic-size: auto none auto 52px; }
+    .ttc-reply { display: flex; align-items: baseline; gap: 4px; margin-bottom: 2px; padding-left: 6px; border-left: 2px solid var(--color-border-base, #ffffff33); color: var(--color-text-alt-2, #adadb8); font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; }
+    .ttc-reply::before { content: '↩'; content: '↩' / ''; flex: 0 0 auto; opacity: 0.85; }
+    .ttc-reply-text { flex: 1; min-inline-size: 0; }
+    .ttc-reply-author { font-weight: 600; }
+    .ttc-reply-deleted { font-style: italic; }
     .ttc-message[data-date]::before { content: attr(data-date); display: block; margin: 2px 0 6px; padding: 2px 0 4px; border-bottom: 1px solid var(--color-border-base, #ffffff22); color: var(--color-text-alt-2, #adadb8); font-size: 11px; font-weight: 600; text-align: center; letter-spacing: 0.04em; }
     .ttc-message:hover { background: var(--color-background-button-text-hover, #ffffff11); }
     .ttc-time { margin-right: 6px; color: var(--color-text-alt-2, #adadb8); font-size: 10px; }

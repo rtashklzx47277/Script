@@ -12,6 +12,7 @@
   .chat-host, [data-a-target="chat-scroller"] { height: 430px; }
   [data-a-target="chat-scroller"] { overflow: auto; }
   .chat-line__message { padding: 8px 10px; }
+  .fixture-reply { margin: 0 0 4px; color: #adadb8; font-size: 12px; }
   .chat-badge { width: 18px; vertical-align: middle; }
   .chat-image { width: 28px; vertical-align: middle; }
   .fixture-emote { padding: 0; border: 0; background: transparent; color: inherit; }
@@ -34,6 +35,10 @@
   <button id="add-vip">新增 VIP 訊息</button>
   <button id="add-user">新增指定帳號 alice 訊息</button>
   <button id="add-ordinary">新增一般用戶訊息</button>
+  <button id="mod-reply-ordinary">管理員回覆一般用戶</button>
+  <button id="mod-reply-excluded">管理員回覆排除用戶</button>
+  <button id="ordinary-reply-mod">一般用戶回覆管理員</button>
+  <button id="ordinary-reply-excluded">一般用戶回覆排除用戶</button>
   <button id="burst">批次新增 100 則管理員訊息</button>
   <button id="edit-last">修改最後一則訊息</button>
   <button id="prune">清空原聊天室 DOM</button>
@@ -50,17 +55,38 @@
   if (new URL(location.href).searchParams.has('overlay')) document.getElementById('fixture-overlay').hidden = false
   const scroller = () => document.querySelector('[data-a-target="chat-scroller"]')
   let serial = 0
-  function addMessage(user, role = '') {
+  function addMessage(user, role = '', reply = null) {
     const line = document.createElement('div')
     line.className = 'chat-line__message'
     line.dataset.aTarget = 'chat-line-message'
     line.dataset.aUser = user
+    const container = document.createElement('div')
+    container.className = 'chat-line__message-container'
+    if (reply) {
+      if (reply.parentId) line.dataset.replyParentId = reply.parentId
+      if (reply.parentUser) line.dataset.replyParentUser = reply.parentUser
+      const quote = document.createElement('p')
+      quote.className = 'fixture-reply'
+      quote.title = reply.parentText || ''
+      quote.append('回覆 ')
+      const target = document.createElement('span')
+      target.setAttribute('dir', 'auto')
+      target.textContent = `@${reply.parentDisplay || reply.parentUser}`
+      const text = document.createElement('span')
+      text.setAttribute('dir', 'auto')
+      text.textContent = reply.parentText || ''
+      quote.append(target, '：', text)
+      container.appendChild(quote)
+    }
+    const row = document.createElement('div')
     const badge = role === 'moderator'
       ? '<button data-a-target="chat-badge"><img class="chat-badge" alt="管理員" src="https://static-cdn.jtvnw.net/badges/v1/3267646d-33f0-4b17-b3df-f923a41db1d0/1"></button>'
       : role === 'vip'
         ? '<button data-a-target="chat-badge"><img class="chat-badge" alt="VIP" src="https://static-cdn.jtvnw.net/badges/v1/b817aba4-fad8-49e2-b88a-7cc744dfa6ec/1"></button>'
         : ''
-    line.innerHTML = `<span class="chat-line__username-container">${badge}<span data-a-target="chat-message-username" data-a-user="${user}" style="color:#ffb86c">${user}</span></span>: <span data-a-target="chat-line-message-body">測試訊息 ${++serial} <button class="fixture-emote" aria-label="Kappa"><img class="chat-image" alt="Kappa" src="https://static-cdn.jtvnw.net/emoticons/v2/25/default/dark/1.0"></button></span>`
+    row.innerHTML = `<span class="chat-line__username-container">${badge}<span data-a-target="chat-message-username" data-a-user="${user}" style="color:#ffb86c">${user}</span></span>: <span data-a-target="chat-line-message-body">測試訊息 ${++serial} <button class="fixture-emote" aria-label="Kappa"><img class="chat-image" alt="Kappa" src="https://static-cdn.jtvnw.net/emoticons/v2/25/default/dark/1.0"></button></span>`
+    container.appendChild(row)
+    line.appendChild(container)
     line.dataset.id = serial <= 3 ? `fixture-${serial}` : `fixture-${Date.now()}-${serial}`
     scroller().appendChild(line)
   }
@@ -71,6 +97,18 @@
   document.getElementById('add-vip').onclick = () => addMessage('vip_account', 'vip')
   document.getElementById('add-user').onclick = () => addMessage('alice')
   document.getElementById('add-ordinary').onclick = () => addMessage('ordinary')
+  document.getElementById('mod-reply-ordinary').onclick = () => addMessage('mod_account', 'moderator', {
+    parentUser: 'ordinary', parentDisplay: '一般觀眾', parentText: '一般觀眾的提問', parentId: 'fixture-3',
+  })
+  document.getElementById('mod-reply-excluded').onclick = () => addMessage('mod_account', 'moderator', {
+    parentUser: 'excluded_user', parentDisplay: '排除帳號', parentText: '排除用戶的原留言', parentId: 'fixture-excluded-1',
+  })
+  document.getElementById('ordinary-reply-mod').onclick = () => addMessage('ordinary', '', {
+    parentUser: 'mod_account', parentDisplay: '管理員', parentText: '管理員的公告', parentId: 'fixture-1',
+  })
+  document.getElementById('ordinary-reply-excluded').onclick = () => addMessage('ordinary', '', {
+    parentUser: 'excluded_user', parentDisplay: '排除帳號', parentText: '排除用戶的原留言', parentId: 'fixture-excluded-1',
+  })
   document.getElementById('burst').onclick = () => { for (let i = 0; i < 100; i++) addMessage('mod_account', 'moderator') }
   document.getElementById('edit-last').onclick = () => {
     const message = scroller().lastElementChild?.querySelector('[data-a-target="chat-line-message-body"]')
