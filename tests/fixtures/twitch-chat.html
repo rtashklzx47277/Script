@@ -38,6 +38,7 @@
   <button id="mod-reply-ordinary">管理員回覆一般用戶</button>
   <button id="mod-reply-excluded">管理員回覆排除用戶</button>
   <button id="ordinary-reply-mod">一般用戶回覆管理員</button>
+  <button id="ordinary-reply-orphan">一般用戶回覆未載入的實況主留言</button>
   <button id="ordinary-reply-excluded">一般用戶回覆排除用戶</button>
   <button id="burst">批次新增 100 則管理員訊息</button>
   <button id="edit-last">修改最後一則訊息</button>
@@ -105,6 +106,9 @@
   })
   document.getElementById('ordinary-reply-mod').onclick = () => addMessage('ordinary', '', {
     parentUser: 'mod_account', parentDisplay: '管理員', parentText: '管理員的公告', parentId: 'fixture-1',
+  })
+  document.getElementById('ordinary-reply-orphan').onclick = () => addMessage('ordinary', '', {
+    parentUser: 'fixture_channel', parentDisplay: '實況主', parentText: '未載入的原留言', parentId: 'fixture-unseen-1',
   })
   document.getElementById('ordinary-reply-excluded').onclick = () => addMessage('ordinary', '', {
     parentUser: 'excluded_user', parentDisplay: '排除帳號', parentText: '排除用戶的原留言', parentId: 'fixture-excluded-1',

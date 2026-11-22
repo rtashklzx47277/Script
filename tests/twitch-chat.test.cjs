@@ -1663,20 +1663,35 @@ test('Twitch replies: capture viewer replies to active targets, toggle globally,
   assert.equal(history.ids.has('r-ord'), false)
   assert.equal(history.ids.has('m-mention'), false)
 
+  // Viewer replies to visible targets attach directly beneath the parent row inside collapsed drawers,
+  // while unseen targets use a compact quoted group; all default to closed.
+  const modDrawer = state.list.children[state.list.children.indexOf(history.ids.get('p-mod').view) + 1]
+  assert.equal(modDrawer.tagName, 'details')
+  assert.equal(modDrawer.className, 'ttc-replies')
+  assert.equal(modDrawer.open, false)
+  assert.equal(modDrawer.querySelector('.ttc-replies-summary').textContent, '1 則回覆')
+  assert.equal(history.ids.get('p-mod').view.classList.contains('ttc-has-replies'), true)
+  assert.equal(state.list.querySelectorAll('.ttc-reply-group').length, 2)
+  assert.equal(state.list.querySelectorAll('.ttc-replies').length, 4)
+
   // Toggling VIP off hides both vip_a and viewer_3's reply to vip_a
   const vipCheckbox = state.panel.querySelector('[name="vip"]')
   vipCheckbox.checked = false
   vipCheckbox.listeners.get('change')()
   assert.equal(state.count.textContent, '4 則')
+  assert.equal(state.list.querySelectorAll('.ttc-replies').length, 3)
   vipCheckbox.checked = true
   vipCheckbox.listeners.get('change')()
   assert.equal(state.count.textContent, '6 則')
 
-  // Unchecking replies checkbox hides viewer replies and stops capturing new ones, persists globally
+  // Unchecking replies checkbox removes drawers and hides viewer replies, stops capturing new ones, persists globally
   repliesCheckbox.checked = false
   repliesCheckbox.listeners.get('change')()
   assert.equal(history.settings.replies, false)
   assert.equal(state.count.textContent, '2 則')
+  assert.equal(state.list.querySelectorAll('.ttc-replies').length, 0)
+  assert.equal(state.list.querySelectorAll('.ttc-reply-group').length, 0)
+  assert.equal(history.ids.get('p-mod').view.classList.contains('ttc-has-replies'), false)
 
   const whileOff = withReplyFiber('viewer_8', '關閉後回覆', 'r-while-off', {
     parentMsgId: 'p-mod', parentUserLogin: 'mod_a', parentDisplayName: 'ModA', parentMessageBody: '公告', parentDeleted: false,
@@ -1788,10 +1803,215 @@ test('Twitch replies: backfill parent roles after restore, fallback to fiber ID 
   assert.equal(state.count.textContent, '2 則')
   const restoredReply = state.history.ids.get('fiber-only-id')
   assert.ok(restoredReply)
+  const parentView = state.history.ids.get('vip-old-1').view
+  const attachedDrawer = state.list.children[state.list.children.indexOf(parentView) + 1]
+  assert.equal(attachedDrawer.tagName, 'details')
+  assert.equal(attachedDrawer.querySelector('.ttc-replies-summary').textContent, '1 則回覆')
+  assert.equal(restoredReply.view.parentElement, attachedDrawer.querySelector('.ttc-replies-list'))
+  assert.equal(state.list.querySelectorAll('.ttc-reply-group').length, 0)
   const quote = restoredReply.view.querySelector('.ttc-reply')
   assert.equal(quote.querySelector('img'), null)
   assert.equal(quote.querySelector('script'), null)
   assert.equal(quote.querySelector('.ttc-reply-author').textContent, '@<img src=x onerror=alert(1)> (vip_later)')
   assert.equal(quote.querySelector('.ttc-reply-body').textContent, '<script>evil()</script> 舊 VIP 發言')
   env.api.unmount()
+})
+
+test('Twitch reply drawers: keep target-to-target top-level, persist open state on edits/appends without full scan, and flatten in search', async () => {
+  const database = fakeIndexedDB()
+  const seed = boot({ database })
+  const seedHistory = seed.api.getHistory('sample_channel')
+  await seedHistory.restorePromise
+  const lateParent = seed.message('mod_old', '舊管理員公告', 'Moderator', 'old-mod-msg')
+  seed.api.captureLine(lateParent.line, seedHistory)
+  await seed.api.flushHistory(seedHistory)
+
+  const env = boot({ database })
+  const stream = env.document.body.appendChild(new env.Element('div'))
+  stream.className = 'stream-chat'
+  const header = stream.appendChild(new env.Element('div'))
+  header.className = 'stream-chat-header'
+  const host = stream.appendChild(new env.Element('div'))
+  const scroller = host.appendChild(new env.Element('div'))
+  scroller.setAttribute('data-a-target', 'chat-scroller')
+
+  env.api.refresh()
+  const state = env.api.mounted
+  const history = state.history
+  env.api.setEnabled(state, true)
+
+  const makeReply = (user, role, text, id, parent) => {
+    const msg = env.message(user, text, role, id)
+    msg.line.__reactFiber$1 = {
+      memoizedProps: {
+        message: {
+          id,
+          user: { userLogin: user, userDisplayName: user },
+          reply: parent,
+        },
+      },
+    }
+    scroller.appendChild(msg.line)
+    return msg
+  }
+
+  // Live parent mod_live + direct target-to-target reply (VIP -> mod_live) stay top-level
+  const modLive = env.message('mod_live', '現場公告', 'Moderator', 'p-live')
+  scroller.appendChild(modLive.line)
+  const vipReply = makeReply('vip_replier', 'VIP', 'VIP 回覆管理員', 't-vip-reply', {
+    parentMsgId: 'p-live', parentUserLogin: 'mod_live', parentDisplayName: 'ModLive', parentMessageBody: '現場公告', parentDeleted: false,
+  })
+  const viewerReply1 = makeReply('viewer_a', '', '觀眾回覆一', 'v-reply-1', {
+    parentMsgId: 'p-live', parentUserLogin: 'mod_live', parentDisplayName: 'ModLive', parentMessageBody: '現場公告', parentDeleted: false,
+  })
+  // Multiple orphan replies to the same unseen parentId (broadcaster) merge into one .ttc-reply-group
+  const orphan1 = makeReply('viewer_b', '', '開台安安1', 'o-1', {
+    parentMsgId: 'unseen-bc-1', parentUserLogin: 'sample_channel', parentDisplayName: '實況主', parentMessageBody: '開台啦', parentDeleted: false,
+  })
+  const orphan2 = makeReply('viewer_c', '', '開台安安2', 'o-2', {
+    parentMsgId: 'unseen-bc-1', parentUserLogin: 'sample_channel', parentDisplayName: '實況主', parentMessageBody: '開台啦', parentDeleted: false,
+  })
+  // Viewer reply to old-mod-msg that will re-parent once restorePromise finishes
+  const orphanOld1 = makeReply('viewer_d', '', '看到舊公告1', 'oo-1', {
+    parentMsgId: 'old-mod-msg', parentUserLogin: 'mod_old', parentDisplayName: 'OldMod', parentMessageBody: '舊管理員公告', parentDeleted: false,
+  })
+  const orphanOld2 = makeReply('viewer_e', '', '看到舊公告2', 'oo-2', {
+    parentMsgId: 'old-mod-msg', parentUserLogin: 'mod_old', parentDisplayName: 'OldMod', parentMessageBody: '舊管理員公告', parentDeleted: false,
+  })
+
+  env.api.captureTree(scroller, history)
+  env.api.renderMessages(state, true)
+
+  assert.equal(vipReply.line.parentElement, scroller)
+  assert.equal(history.ids.get('t-vip-reply').view.parentElement, state.list, 'target-to-target reply stays top-level')
+  const liveDrawer = state.list.children[state.list.children.indexOf(history.ids.get('p-live').view) + 1]
+  assert.equal(liveDrawer.tagName, 'details')
+  assert.equal(liveDrawer.open, false)
+  assert.equal(liveDrawer.querySelector('.ttc-replies-summary').textContent, '1 則回覆')
+
+  // Orphan replies merged into a single .ttc-reply-group
+  assert.equal(state.list.querySelectorAll('.ttc-reply-group').length, 1)
+  const orphanGroup = state.list.querySelector('.ttc-reply-group')
+  assert.equal(orphanGroup.querySelector('.ttc-replies-summary').textContent, '2 則回覆')
+  assert.equal(orphanGroup.querySelector('.ttc-reply-author').textContent, '@實況主 (sample_channel)')
+
+  // Open the live drawer and verify open state persists across incremental updates, edits, and NO full history scan
+  liveDrawer.open = true
+  liveDrawer.listeners.get('toggle')()
+  assert.equal(state.openReplyThreads.has('id:p-live'), true)
+
+  history.messages[Symbol.iterator] = () => { throw Error('unexpected full history scan') }
+  const viewerReply2 = makeReply('viewer_f', '', '觀眾回覆二', 'v-reply-2', {
+    parentMsgId: 'p-live', parentUserLogin: 'mod_live', parentDisplayName: 'ModLive', parentMessageBody: '現場公告', parentDeleted: false,
+  })
+  env.api.captureLine(viewerReply2.line, history)
+  modLive.body.innerHTML = '現場公告(已更新)'
+  modLive.body.textContent = '現場公告(已更新)'
+  env.api.captureLine(modLive.line, history)
+  viewerReply1.body.innerHTML = '觀眾回覆一(已編輯)'
+  viewerReply1.body.textContent = '觀眾回覆一(已編輯)'
+  env.api.captureLine(viewerReply1.line, history)
+  env.api.renderMessages(state)
+  delete history.messages[Symbol.iterator]
+
+  const drawerAfterInc = state.list.children[state.list.children.indexOf(history.ids.get('p-live').view) + 1]
+  assert.equal(drawerAfterInc, liveDrawer, 'incremental update reuses the same drawer node')
+  assert.equal(drawerAfterInc.open, true)
+  assert.equal(drawerAfterInc.querySelector('.ttc-replies-summary').textContent, '2 則回覆')
+  assert.equal(history.ids.get('p-live').view.children.at(-1).textContent, '現場公告(已更新)')
+  assert.equal(history.ids.get('v-reply-1').view.children.at(-1).textContent, '觀眾回覆一(已編輯)')
+
+  // Search mode flattens matching replies in state.list with .ttc-reply visible; clearing restores drawers & open state
+  state.messageSearch.value = '觀眾回覆'
+  state.messageSearch.listeners.get('input')()
+  assert.equal(state.count.textContent, '2 則符合')
+  assert.equal(state.list.querySelectorAll('.ttc-replies').length, 0)
+  assert.equal(history.ids.get('v-reply-1').view.parentElement, state.list)
+  assert.ok(history.ids.get('v-reply-1').view.querySelector('.ttc-reply'))
+
+  state.messageSearch.value = ''
+  state.messageSearch.listeners.get('input')()
+  const restoredLiveDrawer = state.list.children[state.list.children.indexOf(history.ids.get('p-live').view) + 1]
+  assert.equal(restoredLiveDrawer.open, true, 'open state restored after exiting search')
+  assert.equal(restoredLiveDrawer.querySelector('.ttc-replies-summary').textContent, '2 則回覆')
+
+  // Restoring old-mod-msg from IndexedDB attaches orphanOld1 and orphanOld2 directly below old-mod-msg
+  await history.restorePromise
+  const oldParentView = history.ids.get('old-mod-msg').view
+  const oldDrawer = state.list.children[state.list.children.indexOf(oldParentView) + 1]
+  assert.equal(oldDrawer.tagName, 'details')
+  assert.equal(oldDrawer.open, false)
+  assert.equal(oldDrawer.querySelector('.ttc-replies-summary').textContent, '2 則回覆')
+  assert.equal(state.list.querySelectorAll('.ttc-reply-group').length, 1, 'only unseen-bc-1 remains an orphan group')
+  env.api.unmount()
+})
+
+test('Twitch reply drawers: preserve cross-day date dividers across drawers, handle parent eviction, and clean up empty drawers', async () => {
+  const database = fakeIndexedDB()
+  const day1 = new Date(2026, 10, 17, 23, 50, 0).getTime()
+  const day2 = new Date(2026, 10, 18, 0, 10, 0).getTime()
+  let now = day1
+  const env = boot({ database, now: () => now })
+  const history = env.api.getHistory('sample_channel')
+  await history.restorePromise
+  const state = { history, list: new env.Element(), empty: {}, count: {}, latest: {} }
+  history.enabled = true
+  env.api.setMounted(state)
+
+  const makeReply = (user, text, id, parent) => {
+    const msg = env.message(user, text, '', id)
+    msg.line.__reactFiber$1 = {
+      memoizedProps: {
+        message: { id, user: { userLogin: user, userDisplayName: user }, reply: parent },
+      },
+    }
+    return msg
+  }
+
+  // Day 1: Mod parent + viewer reply + same-day Mod message -> second Mod must NOT get duplicate date divider after drawer
+  const mod1 = env.message('mod_a', 'day1 first', 'Moderator', 'd1-mod1')
+  env.api.captureLine(mod1.line, history)
+  const rep1 = makeReply('viewer_1', 'day1 reply', 'd1-rep1', {
+    parentMsgId: 'd1-mod1', parentUserLogin: 'mod_a', parentDisplayName: 'ModA', parentMessageBody: 'day1 first', parentDeleted: false,
+  })
+  env.api.captureLine(rep1.line, history)
+  const mod2 = env.message('mod_a', 'day1 second', 'Moderator', 'd1-mod2')
+  env.api.captureLine(mod2.line, history)
+
+  // Day 2: Orphan viewer reply to broadcaster -> group carries 2026/11/18 date divider; then same-day Mod -> no duplicate divider
+  now = day2
+  const orphanDay2 = makeReply('viewer_2', 'day2 orphan', 'd2-rep1', {
+    parentMsgId: 'd2-unseen', parentUserLogin: 'sample_channel', parentDisplayName: '實況主', parentMessageBody: '開台', parentDeleted: false,
+  })
+  env.api.captureLine(orphanDay2.line, history)
+  const mod3 = env.message('mod_a', 'day2 mod', 'Moderator', 'd2-mod3')
+  env.api.captureLine(mod3.line, history)
+
+  env.api.renderMessages(state, true)
+  assert.equal(history.ids.get('d1-mod1').view.getAttribute('data-date'), '2026/11/17')
+  assert.equal(history.ids.get('d1-mod2').view.getAttribute('data-date'), null, 'same-day row after drawer must not repeat divider')
+  const day2Group = state.list.querySelector('.ttc-reply-group')
+  assert.equal(day2Group.getAttribute('data-date'), '2026/11/18')
+  assert.equal(history.ids.get('d2-mod3').view.getAttribute('data-date'), null, 'same-day row after orphan group must not repeat divider')
+
+  // Removing the last reply removes the drawer and .ttc-has-replies from d1-mod1
+  history.settings.excludedUsers = ['viewer_1']
+  env.api.renderMessages(state)
+  assert.equal(history.ids.get('d1-mod1').view.classList.contains('ttc-has-replies'), false)
+  assert.equal(state.list.querySelectorAll('.ttc-replies').length, 1, 'only day2 orphan group drawer remains')
+  history.settings.excludedUsers = []
+  env.api.renderMessages(state, true)
+  assert.equal(history.ids.get('d1-mod1').view.classList.contains('ttc-has-replies'), true)
+
+  // Evicting d1-mod1 from 1000-cap while d1-rep1 remains converts d1-rep1's drawer into an orphan .ttc-reply-group
+  const rep1Record = history.ids.get('d1-rep1')
+  const mod1Record = history.ids.get('d1-mod1')
+  history.messages = history.messages.filter(r => r !== mod1Record)
+  history.removed.add(mod1Record)
+  mod1Record.retained = false
+  history.ids.delete('d1-mod1')
+  env.api.renderMessages(state)
+  assert.equal(rep1Record.view.closest('.ttc-reply-group').getAttribute('data-date'), '2026/11/17')
+  assert.equal(state.list.querySelectorAll('.ttc-reply-group').length, 2)
+  assert.equal(state.count.textContent, '4 則')
 })

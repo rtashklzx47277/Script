@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        Twitch Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.9.0
+// @version     0.10.0
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
 // @description 依頻道主、管理員、VIP、回覆篩選目標與全域帳號包含／排除名單篩選 Twitch 直播與 VOD 聊天，保留回覆目標引言與最近 1000 則／7 天紀錄，支援跨日分隔、搜尋與自動跟隨。
@@ -1044,6 +1044,93 @@
     latest.hidden = history.follow
   }
 
+  const isCollapsedReply = (record, settings) =>
+    Boolean(record?.reply) &&
+    !matchesTarget(record, settings) &&
+    matchesReplyTarget(record.reply, settings)
+  const adjacentDatedRow = (node, delta) => {
+    let cur = node ? siblingView(node, delta) : null
+    while (cur && !viewDates.has(cur)) cur = siblingView(cur, delta)
+    return cur || null
+  }
+  const setDetailsOpen = (details, open) => {
+    const next = Boolean(open)
+    details.open = next
+    if (next) details.setAttribute('open', '')
+    else details.removeAttribute('open')
+  }
+  const resolveReplyThread = (record, history, settings, list) => {
+    const parentId = record.reply?.parentId
+    if (parentId) {
+      const parent = history.ids.get(parentId)
+      const mountedParent = parent?.retained && parent.visible &&
+        parent.renderedView?.parentElement === list && matchesTarget(parent, settings)
+        ? parent
+        : null
+      return { key: `id:${parentId}`, parentRecord: mountedParent }
+    }
+    return { key: `quote:${record.reply.parentUser}\n${record.reply.parentText}`, parentRecord: null }
+  }
+  const updateDrawerSummary = drawer => {
+    drawer.summary.textContent = `${drawer.replies.size} 則回覆`
+  }
+  const ensureReplyDrawer = (state, key, parentRecord, sampleReply, createdAt) => {
+    state.replyDrawers ||= new Map()
+    state.openReplyThreads ||= new Set()
+    const existing = state.replyDrawers.get(key)
+    if (existing) return existing
+    const summary = element('summary', { class: 'ttc-replies-summary' }, ['0 則回覆'])
+    const replyList = element('div', { class: 'ttc-replies-list' })
+    const details = element('details', { class: 'ttc-replies' }, [summary, replyList])
+    setDetailsOpen(details, state.openReplyThreads.has(key))
+    details.addEventListener('toggle', () => {
+      const isOpen = Boolean(details.open)
+      if (isOpen) state.openReplyThreads.add(key)
+      else state.openReplyThreads.delete(key)
+      if (mounted === state) scheduleListFollow(state)
+    })
+    let group = null
+    if (parentRecord) {
+      state.list.insertBefore(details, siblingView(parentRecord.renderedView, 1))
+      parentRecord.renderedView.classList.add('ttc-has-replies')
+    } else {
+      group = element('div', { class: 'ttc-reply-group' }, [makeReplyView(sampleReply), details])
+      viewDates.set(group, formatDateKey(createdAt))
+      state.list.appendChild(group)
+      syncDateMarker(group, adjacentDatedRow(group, -1))
+    }
+    const drawer = { key, details, summary, list: replyList, group, parentRecord: parentRecord || null, replies: new Set() }
+    state.messageResizeObserver?.observe(details)
+    state.replyDrawers.set(key, drawer)
+    return drawer
+  }
+  const removeDrawer = (state, drawer) => {
+    state.messageResizeObserver?.unobserve(drawer.details)
+    if (drawer.group) {
+      const nextDated = adjacentDatedRow(drawer.group, 1)
+      drawer.group.remove()
+      if (nextDated?.parentElement === state.list) syncDateMarker(nextDated, adjacentDatedRow(nextDated, -1))
+    } else {
+      drawer.details.remove()
+      drawer.parentRecord?.renderedView?.classList.remove('ttc-has-replies')
+      drawer.parentRecord?.view?.classList.remove('ttc-has-replies')
+    }
+    state.replyDrawers?.delete(drawer.key)
+  }
+  const detachFromDrawer = (state, record) => {
+    if (!record.replyThreadKey) return
+    const drawer = state.replyDrawers?.get(record.replyThreadKey)
+    record.replyThreadKey = ''
+    if (!drawer) return
+    drawer.replies.delete(record)
+    if (drawer.replies.size > 0) updateDrawerSummary(drawer)
+    else removeDrawer(state, drawer)
+  }
+  const clearReplyDrawers = state => {
+    for (const drawer of [...(state.replyDrawers?.values() || [])]) removeDrawer(state, drawer)
+    state.replyDrawers?.clear()
+  }
+
   const renderMessages = (state, rebuild = false) => {
     cancelMessageRender(state)
     cancelListFollow(state)
@@ -1052,37 +1139,80 @@
     if (query) { renderMessageSearch(state, query); return }
     if (state.inSearchMode) releaseMessageViews(state)
     empty.textContent = '尚無符合條件的發言。新增目標帳號後開始收集。'
+    state.replyDrawers ||= new Map()
+    state.openReplyThreads ||= new Set()
     const filterKey = JSON.stringify(history.settings)
     const full = rebuild || state.renderedHistory !== history || state.filterKey !== filterKey
+    const savedScrollTop = full && !history.follow ? list.scrollTop : 0
     if (full) {
       state.visibleCount = 0
       state.mountedTailOrder = 0
+      clearReplyDrawers(state)
+      if (list.children.length) {
+        state.messageResizeObserver?.disconnect()
+        list.replaceChildren()
+      }
     }
+    let needsReorder = false
     for (const record of history.removed) {
+      const wasVisible = Boolean(record.renderedView?.parentElement && record.visible)
       if (record.renderedView) state.messageResizeObserver?.unobserve(record.renderedView)
-      if (!full && record.renderedView?.parentElement === list && record.visible) state.visibleCount--
+      if (!full && wasVisible) state.visibleCount--
       record.renderedView?.remove()
+      if (record.replyThreadKey) detachFromDrawer(state, record)
+      else if (!full && record.id && state.replyDrawers.has(`id:${record.id}`)) needsReorder = true
       record.renderedView = null
       record.visible = false
+      record.replyThreadKey = ''
     }
     history.removed.clear()
-    if (!full && list.firstChild) syncDateMarker(list.firstChild, null)
-    let needsReorder = false
+    if (!full && list.firstChild && viewDates.has(list.firstChild)) syncDateMarker(list.firstChild, null)
     for (const record of full ? history.messages : history.dirty) {
       const oldView = record.renderedView
-      const wasVisible = oldView?.parentElement === list && record.visible
+      const wasVisible = Boolean(oldView?.parentElement && record.visible)
       const show = matchesFilter(record, history.settings)
       state.visibleCount += Number(show) - (full ? 0 : Number(!!wasVisible))
       if (!show) {
         if (oldView) {
-          const nextView = !full ? siblingView(oldView, 1) : null
+          const nextDated = !full && oldView.parentElement === list ? adjacentDatedRow(oldView, 1) : null
           state.messageResizeObserver?.unobserve(oldView)
           oldView.remove()
-          if (nextView?.parentElement === list) syncDateMarker(nextView, siblingView(nextView, -1))
+          if (record.replyThreadKey) detachFromDrawer(state, record)
+          else if (!full && record.id && state.replyDrawers.has(`id:${record.id}`)) needsReorder = true
+          if (nextDated?.parentElement === list) syncDateMarker(nextDated, adjacentDatedRow(nextDated, -1))
         }
         record.renderedView = null
         record.visible = false
+        record.replyThreadKey = ''
         continue
+      }
+      if (isCollapsedReply(record, history.settings)) {
+        const { key, parentRecord } = resolveReplyThread(record, history, history.settings, list)
+        if (record.replyThreadKey && record.replyThreadKey !== key) detachFromDrawer(state, record)
+        const existed = state.replyDrawers.has(key)
+        const drawer = ensureReplyDrawer(state, key, parentRecord, record.reply, record.createdAt)
+        if (!full && !existed && drawer.group && state.mountedTailOrder && record.order <= state.mountedTailOrder) {
+          needsReorder = true
+        }
+        record.view.hidden = false
+        record.view.removeAttribute('data-date')
+        if (oldView && oldView !== record.view) {
+          state.messageResizeObserver?.unobserve(oldView)
+          if (oldView.parentElement === drawer.list) oldView.replaceWith(record.view)
+          else oldView.remove()
+        }
+        if (full || record.view.parentElement !== drawer.list) drawer.list.appendChild(record.view)
+        drawer.replies.add(record)
+        updateDrawerSummary(drawer)
+        record.renderedView = record.view
+        record.visible = true
+        record.replyThreadKey = key
+        state.messageResizeObserver?.observe(record.view)
+        continue
+      }
+      if (!full && record.replyThreadKey) {
+        detachFromDrawer(state, record)
+        needsReorder = true
       }
       record.view.hidden = false
       viewDates.set(record.view, formatDateKey(record.createdAt))
@@ -1095,14 +1225,23 @@
         if (!full && state.mountedTailOrder && record.order <= state.mountedTailOrder) needsReorder = true
         list.appendChild(record.view)
       }
-      syncDateMarker(record.view, siblingView(record.view, -1))
+      if (record.id && state.replyDrawers.has(`id:${record.id}`)) {
+        const drawer = state.replyDrawers.get(`id:${record.id}`)
+        if (drawer.group) needsReorder = true
+        else {
+          drawer.parentRecord = record
+          record.view.classList.add('ttc-has-replies')
+        }
+      }
+      syncDateMarker(record.view, adjacentDatedRow(record.view, -1))
       if (!full) {
-        const nextView = siblingView(record.view, 1)
-        if (nextView?.parentElement === list) syncDateMarker(nextView, record.view)
+        const nextDated = adjacentDatedRow(record.view, 1)
+        if (nextDated?.parentElement === list) syncDateMarker(nextDated, record.view)
       }
       if (!state.mountedTailOrder || record.order > state.mountedTailOrder) state.mountedTailOrder = record.order
       record.renderedView = record.view
       record.visible = true
+      record.replyThreadKey = ''
       state.messageResizeObserver?.observe(record.view)
     }
     history.dirty.clear()
@@ -1116,6 +1255,8 @@
     if (history.follow) {
       list.scrollTop = list.scrollHeight
       state.followScrollTop = list.scrollTop
+    } else if (full) {
+      list.scrollTop = savedScrollTop
     }
     latest.hidden = history.follow
   }
@@ -1133,10 +1274,13 @@
     state.messageResizeObserver?.disconnect()
     cancelListFollow(state)
     cancelMessageRender(state)
+    clearReplyDrawers(state)
     for (const record of new Set([...state.history.messages, ...state.history.removed, ...(state.searchShown || [])])) {
       record.renderedView?.remove()
       record.renderedView = null
       record.visible = false
+      record.replyThreadKey = ''
+      record.view?.classList?.remove('ttc-has-replies')
     }
     state.inSearchMode = false
     state.searchShown = null
@@ -1590,6 +1734,7 @@
     if (!mounted) return
     hideTooltip(mounted)
     releaseMessageViews(mounted)
+    mounted.openReplyThreads?.clear()
     setPanelLayer(mounted, false)
     clearTimeout(mounted.statusTimer)
     mounted.observer.disconnect()
@@ -1716,17 +1861,38 @@
     .ttc-list, .ttc-target-list, .ttc-managing > .ttc-toolbar { --ttc-scrollbar-thumb: rgba(255, 255, 255, 0.45); --ttc-scrollbar-track: transparent; scrollbar-color: var(--ttc-scrollbar-thumb) var(--ttc-scrollbar-track); scrollbar-width: auto; overscroll-behavior: contain; }
     @media (prefers-contrast: more) {
       .ttc-list, .ttc-target-list, .ttc-managing > .ttc-toolbar { --ttc-scrollbar-thumb: #ffffff; --ttc-scrollbar-track: #000000; }
-      .ttc-toggle:focus-visible, .ttc-panel button:focus-visible, .ttc-panel input:focus-visible { outline: 2px solid currentColor; }
+      .ttc-toggle:focus-visible, .ttc-panel button:focus-visible, .ttc-panel input:focus-visible, .ttc-replies-summary:focus-visible { outline: 2px solid currentColor; }
     }
     .ttc-list { flex: 1; min-height: 0; overflow: auto; overflow-anchor: none; padding: 6px 0; }
     .ttc-message { padding: 5px 10px; overflow-wrap: anywhere; line-height: 1.6; content-visibility: auto; contain-intrinsic-size: auto none auto 30px; }
     .ttc-message.ttc-has-reply { contain-intrinsic-size: auto none auto 52px; }
+    .ttc-message.ttc-has-replies { padding-bottom: 2px; }
     .ttc-reply { display: flex; align-items: baseline; gap: 4px; margin-bottom: 2px; padding-left: 6px; border-left: 2px solid var(--color-border-base, #ffffff33); color: var(--color-text-alt-2, #adadb8); font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; }
     .ttc-reply::before { content: '↩'; content: '↩' / ''; flex: 0 0 auto; opacity: 0.85; }
     .ttc-reply-text { flex: 1; min-inline-size: 0; }
     .ttc-reply-author { font-weight: 600; }
     .ttc-reply-deleted { font-style: italic; }
-    .ttc-message[data-date]::before { content: attr(data-date); display: block; margin: 2px 0 6px; padding: 2px 0 4px; border-bottom: 1px solid var(--color-border-base, #ffffff22); color: var(--color-text-alt-2, #adadb8); font-size: 11px; font-weight: 600; text-align: center; letter-spacing: 0.04em; }
+    .ttc-reply-group { padding: 5px 10px 0; }
+    .ttc-reply-group > .ttc-reply { margin-bottom: 3px; }
+    .ttc-replies { margin: 0 10px 6px 22px; padding-left: 8px; border-left: 2px solid var(--color-border-base, #ffffff33); }
+    .ttc-reply-group > .ttc-replies { margin: 0 0 6px 12px; }
+    .ttc-replies-summary { display: inline-flex; align-items: center; gap: 4px; padding: 2px 4px; border-radius: 4px; list-style: none; color: var(--color-text-link, #bf94ff); font-size: 12px; font-weight: 600; cursor: pointer; user-select: none; }
+    .ttc-replies-summary::-webkit-details-marker { display: none; }
+    .ttc-replies-summary:hover { background: var(--color-background-button-text-hover, #ffffff11); }
+    .ttc-replies-summary:focus-visible { outline: 2px solid #9147ff; outline-offset: 2px; }
+    .ttc-replies-summary::before { content: '▸'; content: '▸' / ''; display: inline-block; flex-shrink: 0; font-size: 11px; line-height: 1; }
+    .ttc-replies[open] > .ttc-replies-summary::before { transform: rotate(90deg); }
+    .ttc-replies::details-content { interpolate-size: allow-keywords; overflow: clip; contain: layout; }
+    .ttc-replies:not([open])::details-content { block-size: 0; }
+    @media (prefers-reduced-motion: no-preference) {
+      .ttc-replies-summary::before { transition: transform 0.15s ease; }
+      .ttc-replies::details-content { transition: block-size 0.2s ease, content-visibility 0.2s ease; transition-behavior: allow-discrete; }
+    }
+    .ttc-replies-list { margin-top: 2px; }
+    .ttc-replies-list > .ttc-message { padding: 3px 6px; }
+    .ttc-replies-list > .ttc-message.ttc-has-reply { contain-intrinsic-size: auto none auto 30px; }
+    .ttc-replies-list > .ttc-message > .ttc-reply { display: none; }
+    .ttc-message[data-date]::before, .ttc-reply-group[data-date]::before { content: attr(data-date); display: block; margin: 2px 0 6px; padding: 2px 0 4px; border-bottom: 1px solid var(--color-border-base, #ffffff22); color: var(--color-text-alt-2, #adadb8); font-size: 11px; font-weight: 600; text-align: center; letter-spacing: 0.04em; }
     .ttc-message:hover { background: var(--color-background-button-text-hover, #ffffff11); }
     .ttc-time { margin-right: 6px; color: var(--color-text-alt-2, #adadb8); font-size: 10px; }
     .ttc-message > img { width: 18px; height: 18px; margin-right: 3px; vertical-align: middle; }
