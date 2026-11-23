@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        Twitch Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.10.4
+// @version     0.10.5
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
 // @description 依頻道主、管理員、VIP、回覆篩選目標與全域帳號包含／排除名單篩選 Twitch 直播與 VOD 聊天，保留回覆目標引言與最近 1000 則／7 天紀錄，支援跨日分隔、搜尋與自動跟隨。
@@ -38,6 +38,7 @@
   const RESERVED_PATHS = new Set(['directory', 'downloads', 'settings', 'subscriptions', 'wallet', 'inventory', 'videos', 'popout', 'moderator', 'search', 'p', 'jobs', 'turbo', 'prime'])
   const histories = new Map()
   const viewDates = new WeakMap()
+  const rowAnchorKeys = new WeakMap()
   const defaultSettings = () => ({ moderators: true, broadcaster: true, vip: true, replies: true, users: [], excludedUsers: [] })
   let globalSettings = defaultSettings()
   let mounted = null
@@ -575,6 +576,7 @@
           record._searchText = ''
           restored.push(record)
           if (record.id) history.ids.set(record.id, record)
+          history.byStorageId?.set(record.storageId, record)
           history.dirty.add(record)
         }
         if (nowMs() >= deadline) {
@@ -655,7 +657,7 @@
     if (!history) {
       history = {
         channel, settings: loadSettings(channel), messages: [], nodes: new WeakMap(),
-        scope: channel, ids: new Map(), knownRoles: new Map(), displayNames: new Map(),
+        scope: channel, ids: new Map(), byStorageId: new Map(), knownRoles: new Map(), displayNames: new Map(),
         saveQueue: new Map(), deleteQueue: new Set(),
         archiveReady: false, archiveError: false,
         enabled: false, follow: true, search: '', dirty: new Set(), removed: new Set(),
@@ -938,6 +940,7 @@
     }
     history.nodes.set(line, record)
     if (message.id) history.ids.set(message.id, record)
+    history.byStorageId?.set(record.storageId, record)
     history.dirty.add(record)
     saveRecord(history, record)
     return true
@@ -949,6 +952,7 @@
     record._searchText = ''
     history.dirty.delete(record)
     if (record.id && history.ids?.get(record.id) === record) history.ids.delete(record.id)
+    if (record.storageId && history.byStorageId?.get(record.storageId) === record) history.byStorageId.delete(record.storageId)
     if (record.renderedView) history.removed.add(record)
   }
 
@@ -1188,25 +1192,44 @@
       group: parentRecord ? null : wrapper, parentRecord: parentRecord || null,
       open: false, replies: new Set(), anchors: new Set(),
     }
+    rowAnchorKeys.set(wrapper, parentRecord ? `msg:${parentRecord.storageId}` : `drawer:${key}`)
     setDrawerOpen(drawer, state.openReplyThreads.has(key))
     toggle.addEventListener('click', () => {
+      const list = state.list
+      const canMeasure = typeof list?.getBoundingClientRect === 'function' && typeof head.getBoundingClientRect === 'function'
+      const before = canMeasure ? head.getBoundingClientRect().top - list.getBoundingClientRect().top : 0
       const next = !drawer.open
       if (next) state.openReplyThreads.add(key)
       else state.openReplyThreads.delete(key)
       setDrawerOpen(drawer, next)
-      if (mounted === state) scheduleListFollow(state)
+      if (canMeasure) {
+        const delta = head.getBoundingClientRect().top - list.getBoundingClientRect().top - before
+        if (Math.abs(delta) > 0.5) list.scrollTop += delta
+      }
+      if (mounted === state && Number.isFinite(list.scrollHeight) && Number.isFinite(list.clientHeight) && list.clientHeight > 0) {
+        const nearBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 40
+        if (next && !nearBottom) {
+          cancelListFollow(state)
+          state.history.follow = false
+          state.latest.hidden = false
+        } else if (!next && nearBottom && state.history.follow) {
+          state.followScrollTop = list.scrollTop
+        }
+      }
     })
     panel.addEventListener('beforematch', () => {
       state.openReplyThreads.add(key)
       setDrawerOpen(drawer, true)
-      if (mounted === state) scheduleListFollow(state)
+      if (mounted === state) {
+        cancelListFollow(state)
+        state.history.follow = false
+        state.latest.hidden = false
+      }
     })
-    state.messageResizeObserver?.observe(panel)
     state.replyDrawers.set(key, drawer)
     return drawer
   }
   const removeDrawer = (state, drawer, unwrapParent = true) => {
-    state.messageResizeObserver?.unobserve(drawer.panel)
     if (drawer.group) {
       const nextDated = adjacentDatedRow(drawer.wrapper, 1)
       drawer.wrapper.remove()
@@ -1291,7 +1314,65 @@
     }
   }
 
-  const renderMessages = (state, rebuild = false) => {
+  const resolveAnchorNode = (state, key) => {
+    if (!key || !state?.list) return null
+    if (key.startsWith('msg:')) {
+      const record = state.history?.byStorageId?.get(key.slice(4))
+      if (!record?.retained || !record.visible || !record.renderedView) return null
+      if (record.renderedView.parentElement === state.list) return record.renderedView
+      const thread = record.renderedView.closest?.('.ttc-thread')
+      return thread?.parentElement === state.list ? thread : null
+    }
+    if (key.startsWith('drawer:')) {
+      const drawer = state.replyDrawers?.get(key.slice(7))
+      return drawer?.wrapper?.parentElement === state.list ? drawer.wrapper : null
+    }
+    return null
+  }
+  const captureViewportAnchor = state => {
+    const list = state?.list
+    if (!list || state.panel?.hidden) return null
+    const children = list.children
+    if (!children.length || typeof list.getBoundingClientRect !== 'function' ||
+      typeof children[0]?.getBoundingClientRect !== 'function') {
+      return { key: '', offset: 0, top: list.scrollTop }
+    }
+    const listTop = list.getBoundingClientRect().top
+    let low = 0
+    let high = children.length
+    while (low < high) {
+      const mid = (low + high) >> 1
+      const child = children[mid]
+      if (!child.hidden && child.getBoundingClientRect().bottom > listTop) high = mid
+      else low = mid + 1
+    }
+    let anchor = children[low]
+    while (anchor && (anchor.hidden || anchor.getBoundingClientRect().bottom <= listTop)) anchor = children[++low]
+    if (!anchor) {
+      for (let i = 0; i < children.length; i++) {
+        const candidate = children[i]
+        if (!candidate.hidden && candidate.getBoundingClientRect().bottom > listTop) { anchor = candidate; break }
+      }
+    }
+    return {
+      key: anchor ? rowAnchorKeys.get(anchor) || '' : '',
+      offset: anchor ? anchor.getBoundingClientRect().top - listTop : 0,
+      top: list.scrollTop,
+    }
+  }
+  const restoreViewportAnchor = (state, anchor) => {
+    const list = state?.list
+    if (!list || !anchor) return
+    const node = anchor.key ? resolveAnchorNode(state, anchor.key) : null
+    if (node && typeof list.getBoundingClientRect === 'function' && typeof node.getBoundingClientRect === 'function') {
+      const delta = node.getBoundingClientRect().top - list.getBoundingClientRect().top - anchor.offset
+      if (Math.abs(delta) > 0.5) list.scrollTop += delta
+    } else {
+      list.scrollTop = anchor.top
+    }
+  }
+
+  const renderMessages = (state, rebuild = false, preservedAnchor = null) => {
     cancelMessageRender(state)
     cancelListFollow(state)
     const { history, list, empty, count, latest } = state
@@ -1304,7 +1385,7 @@
     state.targetReplyRefs ||= new Map()
     const filterKey = JSON.stringify(history.settings)
     const full = rebuild || state.renderedHistory !== history || state.filterKey !== filterKey
-    const savedScrollTop = full && !history.follow ? list.scrollTop : 0
+    const anchor = preservedAnchor || (!history.follow ? captureViewportAnchor(state) : null)
     if (full) {
       state.visibleCount = 0
       state.mountedTailOrder = 0
@@ -1438,6 +1519,7 @@
       }
       record.view.hidden = false
       viewDates.set(record.view, formatDateKey(record.createdAt))
+      rowAnchorKeys.set(record.view, `msg:${record.storageId}`)
       if (oldView && oldView !== record.view) {
         state.messageResizeObserver?.unobserve(oldView)
         if (oldView.parentElement === list) oldView.replaceWith(record.view)
@@ -1462,7 +1544,7 @@
     history.dirty.clear()
     state.renderedHistory = history
     state.filterKey = filterKey
-    if (needsReorder) { renderMessages(state, true); return }
+    if (needsReorder) { renderMessages(state, true, anchor); return }
     empty.hidden = state.visibleCount > 0
     const countText = `${state.visibleCount} 則`
     if (count.textContent !== countText) count.textContent = countText
@@ -1470,8 +1552,12 @@
     if (history.follow) {
       list.scrollTop = list.scrollHeight
       state.followScrollTop = list.scrollTop
-    } else if (full) {
-      list.scrollTop = savedScrollTop
+      state.locationPinned = false
+    } else if (anchor) {
+      state.restoringScroll = true
+      restoreViewportAnchor(state, anchor)
+      state.restoringScroll = false
+      state.locationPinned = true
     }
     latest.hidden = history.follow
   }
@@ -1648,9 +1734,35 @@
 
   const positionFilterPanel = state => {
     if (!state.inTopLayer) return
-    const rect = state.host.getBoundingClientRect()
-    Object.assign(state.panel.style, { position: 'fixed', inset: 'auto', margin: '0',
-      left: `${rect.left}px`, top: `${rect.top}px`, width: `${rect.width}px`, height: `${rect.height}px` })
+    const streamRect = state.stream?.getBoundingClientRect?.()
+    const hostRect = state.host?.getBoundingClientRect?.()
+    const rect = streamRect && (streamRect.width > 0 || streamRect.height > 0) ? streamRect : hostRect
+    if (!rect) return
+    const rectBottom = Number.isFinite(rect.bottom) ? rect.bottom : rect.top + rect.height
+    const header = state.header?.getBoundingClientRect?.()
+    const input = state.stream && $('.chat-input', state.stream)?.getBoundingClientRect?.()
+    const hostBottom = hostRect && hostRect.height > 0
+      ? (Number.isFinite(hostRect.bottom) ? hostRect.bottom : hostRect.top + hostRect.height)
+      : 0
+    const top = header && header.height > 0 ? Math.max(rect.top, header.bottom) : rect.top
+    const bottom = input?.height > 0 && input.top >= top
+      ? input.top
+      : (hostBottom >= top ? Math.min(rectBottom, hostBottom) : rectBottom)
+    const width = Math.max(0, rect.width)
+    const height = Math.max(0, bottom - top)
+    if (width === 0 || height === 0) {
+      Object.assign(state.panel.style, {
+        position: 'fixed', inset: 'auto', margin: '0',
+        left: '0px', top: '0px', width: '0px', height: '0px',
+        visibility: 'hidden', pointerEvents: 'none',
+      })
+      return
+    }
+    Object.assign(state.panel.style, {
+      position: 'fixed', inset: 'auto', margin: '0',
+      left: `${rect.left}px`, top: `${top}px`, width: `${width}px`, height: `${height}px`,
+      visibility: '', pointerEvents: '',
+    })
   }
   const schedulePanelPosition = () => {
     if ((!mounted?.inTopLayer && !mounted?.tooltipOpen) || panelFramePending) return
@@ -1669,8 +1781,15 @@
       state.inTopLayer = false
       state.layerObserver?.disconnect()
       state.layerObserver = null
+      state.layoutObserver?.disconnect()
+      state.layoutObserver = null
+      if (state.layoutTarget && state.onLayoutTransition) {
+        state.layoutTarget.removeEventListener?.('transitionend', state.onLayoutTransition)
+      }
+      state.layoutTarget = null
+      state.onLayoutTransition = null
       panel.removeAttribute('popover')
-      for (const name of ['position', 'inset', 'margin', 'left', 'top', 'width', 'height']) panel.style[name] = ''
+      for (const name of ['position', 'inset', 'margin', 'left', 'top', 'width', 'height', 'visibility', 'pointerEvents']) panel.style[name] = ''
       return
     }
     if (typeof panel.showPopover !== 'function') return
@@ -1681,6 +1800,23 @@
       if (typeof ResizeObserver === 'function') {
         state.layerObserver = new ResizeObserver(schedulePanelPosition)
         state.layerObserver.observe(state.host)
+        if (state.stream) state.layerObserver.observe(state.stream)
+        if (state.header) state.layerObserver.observe(state.header)
+        const input = state.stream && $('.chat-input', state.stream)
+        if (input) state.layerObserver.observe(input)
+        if (document.documentElement) state.layerObserver.observe(document.documentElement)
+      }
+      const layoutTarget = state.stream?.closest?.('.right-column') || state.stream
+      if (layoutTarget) {
+        state.layoutTarget = layoutTarget
+        if (typeof MutationObserver === 'function') {
+          state.layoutObserver = new MutationObserver(schedulePanelPosition)
+          state.layoutObserver.observe(layoutTarget, { attributes: true, attributeFilter: ['class', 'style'] })
+        }
+        state.onLayoutTransition = event => {
+          if (!event || event.target === layoutTarget) schedulePanelPosition()
+        }
+        layoutTarget.addEventListener?.('transitionend', state.onLayoutTransition)
       }
     }
     positionFilterPanel(state)
@@ -1691,6 +1827,9 @@
     cancelListFollow(state)
     state.readerScrollIntent = false
     cancelMessageRender(state)
+    if (!enabled && !state.panel.hidden) {
+      state.savedReaderAnchor = !state.history.follow ? captureViewportAnchor(state) : null
+    }
     state.history.enabled = enabled
     state.host.classList.toggle('ttc-active', enabled)
     state.panel.hidden = !enabled
@@ -1707,7 +1846,9 @@
     }
     if (enabled) {
       if (state.messageSearch) state.messageSearch.value = state.history.search || ''
-      renderMessages(state, true)
+      const savedAnchor = !state.history.follow ? state.savedReaderAnchor : null
+      state.savedReaderAnchor = null
+      renderMessages(state, true, savedAnchor)
     }
   }
 
@@ -1920,7 +2061,8 @@
     setTargetsOpen(false)
     renderTargets(state)
     state.list.addEventListener('scroll', () => {
-      if (!state.history.enabled || state.panel.hidden) return
+      if (!state.history.enabled || state.panel.hidden || state.restoringScroll) return
+      if (!state.history.follow && state.locationPinned && !state.readerScrollIntent) return
       const nearBottom = state.list.scrollHeight - state.list.scrollTop - state.list.clientHeight < 40
       const movedUp = Number.isFinite(state.followScrollTop) && state.list.scrollTop < state.followScrollTop - 1
       // A delayed image can invalidate a pending programmatic scroll event.
@@ -1936,13 +2078,18 @@
       }
       state.latest.hidden = state.history.follow
     }, { passive: true })
-    for (const event of ['wheel', 'touchstart', 'pointerdown', 'keydown']) {
-      state.list.addEventListener(event, () => {
+    for (const type of ['wheel', 'touchstart', 'pointerdown', 'keydown']) {
+      state.list.addEventListener(type, event => {
+        if (type === 'pointerdown' && event?.target?.closest?.('.ttc-replies-toggle, a')) return
+        if (type === 'keydown' && event?.key && !['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(event.key)) return
         state.readerScrollIntent = true
+        state.locationPinned = false
       }, { passive: true })
     }
     state.latest.addEventListener('click', () => {
       state.readerScrollIntent = false
+      state.locationPinned = false
+      state.savedReaderAnchor = null
       state.history.follow = true
       renderMessages(state)
     })
@@ -1980,7 +2127,7 @@
     if (mounted && (mounted.history.channel !== channel || mounted.header !== header ||
       mounted.scroller !== scroller || !mounted.button.isConnected || !mounted.panel.isConnected)) unmount()
     if (mounted || !channel || !header || !host) return
-    const state = { history: getHistory(channel), header, scroller, host }
+    const state = { history: getHistory(channel), stream, header, scroller, host }
     state.host.classList.add('ttc-host')
     scroller.classList.add('ttc-source')
     const button = element('button', {
@@ -2082,7 +2229,7 @@
       .ttc-list, .ttc-target-list, .ttc-managing > .ttc-toolbar { --ttc-scrollbar-thumb: #ffffff; --ttc-scrollbar-track: #000000; }
       .ttc-toggle:focus-visible, .ttc-panel button:focus-visible, .ttc-panel input:focus-visible, .ttc-replies-toggle:focus-visible { outline: 2px solid currentColor; }
     }
-    .ttc-list { flex: 1; min-height: 0; overflow: auto; overflow-anchor: none; padding: 6px 0; }
+    .ttc-list { flex: 1; min-height: 0; overflow: auto; padding: 6px 0; }
     .ttc-message { padding: 5px 10px; overflow-wrap: anywhere; line-height: 1.6; content-visibility: auto; contain-intrinsic-size: auto none auto 30px; }
     .ttc-message.ttc-has-reply { contain-intrinsic-size: auto none auto 52px; }
     .ttc-thread, .ttc-reply-group { padding: 5px 10px; content-visibility: auto; contain-intrinsic-size: auto none auto 30px; }
@@ -2141,6 +2288,7 @@
   })
   window.addEventListener('resize', schedulePanelPosition)
   window.addEventListener('scroll', schedulePanelPosition, true)
+  document.addEventListener('fullscreenchange', schedulePanelPosition)
   const observer = new MutationObserver(mutations => {
     if (mounted?.button.isConnected && mounted.panel.isConnected &&
       mounted.scroller.isConnected && getChannel() === mounted.history.channel) return

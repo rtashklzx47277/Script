@@ -2417,3 +2417,244 @@ test('Twitch target-to-missing-target replies: reconstruct standalone orphan par
 
   env.api.unmount()
 })
+
+test('Twitch filter layer: cover full chat bounds between header and input despite native banners and column collapse', () => {
+  const env = boot({ withResizeObserver: true })
+  const rightCol = env.document.body.appendChild(new env.Element('div'))
+  rightCol.className = 'right-column'
+  const stream = rightCol.appendChild(new env.Element('div'))
+  stream.className = 'stream-chat'
+  const header = stream.appendChild(new env.Element('div'))
+  header.className = 'stream-chat-header'
+  const host = stream.appendChild(new env.Element('div'))
+  const input = stream.appendChild(new env.Element('div'))
+  input.className = 'chat-input'
+  const panel = env.document.createElement('div')
+  panel.showPopover = () => {}
+  panel.hidePopover = () => {}
+
+  let streamBox = { left: 1205, top: 0, width: 340, height: 765, bottom: 765 }
+  let headerBox = { top: 0, bottom: 40, height: 40 }
+  let hostBox = { left: 1205, top: 111, width: 340, height: 565, bottom: 676 }
+  let inputBox = { top: 676, bottom: 765, height: 89 }
+  stream.getBoundingClientRect = () => streamBox
+  header.getBoundingClientRect = () => headerBox
+  host.getBoundingClientRect = () => hostBox
+  input.getBoundingClientRect = () => inputBox
+
+  const state = { panel, stream, header, host }
+  env.api.setMounted(state)
+  env.api.setPanelLayer(state, true)
+  assert.equal(panel.style.left, '1205px')
+  assert.equal(panel.style.top, '40px')
+  assert.equal(panel.style.width, '340px')
+  assert.equal(panel.style.height, '636px', 'ignores 71px native banner shrinking host')
+  assert.equal(panel.style.visibility, '')
+  assert.equal(panel.style.pointerEvents, '')
+
+  // Banner growth/collapse updates host without shifting .ttc-panel
+  hostBox = { left: 1205, top: 190, width: 340, height: 486, bottom: 676 }
+  env.observers[0].notify()
+  env.flushFrames()
+  assert.equal(panel.style.top, '40px')
+  assert.equal(panel.style.height, '636px')
+
+  // Chat input height change updates bottom cleanly
+  inputBox = { top: 640, bottom: 765, height: 125 }
+  env.api.positionFilterPanel(state)
+  assert.equal(panel.style.height, '600px')
+
+  // Theater / sidebar transitionend repositions after column shifts
+  streamBox = { left: 1100, top: 0, width: 340, height: 765, bottom: 765 }
+  rightCol.listeners.get('transitionend')({ target: rightCol })
+  env.flushFrames()
+  assert.equal(panel.style.left, '1100px')
+
+  // Collapsing chat column hides popover instead of stranding an empty box over video
+  streamBox = { left: 1440, top: 0, width: 0, height: 0, bottom: 0 }
+  hostBox = { left: 1440, top: 0, width: 0, height: 0, bottom: 0 }
+  env.document.listeners.get('fullscreenchange')()
+  env.flushFrames()
+  assert.equal(panel.style.visibility, 'hidden')
+  assert.equal(panel.style.pointerEvents, 'none')
+  assert.equal(panel.style.width, '0px')
+  assert.equal(panel.style.height, '0px')
+
+  // Re-expanding column restores visible overlay
+  streamBox = { left: 1205, top: 0, width: 340, height: 765, bottom: 765 }
+  hostBox = { left: 1205, top: 40, width: 340, height: 636, bottom: 676 }
+  env.api.positionFilterPanel(state)
+  assert.equal(panel.style.visibility, '')
+  assert.equal(panel.style.pointerEvents, '')
+  assert.equal(panel.style.height, '600px')
+
+  // Fallback without .chat-input (VOD / fixture layout) uses host bottom
+  input.remove()
+  hostBox = { left: 1205, top: 60, width: 340, height: 500, bottom: 560 }
+  headerBox = { top: 0, bottom: 60, height: 60 }
+  env.api.positionFilterPanel(state)
+  assert.equal(panel.style.top, '60px')
+  assert.equal(panel.style.height, '500px')
+
+  env.api.setPanelLayer(state, false)
+  assert.equal(panel.style.visibility, '')
+  assert.equal(panel.style.pointerEvents, '')
+  assert.equal(panel.style.position, '')
+  env.api.setMounted(null)
+})
+
+test('Twitch scroll stability: avoid overflow-anchor: none, keep toggles anchored, and preserve paused position across evictions and reopen', () => {
+  const env = boot({ withResizeObserver: true })
+  const stream = env.document.body.appendChild(new env.Element('div'))
+  stream.className = 'stream-chat'
+  const header = stream.appendChild(new env.Element('div'))
+  header.className = 'stream-chat-header'
+  const host = stream.appendChild(new env.Element('div'))
+  const scroller = host.appendChild(new env.Element('div'))
+  scroller.setAttribute('data-a-target', 'chat-scroller')
+
+  env.api.refresh()
+  const state = env.api.mounted
+  const history = state.history
+
+  const cssText = env.document.head.querySelector('style').textContent
+  assert.equal(/\.ttc-list[^}]*overflow-anchor\s*:\s*none/i.test(cssText), false)
+
+  // Provide deterministic vertical geometry for list and its children
+  const rowHeight = child => {
+    if (child.classList?.contains('ttc-thread') || child.classList?.contains('ttc-reply-group')) {
+      const replyPanel = child.querySelector('.ttc-replies')
+      const openReplies = replyPanel && !replyPanel.hidden ? replyPanel.querySelectorAll('.ttc-message').length * 30 : 0
+      return 30 + openReplies
+    }
+    return 30
+  }
+  const LIST_TOP = 100
+  state.list.clientHeight = 120
+  state.list.scrollTop = 0
+  Object.defineProperty(state.list, 'scrollHeight', {
+    get() { return state.list.children.reduce((sum, child) => sum + rowHeight(child), 0) },
+  })
+  state.list.getBoundingClientRect = () => ({ top: LIST_TOP, bottom: LIST_TOP + state.list.clientHeight, height: state.list.clientHeight })
+  const origAppend = state.list.appendChild.bind(state.list)
+  const attachRowRect = node => {
+    node.getBoundingClientRect = () => {
+      let y = 0
+      for (const child of state.list.children) {
+        if (child === node) break
+        y += rowHeight(child)
+      }
+      const h = rowHeight(node)
+      const top = LIST_TOP + y - state.list.scrollTop
+      return { top, bottom: top + h, height: h }
+    }
+    const origReplaceWith = node.replaceWith.bind(node)
+    node.replaceWith = other => {
+      attachRowRect(other)
+      origReplaceWith(other)
+    }
+  }
+  state.list.appendChild = child => {
+    attachRowRect(child)
+    return origAppend(child)
+  }
+
+  const makeReply = (user, text, id, parent) => {
+    const msg = env.message(user, text, '', id)
+    msg.line.__reactFiber$1 = {
+      memoizedProps: {
+        message: { id, user: { userLogin: user, userDisplayName: user }, reply: parent },
+      },
+    }
+    return msg
+  }
+
+  // Fill 10 messages (m-0..m-9) + 3 viewer replies on m-9
+  for (let i = 0; i < 10; i++) {
+    env.api.captureLine(env.message('mod_a', `msg ${i}`, 'Moderator', `m-${i}`).line, history)
+  }
+  for (let r = 0; r < 3; r++) {
+    env.api.captureLine(makeReply(`v_${r}`, `reply ${r}`, `r-${r}`, {
+      parentMsgId: 'm-9', parentUserLogin: 'mod_a', parentDisplayName: 'ModA', parentMessageBody: 'msg 9', parentDeleted: false,
+    }).line, history)
+  }
+  env.api.setEnabled(state, true)
+  const thread9 = history.ids.get('m-9').view.closest('.ttc-thread')
+  const head9 = thread9.querySelector('.ttc-thread-head')
+  head9.getBoundingClientRect = () => {
+    const t = thread9.getBoundingClientRect().top
+    return { top: t, bottom: t + 30, height: 30 }
+  }
+  const toggle9 = thread9.querySelector('.ttc-replies-toggle')
+  const panel9 = thread9.querySelector('.ttc-replies')
+
+  // Simulate normal browser clamped scrollTop at bottom (scrollHeight - clientHeight = 300 - 120 = 180)
+  state.list.scrollTop = 180
+  const headBeforeExpand = head9.getBoundingClientRect().top - state.list.getBoundingClientRect().top
+  toggle9.listeners.get('click')()
+  env.flushFrames()
+  const headAfterExpand = head9.getBoundingClientRect().top - state.list.getBoundingClientRect().top
+  assert.equal(headAfterExpand, headBeforeExpand, 'expanding replies must keep thread header anchored')
+  assert.equal(state.list.scrollTop, 180, 'expanding replies must not jump to new bottom')
+  assert.equal(history.follow, false)
+  assert.equal(state.latest.hidden, false)
+
+  // Return to latest and trigger beforematch -> opens drawer without scheduling bottom jump
+  toggle9.listeners.get('click')()
+  state.latest.listeners.get('click')()
+  assert.equal(history.follow, true)
+  panel9.listeners.get('beforematch')()
+  env.flushFrames()
+  assert.equal(history.follow, false)
+  assert.equal(state.latest.hidden, false)
+  assert.equal(panel9.getAttribute('hidden'), null)
+
+  // pointerdown on reply toggle / links and non-scroll keys must not mark readerScrollIntent
+  state.readerScrollIntent = false
+  state.list.listeners.get('pointerdown')({ target: toggle9 })
+  assert.equal(state.readerScrollIntent, false)
+  const fakeLink = new env.Element('a')
+  toggle9.appendChild(fakeLink)
+  state.list.listeners.get('pointerdown')({ target: fakeLink })
+  assert.equal(state.readerScrollIntent, false)
+  state.list.listeners.get('keydown')({ key: 'Control' })
+  assert.equal(state.readerScrollIntent, false)
+
+  // Pause reading at m-500 after growing to 1000-message cap
+  for (let i = 10; i < 1000; i++) {
+    env.api.captureLine(env.message('mod_a', `msg ${i}`, 'Moderator', `m-${i}`).line, history)
+  }
+  state.latest.listeners.get('click')()
+  state.list.listeners.get('wheel')({})
+  state.list.scrollTop = 500 * 30
+  state.list.listeners.get('scroll')()
+  assert.equal(history.follow, false)
+  const row500 = history.ids.get('m-500').view
+  assert.equal(row500.getBoundingClientRect().top, LIST_TOP)
+
+  // Evict 5 oldest retained records (150px) with no full scan -> m-500 stays pinned at LIST_TOP
+  history.messages[Symbol.iterator] = () => { throw Error('unexpected full history scan') }
+  for (let i = 1000; i < 1005; i++) {
+    env.api.captureLine(env.message('mod_a', `msg ${i}`, 'Moderator', `m-${i}`).line, history)
+  }
+  env.api.renderMessages(state)
+  delete history.messages[Symbol.iterator]
+  assert.equal(state.list.scrollTop, 495 * 30)
+  assert.equal(row500.getBoundingClientRect().top, LIST_TOP)
+  assert.equal(state.locationPinned, true)
+
+  // Deferred scroll event after programmatic restore must not clobber paused follow state
+  state.readerScrollIntent = false
+  state.list.listeners.get('scroll')()
+  assert.equal(history.follow, false)
+
+  // Closing (display:none resets scrollTop to 0 and collapses m-9's 90px open drawer) and reopening keeps m-500 anchored at LIST_TOP
+  env.api.setEnabled(state, false)
+  state.list.scrollTop = 0
+  env.api.setEnabled(state, true)
+  assert.equal(history.follow, false)
+  assert.equal(state.list.scrollTop, 492 * 30)
+  assert.equal(row500.getBoundingClientRect().top, LIST_TOP)
+
+  env.api.unmount()
+})
