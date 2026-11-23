@@ -1910,15 +1910,21 @@ test('Twitch reply drawers: keep target-to-target top-level, persist open state 
   assert.equal(liveToggle.textContent, '1 則回覆')
   assert.equal(livePanel.getAttribute('hidden'), 'until-found')
 
-  // Orphan replies merged into a single .ttc-reply-group with inline toggle next to quote
+  // Orphan replies merged into a single .ttc-reply-group as a reconstructed parent row with inline toggle
   assert.equal(state.list.querySelectorAll('.ttc-reply-group').length, 1)
   const orphanGroup = state.list.querySelector('.ttc-reply-group')
   const orphanHead = orphanGroup.querySelector('.ttc-thread-head')
   assert.equal(orphanHead.classList.contains('ttc-orphan-head'), true)
-  assert.equal(orphanHead.children[0].className, 'ttc-reply')
+  const orphanRow = orphanHead.children[0]
+  assert.equal(orphanRow.classList.contains('ttc-message'), true)
+  assert.equal(orphanRow.classList.contains('ttc-orphan-message'), true)
+  assert.equal(orphanRow.classList.contains('ttc-has-replies'), true)
+  assert.equal(orphanHead.querySelector('.ttc-reply'), null, 'orphan header must not render a reply quote bar')
+  assert.equal(orphanRow.querySelector('.ttc-orphan-tag').textContent, '原留言')
+  assert.equal(orphanRow.querySelector('.ttc-orphan-author').textContent, '實況主 (sample_channel)')
+  assert.equal(orphanRow.querySelector('.ttc-orphan-body').textContent, '開台啦')
   assert.equal(orphanHead.children[1].className, 'ttc-replies-toggle')
   assert.equal(orphanHead.children[1].textContent, '2 則回覆')
-  assert.equal(orphanGroup.querySelector('.ttc-reply-author').textContent, '@實況主 (sample_channel)')
 
   // Click toggle to open live drawer and verify open state persists across incremental updates, edits, and NO full history scan
   liveToggle.listeners.get('click')()
@@ -2056,4 +2062,134 @@ test('Twitch reply drawers: preserve cross-day date dividers across threads, han
   assert.equal(rep1Record.view.closest('.ttc-reply-group').getAttribute('data-date'), '2026/11/17')
   assert.equal(state.list.querySelectorAll('.ttc-reply-group').length, 2)
   assert.equal(state.count.textContent, '4 則')
+})
+
+test('Twitch orphan reply groups: render independent target threads with remembered color, deleted placeholder, and separate adjacent targets', async () => {
+  const database = fakeIndexedDB()
+  const seed = boot({ database })
+  const seedScroller = seed.document.createElement('div')
+  seedScroller.setAttribute('data-a-target', 'chat-scroller')
+  const seedHistory = seed.api.getHistory('sample_channel')
+  seedHistory.settings.users = ['never_loses']
+  seed.api.saveSettings(seedHistory)
+  await seedHistory.restorePromise
+  const prevTargetA = seed.message('never_loses', '早安', '', 'prev-a')
+  const prevAuthor = prevTargetA.authorContainer.querySelector('[data-a-target="chat-message-username"]')
+  prevAuthor.textContent = 'NeVeR_LosEs'
+  prevAuthor.style.color = 'rgb(255, 117, 181)'
+  seedScroller.appendChild(prevTargetA.line)
+  seed.api.captureLine(prevTargetA.line, seedHistory)
+  await seed.api.flushHistory(seedHistory)
+
+  const env = boot({ database })
+  const stream = env.document.body.appendChild(new env.Element('div'))
+  stream.className = 'stream-chat'
+  const header = stream.appendChild(new env.Element('div'))
+  header.className = 'stream-chat-header'
+  const host = stream.appendChild(new env.Element('div'))
+  const scroller = host.appendChild(new env.Element('div'))
+  scroller.setAttribute('data-a-target', 'chat-scroller')
+  env.api.refresh()
+  const state = env.api.mounted
+  const history = state.history
+  history.settings.users = ['never_loses']
+  env.api.saveSettings(history)
+  env.api.setEnabled(state, true)
+  await history.restorePromise
+
+  const makeReply = (user, text, id, parent, { role = '', displayName = user, color = 'red' } = {}) => {
+    const msg = env.message(user, text, role, id)
+    const author = msg.authorContainer.querySelector('[data-a-target="chat-message-username"]')
+    author.textContent = displayName
+    author.style.color = color
+    msg.line.__reactFiber$1 = {
+      memoizedProps: {
+        message: { id, user: { userLogin: user, userDisplayName: displayName }, reply: parent },
+      },
+    }
+    scroller.appendChild(msg.line)
+    return msg
+  }
+
+  // Case 1: Orphan Target A (NeVeR_LosEs, color restored from IndexedDB) right above captured Target B (raiki_raibao)
+  makeReply('viewer_a1', '笑死', 'oa-1', {
+    parentMsgId: 'p-unseen-a', parentUserLogin: 'never_loses', parentDisplayName: 'NeVeR_LosEs', parentMessageBody: 'shaxy101', parentDeleted: false,
+  })
+  makeReply('viewer_a2', '+1', 'oa-2', {
+    parentMsgId: 'p-unseen-a', parentUserLogin: 'never_loses', parentDisplayName: 'NeVeR_LosEs', parentMessageBody: 'shaxy101', parentDeleted: false,
+  })
+  const targetB = env.message('raiki_raibao', '喜歡都可以說的唷', 'Moderator', 'p-live-b')
+  const targetBAuthor = targetB.authorContainer.querySelector('[data-a-target="chat-message-username"]')
+  targetBAuthor.textContent = '來希'
+  targetBAuthor.style.color = 'rgb(255, 128, 200)'
+  scroller.appendChild(targetB.line)
+  makeReply('viewer_b1', '真的', 'ob-1', {
+    parentMsgId: 'p-live-b', parentUserLogin: 'raiki_raibao', parentDisplayName: '來希', parentMessageBody: '喜歡都可以說的唷', parentDeleted: false,
+  })
+
+  // Case 2: Live remembered VIP color -> Target C (vip_target) unseen parent AND Target D (mod_d) replying to Target C
+  const liveVip = env.message('vip_target', '先行離席', 'VIP', 'p-vip-seen')
+  liveVip.authorContainer.querySelector('[data-a-target="chat-message-username"]').style.color = 'rgb(100, 200, 255)'
+  scroller.appendChild(liveVip.line)
+  makeReply('viewer_c1', '掰掰', 'oc-1', {
+    parentMsgId: 'p-unseen-vip', parentUserLogin: 'vip_target', parentDisplayName: 'VIPTarget', parentMessageBody: '大家晚安', parentDeleted: false,
+  })
+  makeReply('mod_d', '晚安路上小心', 'p-mod-d', {
+    parentMsgId: 'p-unseen-vip', parentUserLogin: 'vip_target', parentDisplayName: 'VIPTarget', parentMessageBody: '大家晚安', parentDeleted: false,
+  }, { role: 'Moderator', displayName: 'ModD' })
+  makeReply('viewer_d1', '管理員也晚安', 'od-1', {
+    parentMsgId: 'p-mod-d', parentUserLogin: 'mod_d', parentDisplayName: 'ModD', parentMessageBody: '晚安路上小心', parentDeleted: false,
+  })
+
+  // Case 3: Deleted orphan parent renders 訊息已刪除 placeholder with .ttc-reply-deleted
+  makeReply('viewer_del', '刪了什麼', 'odel-1', {
+    parentMsgId: 'p-unseen-del', parentUserLogin: 'mod_d', parentDisplayName: 'ModD', parentMessageBody: '', parentDeleted: true,
+  })
+
+  env.api.captureTree(scroller, history)
+  env.api.renderMessages(state, true)
+
+  const orphanGroups = state.list.querySelectorAll('.ttc-reply-group')
+  assert.equal(orphanGroups.length, 3)
+
+  // Verify orphan Target A (never_loses) sits cleanly before captured Target B's .ttc-thread
+  const [groupA, groupVip, groupDel] = orphanGroups
+  const targetBThread = history.ids.get('p-live-b').view.closest('.ttc-thread')
+  assert.ok(targetBThread)
+  const listChildren = state.list.children
+  assert.equal(listChildren.indexOf(targetBThread), listChildren.indexOf(groupA) + 1)
+
+  const rowA = groupA.querySelector('.ttc-orphan-message')
+  assert.ok(rowA)
+  assert.equal(groupA.querySelector('.ttc-orphan-head .ttc-reply'), null)
+  assert.equal(rowA.querySelector('.ttc-orphan-tag').textContent, '原留言')
+  assert.equal(rowA.querySelector('.ttc-orphan-author').textContent, 'NeVeR_LosEs')
+  assert.equal(rowA.querySelector('.ttc-orphan-author').style.color, 'rgb(255, 117, 181)')
+  assert.equal(rowA.querySelector('.ttc-orphan-body').textContent, 'shaxy101')
+  assert.equal(groupA.querySelector('.ttc-replies-toggle').textContent, '2 則回覆')
+  assert.equal(targetBThread.querySelector('.ttc-replies-toggle').textContent, '1 則回覆')
+
+  // Verify Target D (mod_d) replying to orphan Target C (vip_target) retains its own separate .ttc-thread
+  const rowVip = groupVip.querySelector('.ttc-orphan-message')
+  assert.equal(rowVip.querySelector('.ttc-orphan-author').textContent, 'VIPTarget (vip_target)')
+  assert.equal(rowVip.querySelector('.ttc-orphan-author').style.color, 'rgb(100, 200, 255)')
+  assert.equal(groupVip.querySelector('.ttc-replies-toggle').textContent, '1 則回覆')
+  const modDView = history.ids.get('p-mod-d').view
+  const modDThread = modDView.closest('.ttc-thread')
+  assert.ok(modDThread)
+  assert.notEqual(modDThread, groupVip)
+  assert.ok(modDView.querySelector('.ttc-reply'), 'target reply retains its own reply quote bar')
+  assert.equal(modDThread.querySelector('.ttc-replies-toggle').textContent, '1 則回覆')
+
+  // Verify deleted orphan parent placeholder
+  const delBody = groupDel.querySelector('.ttc-orphan-body')
+  assert.equal(delBody.classList.contains('ttc-reply-deleted'), true)
+  assert.equal(delBody.textContent, '訊息已刪除')
+
+  // Verify CSS styles for orphan groups and tags without quote-bar overrides
+  const cssText = env.document.head.querySelector('style').textContent
+  assert.match(cssText, /\.ttc-reply-group:hover/)
+  assert.match(cssText, /\.ttc-orphan-tag/)
+  assert.equal(/\.ttc-orphan-head > \.ttc-reply/.test(cssText), false)
+  env.api.unmount()
 })

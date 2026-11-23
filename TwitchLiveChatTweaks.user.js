@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        Twitch Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.10.1
+// @version     0.10.2
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
 // @description 依頻道主、管理員、VIP、回覆篩選目標與全域帳號包含／排除名單篩選 Twitch 直播與 VOD 聊天，保留回覆目標引言與最近 1000 則／7 天紀錄，支援跨日分隔、搜尋與自動跟隨。
@@ -322,12 +322,28 @@
     if (cleaned.toLowerCase().endsWith(suffix)) return cleaned.slice(0, -suffix.length).trim()
     return cleaned
   }
-  const rememberUser = (history, user, displayName, { moderator = false, broadcaster = false, vip = false } = {}) => {
+  const rememberUser = (history, user, displayName, { moderator = false, broadcaster = false, vip = false, color = '' } = {}) => {
     const login = normalizeLogin(user)
     if (!history || !login) return
     if (history.knownRoles) {
-      if (moderator || broadcaster || vip) {
-        history.knownRoles.set(login, { moderator: Boolean(moderator), broadcaster: Boolean(broadcaster), vip: Boolean(vip) })
+      const prev = history.knownRoles.get(login)
+      const nextColor = color || prev?.color || ''
+      if (moderator || broadcaster || vip || nextColor) {
+        history.knownRoles.delete(login)
+        history.knownRoles.set(login, {
+          moderator: Boolean(moderator),
+          broadcaster: Boolean(broadcaster),
+          vip: Boolean(vip),
+          color: nextColor,
+        })
+        if (history.knownRoles.size > MAX_DISPLAY_NAMES) {
+          for (const [key, entry] of history.knownRoles) {
+            if (!entry.moderator && !entry.broadcaster && !entry.vip) {
+              history.knownRoles.delete(key)
+              break
+            }
+          }
+        }
       } else {
         history.knownRoles.delete(login)
       }
@@ -400,6 +416,27 @@
     }
     quote.appendChild(text)
     return quote
+  }
+  const makeOrphanParentView = (reply, history) => {
+    const row = element('div', { class: 'ttc-message ttc-orphan-message ttc-has-replies' }, [
+      element('span', { class: 'ttc-orphan-tag' }, ['原留言']),
+    ])
+    const label = formatAuthorLabel(reply?.parentDisplayName, reply?.parentUser)
+    const bodyText = reply?.parentText || (reply?.parentDeleted ? '訊息已刪除' : '')
+    const color = reply?.parentUser ? history?.knownRoles?.get(reply.parentUser)?.color || '' : ''
+    if (label) {
+      const author = element('strong', { class: 'ttc-orphan-author', dir: 'auto' }, [label])
+      if (color) author.style.color = color
+      row.appendChild(author)
+      if (bodyText) row.appendChild(document.createTextNode(': '))
+    }
+    if (bodyText) {
+      row.appendChild(element('span', {
+        class: reply?.parentDeleted ? 'ttc-orphan-body ttc-reply-deleted' : 'ttc-orphan-body',
+        dir: 'auto',
+      }, [bodyText]))
+    }
+    return row
   }
   const restoreRecord = saved => {
     if (saved.tree?.tag !== 'div') return null
@@ -550,7 +587,12 @@
       const owner = history.channel.startsWith('vod:') ? getVodOwner() : history.channel
       for (const record of history.messages) {
         const authorNode = [...record.view.children].find(child => child.tagName?.toLowerCase() === 'strong')
-        rememberUser(history, record.user, authorNode?.textContent || '', record)
+        rememberUser(history, record.user, authorNode?.textContent || '', {
+          moderator: record.moderator,
+          broadcaster: record.broadcaster,
+          vip: record.vip,
+          color: authorNode?.style?.color || '',
+        })
       }
       for (const record of history.messages) {
         if (!record.reply) continue
@@ -854,7 +896,12 @@
     const owner = history.channel.startsWith('vod:') ? getVodOwner() : history.channel
     const message = readMessage(line, owner, history)
     if (!message) return false
-    rememberUser(history, message.user, message.author.textContent, message)
+    rememberUser(history, message.user, message.author.textContent, {
+      moderator: message.moderator,
+      broadcaster: message.broadcaster,
+      vip: message.vip,
+      color: message.author.style?.color || '',
+    })
     const previous = message.id ? history.ids.get(message.id) : history.nodes.get(line)
     // Only retain messages matching the active filter so unchecked roles and
     // excluded accounts cannot evict matching history from the 1000-message cap.
@@ -1109,7 +1156,7 @@
       viewDates.set(wrapper, formatDateKey(parentRecord.createdAt))
       syncDateMarker(wrapper, adjacentDatedRow(wrapper, -1))
     } else {
-      head = element('div', { class: 'ttc-thread-head ttc-orphan-head' }, [makeReplyView(sampleReply), toggle])
+      head = element('div', { class: 'ttc-thread-head ttc-orphan-head' }, [makeOrphanParentView(sampleReply, state.history), toggle])
       wrapper = element('div', { class: 'ttc-reply-group' }, [head, panel])
       viewDates.set(wrapper, formatDateKey(createdAt))
       state.list.appendChild(wrapper)
@@ -1931,7 +1978,7 @@
     .ttc-message { padding: 5px 10px; overflow-wrap: anywhere; line-height: 1.6; content-visibility: auto; contain-intrinsic-size: auto none auto 30px; }
     .ttc-message.ttc-has-reply { contain-intrinsic-size: auto none auto 52px; }
     .ttc-thread, .ttc-reply-group { padding: 5px 10px; content-visibility: auto; contain-intrinsic-size: auto none auto 30px; }
-    .ttc-thread:hover { background: var(--color-background-button-text-hover, #ffffff11); }
+    .ttc-thread:hover, .ttc-reply-group:hover { background: var(--color-background-button-text-hover, #ffffff11); }
     .ttc-thread-head { overflow-wrap: anywhere; line-height: 1.6; }
     .ttc-thread-head > .ttc-message { display: inline; padding: 0; content-visibility: visible; contain-intrinsic-size: auto; }
     .ttc-thread-head > .ttc-message:hover { background: transparent; }
@@ -1941,9 +1988,7 @@
     .ttc-reply-text { flex: 1; min-inline-size: 0; }
     .ttc-reply-author { font-weight: 600; }
     .ttc-reply-deleted { font-style: italic; }
-    .ttc-orphan-head { padding-left: 6px; border-left: 2px solid var(--color-border-base, #ffffff33); color: var(--color-text-alt-2, #adadb8); font-size: 12px; line-height: 1.4; }
-    .ttc-orphan-head > .ttc-reply { display: inline; margin: 0; padding: 0; border: 0; }
-    .ttc-orphan-head > .ttc-reply::before { margin-right: 4px; }
+    .ttc-orphan-tag { display: inline-block; margin-right: 6px; padding: 0 4px; border-radius: 3px; color: var(--color-text-alt-2, #adadb8); background: var(--color-background-button-text-hover, #ffffff18); font-size: 10px; line-height: 1.4; vertical-align: baseline; }
     .ttc-replies-toggle { display: inline-flex; align-items: center; gap: 3px; margin-left: 6px; padding: 1px 5px; border: 0; border-radius: 4px; color: var(--color-text-link, #bf94ff); background: transparent; font: inherit; font-size: 12px; font-weight: 600; line-height: 1.4; white-space: nowrap; vertical-align: baseline; cursor: pointer; user-select: none; }
     .ttc-replies-toggle:hover { background: var(--color-background-button-text-hover, #ffffff18); }
     .ttc-replies-toggle:focus-visible { outline: 2px solid #9147ff; outline-offset: 1px; }
