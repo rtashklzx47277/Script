@@ -1986,6 +1986,29 @@ test('Twitch reply drawers: keep target-to-target top-level, persist open state 
   assert.equal(oldThread.querySelector('.ttc-replies-toggle').getAttribute('aria-expanded'), 'false')
   assert.equal(oldThread.querySelector('.ttc-replies-toggle').textContent, '2 則回覆')
   assert.equal(state.list.querySelectorAll('.ttc-reply-group').length, 1, 'only unseen-bc-1 remains an orphan group')
+
+  // Closing filter panel collapses all expanded reply threads and clears open state
+  const currentLiveThread = history.ids.get('p-live').view.closest('.ttc-thread')
+  const unseenGroup = state.list.querySelector('.ttc-reply-group')
+  assert.equal(state.openReplyThreads.size, 2)
+  assert.equal(currentLiveThread.querySelector('.ttc-replies-toggle').getAttribute('aria-expanded'), 'true')
+  assert.equal(unseenGroup.querySelector('.ttc-replies-toggle').getAttribute('aria-expanded'), 'true')
+
+  env.api.setEnabled(state, false)
+  assert.equal(state.openReplyThreads.size, 0)
+  assert.equal(currentLiveThread.querySelector('.ttc-replies-toggle').getAttribute('aria-expanded'), 'false')
+  assert.equal(currentLiveThread.querySelector('.ttc-replies').getAttribute('hidden'), 'until-found')
+  assert.equal(unseenGroup.querySelector('.ttc-replies-toggle').getAttribute('aria-expanded'), 'false')
+  assert.equal(unseenGroup.querySelector('.ttc-replies').getAttribute('hidden'), 'until-found')
+
+  env.api.setEnabled(state, true)
+  assert.equal(state.openReplyThreads.size, 0)
+  for (const toggle of state.list.querySelectorAll('.ttc-replies-toggle')) {
+    assert.equal(toggle.getAttribute('aria-expanded'), 'false')
+  }
+  for (const panel of state.list.querySelectorAll('.ttc-replies')) {
+    assert.equal(panel.getAttribute('hidden'), 'until-found')
+  }
   env.api.unmount()
 })
 
@@ -2382,6 +2405,15 @@ test('Twitch target-to-missing-target replies: reconstruct standalone orphan par
   assert.ok(evictedBcGroup)
   assert.equal(evictedBcGroup.querySelector('.ttc-replies-toggle').hidden, true)
   assert.equal(state.list.children.indexOf(history.ids.get('p-vip-b2').view), state.list.children.indexOf(evictedBcGroup) + 1)
+
+  // Closing filter panel keeps 0-reply orphan groups hidden (not until-found)
+  env.api.setEnabled(state, false)
+  for (const group of finalGroups) {
+    const panel = group.querySelector('.ttc-replies')
+    assert.equal(panel.hidden, true)
+    assert.equal(panel.matches('[hidden]'), true)
+    assert.equal(panel.getAttribute('hidden'), null)
+  }
 
   env.api.unmount()
 })

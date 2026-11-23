@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        Twitch Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.10.3
+// @version     0.10.4
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
 // @description 依頻道主、管理員、VIP、回覆篩選目標與全域帳號包含／排除名單篩選 Twitch 直播與 VOD 聊天，保留回覆目標引言與最近 1000 則／7 天紀錄，支援跨日分隔、搜尋與自動跟隨。
@@ -1284,6 +1284,12 @@
     state.replyDrawers?.clear()
     clearTargetReplyRefs(state)
   }
+  const collapseReplyDrawers = state => {
+    state.openReplyThreads?.clear()
+    for (const drawer of state.replyDrawers?.values() || []) {
+      if (drawer.replies.size > 0) setDrawerOpen(drawer, false)
+    }
+  }
 
   const renderMessages = (state, rebuild = false) => {
     cancelMessageRender(state)
@@ -1697,6 +1703,7 @@
       hideTooltip(state)
     } else {
       state.button.setAttribute('aria-describedby', tooltip.id)
+      collapseReplyDrawers(state)
     }
     if (enabled) {
       if (state.messageSearch) state.messageSearch.value = state.history.search || ''
