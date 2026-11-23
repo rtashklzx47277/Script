@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        Twitch Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.10.2
+// @version     0.10.3
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
 // @description 依頻道主、管理員、VIP、回覆篩選目標與全域帳號包含／排除名單篩選 Twitch 直播與 VOD 聊天，保留回覆目標引言與最近 1000 則／7 天紀錄，支援跨日分隔、搜尋與自動跟隨。
@@ -418,7 +418,7 @@
     return quote
   }
   const makeOrphanParentView = (reply, history) => {
-    const row = element('div', { class: 'ttc-message ttc-orphan-message ttc-has-replies' }, [
+    const row = element('div', { class: 'ttc-message ttc-orphan-message' }, [
       element('span', { class: 'ttc-orphan-tag' }, ['原留言']),
     ])
     const label = formatAuthorLabel(reply?.parentDisplayName, reply?.parentUser)
@@ -841,13 +841,16 @@
       (settings.users || []).includes(target.user)
     )
 
-  const matchesReplyTarget = (reply, settings) =>
-    settings.replies !== false && Boolean(reply?.parentUser) && matchesTarget({
+  const isReplyToActiveTarget = (reply, settings) =>
+    Boolean(reply?.parentUser) && matchesTarget({
       user: reply.parentUser,
       moderator: Boolean(reply.parentModerator),
       broadcaster: Boolean(reply.parentBroadcaster),
       vip: Boolean(reply.parentVip),
     }, settings)
+
+  const matchesReplyTarget = (reply, settings) =>
+    settings.replies !== false && isReplyToActiveTarget(reply, settings)
 
   const matchesFilter = (message, settings) =>
     !(settings.excludedUsers || []).includes(message.user) &&
@@ -1127,8 +1130,24 @@
     }
     return { key: `quote:${record.reply.parentUser}\n${record.reply.parentText}`, parentRecord: null }
   }
-  const updateDrawerSummary = drawer => {
+  const updateDrawerSummary = (state, drawer) => {
+    const hasReplies = drawer.replies.size > 0
+    const wasHidden = drawer.toggle.hidden
     drawer.toggle.textContent = `${drawer.replies.size} 則回覆`
+    drawer.toggle.hidden = !hasReplies
+    if (hasReplies) drawer.toggle.removeAttribute('hidden')
+    else drawer.toggle.setAttribute('hidden', '')
+    if (drawer.group) {
+      drawer.orphanRow?.classList?.toggle('ttc-has-replies', hasReplies)
+      if (!hasReplies) {
+        drawer.open = false
+        drawer.toggle.setAttribute('aria-expanded', 'false')
+        drawer.panel.hidden = true
+        drawer.panel.setAttribute('hidden', '')
+      } else if (wasHidden) {
+        setDrawerOpen(drawer, state.openReplyThreads?.has(drawer.key))
+      }
+    }
   }
   const ensureReplyDrawer = (state, key, parentRecord, sampleReply, createdAt) => {
     state.replyDrawers ||= new Map()
@@ -1146,6 +1165,7 @@
     const panel = element('div', { class: 'ttc-replies', id: panelId, hidden: 'until-found' }, [replyList])
     let head
     let wrapper
+    let orphanRow = null
     if (parentRecord) {
       head = element('div', { class: 'ttc-thread-head' }, [toggle])
       wrapper = element('div', { class: 'ttc-thread' }, [head, panel])
@@ -1156,16 +1176,17 @@
       viewDates.set(wrapper, formatDateKey(parentRecord.createdAt))
       syncDateMarker(wrapper, adjacentDatedRow(wrapper, -1))
     } else {
-      head = element('div', { class: 'ttc-thread-head ttc-orphan-head' }, [makeOrphanParentView(sampleReply, state.history), toggle])
+      orphanRow = makeOrphanParentView(sampleReply, state.history)
+      head = element('div', { class: 'ttc-thread-head ttc-orphan-head' }, [orphanRow, toggle])
       wrapper = element('div', { class: 'ttc-reply-group' }, [head, panel])
       viewDates.set(wrapper, formatDateKey(createdAt))
       state.list.appendChild(wrapper)
       syncDateMarker(wrapper, adjacentDatedRow(wrapper, -1))
     }
     const drawer = {
-      key, wrapper, head, toggle, panel, list: replyList,
+      key, wrapper, head, toggle, panel, list: replyList, orphanRow,
       group: parentRecord ? null : wrapper, parentRecord: parentRecord || null,
-      open: false, replies: new Set(),
+      open: false, replies: new Set(), anchors: new Set(),
     }
     setDrawerOpen(drawer, state.openReplyThreads.has(key))
     toggle.addEventListener('click', () => {
@@ -1214,12 +1235,54 @@
     record.replyThreadKey = ''
     if (!drawer) return
     drawer.replies.delete(record)
-    if (drawer.replies.size > 0) updateDrawerSummary(drawer)
+    if (drawer.replies.size > 0 || drawer.anchors.size > 0) updateDrawerSummary(state, drawer)
     else removeDrawer(state, drawer)
   }
+  const detachOrphanAnchor = (state, record) => {
+    if (!record.orphanParentKey) return
+    const drawer = state.replyDrawers?.get(record.orphanParentKey)
+    record.orphanParentKey = ''
+    if (!drawer) return
+    drawer.anchors.delete(record)
+    if (drawer.replies.size === 0 && drawer.anchors.size === 0) removeDrawer(state, drawer)
+  }
+  const unregisterTargetReplyRef = (state, record) => {
+    const prevId = record.targetReplyRefId
+    if (!prevId) return
+    record.targetReplyRefId = ''
+    const refs = state.targetReplyRefs?.get(prevId)
+    if (!refs) return
+    refs.delete(record)
+    if (!refs.size) state.targetReplyRefs.delete(prevId)
+  }
+  const registerTargetReplyRef = (state, record, parentId) => {
+    if (!parentId) { unregisterTargetReplyRef(state, record); return }
+    if (record.targetReplyRefId === parentId && state.targetReplyRefs?.get(parentId)?.has(record)) return
+    unregisterTargetReplyRef(state, record)
+    state.targetReplyRefs ||= new Map()
+    let refs = state.targetReplyRefs.get(parentId)
+    if (!refs) {
+      refs = new Set()
+      state.targetReplyRefs.set(parentId, refs)
+    }
+    refs.add(record)
+    record.targetReplyRefId = parentId
+  }
+  const clearTargetReplyRefs = state => {
+    if (!state.targetReplyRefs) return
+    for (const refs of state.targetReplyRefs.values()) {
+      for (const record of refs) record.targetReplyRefId = ''
+    }
+    state.targetReplyRefs.clear()
+  }
   const clearReplyDrawers = state => {
-    for (const drawer of [...(state.replyDrawers?.values() || [])]) removeDrawer(state, drawer, false)
+    for (const drawer of [...(state.replyDrawers?.values() || [])]) {
+      for (const record of drawer.replies) record.replyThreadKey = ''
+      for (const record of drawer.anchors) record.orphanParentKey = ''
+      removeDrawer(state, drawer, false)
+    }
     state.replyDrawers?.clear()
+    clearTargetReplyRefs(state)
   }
 
   const renderMessages = (state, rebuild = false) => {
@@ -1232,6 +1295,7 @@
     empty.textContent = '尚無符合條件的發言。新增目標帳號後開始收集。'
     state.replyDrawers ||= new Map()
     state.openReplyThreads ||= new Set()
+    state.targetReplyRefs ||= new Map()
     const filterKey = JSON.stringify(history.settings)
     const full = rebuild || state.renderedHistory !== history || state.filterKey !== filterKey
     const savedScrollTop = full && !history.follow ? list.scrollTop : 0
@@ -1252,10 +1316,14 @@
       if (!full && wasVisible) state.visibleCount--
       record.renderedView?.remove()
       if (record.replyThreadKey) detachFromDrawer(state, record)
-      else if (existingDrawer) needsReorder = true
+      else if (record.id && (existingDrawer || state.targetReplyRefs.get(record.id)?.size)) needsReorder = true
+      if (record.orphanParentKey) detachOrphanAnchor(state, record)
+      unregisterTargetReplyRef(state, record)
       record.renderedView = null
       record.visible = false
       record.replyThreadKey = ''
+      record.orphanParentKey = ''
+      record.targetReplyRefId = ''
     }
     history.removed.clear()
     if (!full && list.firstChild && viewDates.has(list.firstChild)) syncDateMarker(list.firstChild, null)
@@ -1274,17 +1342,23 @@
           state.messageResizeObserver?.unobserve(oldView)
           oldView.remove()
           if (record.replyThreadKey) detachFromDrawer(state, record)
-          else if (existingDrawer) needsReorder = true
+          else if (record.id && (existingDrawer || state.targetReplyRefs.get(record.id)?.size)) needsReorder = true
           if (nextDated?.parentElement === list) syncDateMarker(nextDated, adjacentDatedRow(nextDated, -1))
         }
+        if (record.orphanParentKey) detachOrphanAnchor(state, record)
+        unregisterTargetReplyRef(state, record)
         record.renderedView = null
         record.visible = false
         record.replyThreadKey = ''
+        record.orphanParentKey = ''
+        record.targetReplyRefId = ''
         continue
       }
       if (isCollapsedReply(record, history.settings)) {
         const { key, parentRecord } = resolveReplyThread(record, history, history.settings, list)
         if (record.replyThreadKey && record.replyThreadKey !== key) detachFromDrawer(state, record)
+        if (!full && record.orphanParentKey) detachOrphanAnchor(state, record)
+        unregisterTargetReplyRef(state, record)
         const existed = state.replyDrawers.has(key)
         const drawer = ensureReplyDrawer(state, key, parentRecord, record.reply, record.createdAt)
         if (!full && !existed && drawer.group && state.mountedTailOrder && record.order <= state.mountedTailOrder) {
@@ -1299,7 +1373,7 @@
         }
         if (full || record.view.parentElement !== drawer.list) drawer.list.appendChild(record.view)
         drawer.replies.add(record)
-        updateDrawerSummary(drawer)
+        updateDrawerSummary(state, drawer)
         record.renderedView = record.view
         record.visible = true
         record.replyThreadKey = key
@@ -1309,6 +1383,30 @@
       if (!full && record.replyThreadKey) {
         detachFromDrawer(state, record)
         needsReorder = true
+      }
+      if (record.reply && isReplyToActiveTarget(record.reply, history.settings)) {
+        const parentId = record.reply.parentId
+        const realParent = parentId ? history.ids.get(parentId) : null
+        const hasRealParent = Boolean(realParent?.retained && matchesTarget(realParent, history.settings))
+        if (hasRealParent) {
+          if (record.orphanParentKey) detachOrphanAnchor(state, record)
+          registerTargetReplyRef(state, record, parentId)
+        } else {
+          unregisterTargetReplyRef(state, record)
+          const anchorKey = parentId ? `id:${parentId}` : `quote:${record.reply.parentUser}\n${record.reply.parentText}`
+          if (record.orphanParentKey && record.orphanParentKey !== anchorKey) detachOrphanAnchor(state, record)
+          const existed = state.replyDrawers.has(anchorKey)
+          const anchorDrawer = ensureReplyDrawer(state, anchorKey, null, record.reply, record.createdAt)
+          if (!full && !existed && state.mountedTailOrder && record.order <= state.mountedTailOrder) {
+            needsReorder = true
+          }
+          anchorDrawer.anchors.add(record)
+          record.orphanParentKey = anchorKey
+          updateDrawerSummary(state, anchorDrawer)
+        }
+      } else {
+        if (record.orphanParentKey) detachOrphanAnchor(state, record)
+        unregisterTargetReplyRef(state, record)
       }
       const existingDrawer = !full && record.id ? state.replyDrawers.get(`id:${record.id}`) : null
       if (existingDrawer && !existingDrawer.group) {
@@ -1391,8 +1489,11 @@
       record.renderedView = null
       record.visible = false
       record.replyThreadKey = ''
+      record.orphanParentKey = ''
+      record.targetReplyRefId = ''
       record.view?.classList?.remove('ttc-has-replies')
     }
+    state.targetReplyRefs?.clear()
     state.inSearchMode = false
     state.searchShown = null
     state.renderedHistory = null

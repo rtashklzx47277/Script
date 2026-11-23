@@ -2161,7 +2161,7 @@ test('Twitch orphan reply groups: render independent target threads with remembe
 
   const rowA = groupA.querySelector('.ttc-orphan-message')
   assert.ok(rowA)
-  assert.equal(groupA.querySelector('.ttc-orphan-head .ttc-reply'), null)
+  assert.equal(groupA.querySelector('.ttc-orphan-head').querySelector('.ttc-reply'), null)
   assert.equal(rowA.querySelector('.ttc-orphan-tag').textContent, '原留言')
   assert.equal(rowA.querySelector('.ttc-orphan-author').textContent, 'NeVeR_LosEs')
   assert.equal(rowA.querySelector('.ttc-orphan-author').style.color, 'rgb(255, 117, 181)')
@@ -2191,5 +2191,197 @@ test('Twitch orphan reply groups: render independent target threads with remembe
   assert.match(cssText, /\.ttc-reply-group:hover/)
   assert.match(cssText, /\.ttc-orphan-tag/)
   assert.equal(/\.ttc-orphan-head > \.ttc-reply/.test(cssText), false)
+  env.api.unmount()
+})
+
+test('Twitch target-to-missing-target replies: reconstruct standalone orphan parent rows even with 0 viewer replies and sync incremental upgrades/removals', async () => {
+  const database = fakeIndexedDB()
+  const seed = boot({ database })
+  const seedScroller = seed.document.createElement('div')
+  seedScroller.setAttribute('data-a-target', 'chat-scroller')
+  const seedHistory = seed.api.getHistory('sample_channel')
+  seedHistory.settings.users = ['never_loses']
+  seed.api.saveSettings(seedHistory)
+  await seedHistory.restorePromise
+
+  const prevTargetA = seed.message('never_loses', '早安', '', 'prev-a')
+  const prevAuthor = prevTargetA.authorContainer.querySelector('[data-a-target="chat-message-username"]')
+  prevAuthor.textContent = 'NeVeR_LosEs'
+  prevAuthor.style.color = 'rgb(255, 117, 181)'
+  seedScroller.appendChild(prevTargetA.line)
+  seed.api.captureLine(prevTargetA.line, seedHistory)
+
+  const lateBcA = seed.message('sample_channel', '舊實況主公告', '', 'late-bc-a')
+  seedScroller.appendChild(lateBcA.line)
+  seed.api.captureLine(lateBcA.line, seedHistory)
+  await seed.api.flushHistory(seedHistory)
+
+  const env = boot({ database })
+  const stream = env.document.body.appendChild(new env.Element('div'))
+  stream.className = 'stream-chat'
+  const header = stream.appendChild(new env.Element('div'))
+  header.className = 'stream-chat-header'
+  const host = stream.appendChild(new env.Element('div'))
+  const scroller = host.appendChild(new env.Element('div'))
+  scroller.setAttribute('data-a-target', 'chat-scroller')
+  env.api.refresh()
+  const state = env.api.mounted
+  const history = state.history
+  history.settings.users = ['never_loses']
+  history.settings.excludedUsers = ['bad_target']
+  env.api.saveSettings(history)
+  env.api.setEnabled(state, true)
+
+  const makeReply = (user, text, id, parent, { role = '', displayName = user, color = 'red' } = {}) => {
+    const msg = env.message(user, text, role, id)
+    const author = msg.authorContainer.querySelector('[data-a-target="chat-message-username"]')
+    author.textContent = displayName
+    author.style.color = color
+    msg.line.__reactFiber$1 = {
+      memoizedProps: {
+        message: { id, user: { userLogin: user, userDisplayName: displayName }, reply: parent },
+      },
+    }
+    scroller.appendChild(msg.line)
+    return msg
+  }
+
+  // Target B (raiki_raibao, Mod) replies to missing Target A (never_loses) with 0 viewer replies
+  makeReply('raiki_raibao', '喜歡都可以說的唷', 'p-target-b', {
+    parentMsgId: 'p-unseen-a', parentUserLogin: 'never_loses', parentDisplayName: 'NeVeR_LosEs', parentMessageBody: 'shaxy101', parentDeleted: false,
+  }, { role: 'Moderator', displayName: '來希', color: 'rgb(255, 169, 202)' })
+
+  // Target B2 (vip_b, VIP) replies to missing Broadcaster late-bc-a (0 viewer replies) whose real message arrives on restorePromise
+  makeReply('vip_b', '收到實況主', 'p-vip-b2', {
+    parentMsgId: 'late-bc-a', parentUserLogin: 'sample_channel', parentDisplayName: '實況主', parentMessageBody: '舊實況主公告', parentDeleted: false,
+  }, { role: 'VIP', displayName: 'VIP_B' })
+
+  // Negative cases: Mod replies to ordinary non-target viewer or excluded user -> must NEVER create orphan groups
+  makeReply('raiki_raibao', '回一般觀眾', 'p-target-ord', {
+    parentMsgId: 'ord-1', parentUserLogin: 'ordinary_user', parentDisplayName: '一般人', parentMessageBody: '嗨', parentDeleted: false,
+  }, { role: 'Moderator', displayName: '來希' })
+  makeReply('raiki_raibao', '回排除帳號', 'p-target-ex', {
+    parentMsgId: 'ex-1', parentUserLogin: 'bad_target', parentDisplayName: '排除人', parentMessageBody: '廣告', parentDeleted: false,
+  }, { role: 'Moderator', displayName: '來希' })
+
+  env.api.captureTree(scroller, history)
+  env.api.renderMessages(state, true)
+
+  // Before restorePromise: never_loses and late-bc-a each produce a standalone .ttc-reply-group directly above their Target B
+  const initialGroups = state.list.querySelectorAll('.ttc-reply-group')
+  assert.equal(initialGroups.length, 2)
+  const [groupA, groupBc] = initialGroups
+  const targetBView = history.ids.get('p-target-b').view
+  const vipB2View = history.ids.get('p-vip-b2').view
+  assert.equal(state.list.children.indexOf(targetBView), state.list.children.indexOf(groupA) + 1)
+  assert.equal(state.list.children.indexOf(vipB2View), state.list.children.indexOf(groupBc) + 1)
+
+  const rowA = groupA.querySelector('.ttc-orphan-message')
+  assert.ok(rowA)
+  assert.equal(rowA.classList.contains('ttc-has-replies'), false)
+  assert.equal(groupA.querySelector('.ttc-orphan-head').querySelector('.ttc-reply'), null)
+  assert.equal(rowA.querySelector('.ttc-orphan-tag').textContent, '原留言')
+  assert.equal(rowA.querySelector('.ttc-orphan-author').textContent, 'NeVeR_LosEs')
+  assert.equal(rowA.querySelector('.ttc-orphan-body').textContent, 'shaxy101')
+  const toggleA = groupA.querySelector('.ttc-replies-toggle')
+  const panelA = groupA.querySelector('.ttc-replies')
+  assert.equal(toggleA.hidden, true)
+  assert.equal(toggleA.matches('[hidden]'), true)
+  assert.equal(panelA.hidden, true)
+  assert.equal(panelA.matches('[hidden]'), true)
+  assert.ok(targetBView.querySelector('.ttc-reply'), 'Target B retains its own reply quote')
+  assert.equal(state.count.textContent, '4 則', 'synthetic orphan rows do not inflate retained count')
+
+  // Completing restorePromise restores prev-a (author color) and real late-bc-a (replacing late-bc-a orphan group cleanly)
+  await history.restorePromise
+  const restoredGroups = state.list.querySelectorAll('.ttc-reply-group')
+  assert.equal(restoredGroups.length, 1, 'late-bc-a orphan group replaced cleanly once real message restores')
+  const restoredGroupA = restoredGroups[0]
+  assert.equal(restoredGroupA.querySelector('.ttc-orphan-author').style.color, 'rgb(255, 117, 181)')
+  assert.equal(state.list.children.indexOf(history.ids.get('p-target-b').view), state.list.children.indexOf(restoredGroupA) + 1)
+  assert.equal(history.ids.get('late-bc-a').view.parentElement, state.list)
+  assert.equal(state.count.textContent, '6 則')
+
+  // Unchecking "回覆篩選目標" still preserves Target A's standalone orphan row above Target B
+  const repliesCheckbox = state.panel.querySelector('[name="replies"]')
+  repliesCheckbox.checked = false
+  repliesCheckbox.listeners.get('change')()
+  assert.equal(state.list.querySelectorAll('.ttc-reply-group').length, 1)
+  assert.equal(state.count.textContent, '6 則')
+
+  // Re-enabling replies and adding a viewer reply incrementally WITHOUT full scan reuses the exact same .ttc-reply-group and shows toggle
+  repliesCheckbox.checked = true
+  repliesCheckbox.listeners.get('change')()
+  const groupBeforeUpgrade = state.list.querySelector('.ttc-reply-group')
+
+  history.messages[Symbol.iterator] = () => { throw Error('unexpected full history scan') }
+  makeReply('viewer_1', '笑死', 'v-to-a', {
+    parentMsgId: 'p-unseen-a', parentUserLogin: 'never_loses', parentDisplayName: 'NeVeR_LosEs', parentMessageBody: 'shaxy101', parentDeleted: false,
+  })
+  env.api.captureLine(scroller.lastElementChild, history)
+  env.api.renderMessages(state)
+  delete history.messages[Symbol.iterator]
+
+  const groupAfterUpgrade = state.list.querySelector('.ttc-reply-group')
+  assert.equal(groupAfterUpgrade, groupBeforeUpgrade, 'viewer reply reuses existing anchored orphan group')
+  assert.equal(groupAfterUpgrade.querySelector('.ttc-orphan-message').classList.contains('ttc-has-replies'), true)
+  const upgradedToggle = groupAfterUpgrade.querySelector('.ttc-replies-toggle')
+  const upgradedPanel = groupAfterUpgrade.querySelector('.ttc-replies')
+  assert.equal(upgradedToggle.hidden, false)
+  assert.equal(upgradedToggle.getAttribute('hidden'), null)
+  assert.equal(upgradedToggle.textContent, '1 則回覆')
+  assert.equal(upgradedPanel.getAttribute('hidden'), 'until-found')
+  upgradedToggle.listeners.get('click')()
+  assert.equal(upgradedPanel.getAttribute('hidden'), null)
+  assert.equal(state.count.textContent, '7 則')
+
+  // Removing viewer_1 incrementally keeps Target A's group (anchored by Target B) and re-hides toggle & collapses panel
+  const viewerRecord = history.ids.get('v-to-a')
+  history.messages = history.messages.filter(r => r !== viewerRecord)
+  history.removed.add(viewerRecord)
+  viewerRecord.retained = false
+  history.ids.delete('v-to-a')
+  env.api.renderMessages(state)
+  const groupAfterViewerRemoved = state.list.querySelector('.ttc-reply-group')
+  assert.equal(groupAfterViewerRemoved, groupBeforeUpgrade)
+  assert.equal(groupAfterViewerRemoved.querySelector('.ttc-replies-toggle').hidden, true)
+  assert.equal(groupAfterViewerRemoved.querySelector('.ttc-replies-toggle').matches('[hidden]'), true)
+  assert.equal(groupAfterViewerRemoved.querySelector('.ttc-replies').hidden, true)
+  assert.equal(groupAfterViewerRemoved.querySelector('.ttc-replies').matches('[hidden]'), true)
+  assert.equal(groupAfterViewerRemoved.querySelector('.ttc-orphan-message').classList.contains('ttc-has-replies'), false)
+
+  // Adding a second target anchor referencing the same missing Target A does not duplicate the orphan group
+  makeReply('vip_b', '我也看到', 'p-vip-b3', {
+    parentMsgId: 'p-unseen-a', parentUserLogin: 'never_loses', parentDisplayName: 'NeVeR_LosEs', parentMessageBody: 'shaxy101', parentDeleted: false,
+  }, { role: 'VIP', displayName: 'VIP_B' })
+  env.api.captureLine(scroller.lastElementChild, history)
+  env.api.renderMessages(state)
+  assert.equal(state.list.querySelectorAll('.ttc-reply-group').length, 1)
+
+  // Deactivating Target A (removing never_loses) drops its orphan group while Target B keeps its reply quote
+  history.settings.users = []
+  env.api.renderMessages(state, true)
+  assert.equal(state.list.querySelectorAll('.ttc-reply-group').length, 0)
+  assert.ok(history.ids.get('p-target-b').view.querySelector('.ttc-reply'))
+
+  // Re-activating never_loses restores Target A's single orphan group
+  history.settings.users = ['never_loses']
+  env.api.renderMessages(state, true)
+  assert.equal(state.list.querySelectorAll('.ttc-reply-group').length, 1)
+
+  // Evicting real late-bc-a (0 viewer replies, referenced only by p-vip-b2) converts late-bc-a into a standalone orphan group above p-vip-b2
+  const lateBcRecord = history.ids.get('late-bc-a')
+  history.messages = history.messages.filter(r => r !== lateBcRecord)
+  history.removed.add(lateBcRecord)
+  lateBcRecord.retained = false
+  history.ids.delete('late-bc-a')
+  env.api.renderMessages(state)
+  const finalGroups = state.list.querySelectorAll('.ttc-reply-group')
+  assert.equal(finalGroups.length, 2)
+  const evictedBcGroup = finalGroups.find(group => group.querySelector('.ttc-orphan-body').textContent === '舊實況主公告')
+  assert.ok(evictedBcGroup)
+  assert.equal(evictedBcGroup.querySelector('.ttc-replies-toggle').hidden, true)
+  assert.equal(state.list.children.indexOf(history.ids.get('p-vip-b2').view), state.list.children.indexOf(evictedBcGroup) + 1)
+
   env.api.unmount()
 })
