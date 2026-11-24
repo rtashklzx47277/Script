@@ -2659,14 +2659,15 @@ test('Twitch scroll stability: avoid overflow-anchor: none, keep toggles anchore
   env.api.unmount()
 })
 
-test('Twitch split-screen compact UI: CSS rules, tooltip dismissal on hidden header, filter panel expansion, and background capture', () => {
+test('Twitch split-screen compact UI: keep header visible, hide banners and input buttons, dismiss tooltip when button hidden, expand filter panel', () => {
   const env = boot({ withResizeObserver: true })
   env.window.innerWidth = 669
   env.window.innerHeight = 636
   const styleText = env.document.head.querySelector('style').textContent
 
-  assert.match(styleText, /\.right-column--below:not\(\.right-column--collapsed\)\s+\.right-column__toggle-visibility/)
-  assert.match(styleText, /\.right-column--below\s+:is\(\.stream-chat-header,\s*\.video-chat__header\)/)
+  assert.doesNotMatch(styleText, /\.right-column--below[^}]*\.right-column__toggle-visibility/)
+  assert.doesNotMatch(styleText, /\.right-column--below[^}]*\.stream-chat-header/)
+  assert.doesNotMatch(styleText, /\.right-column--below[^}]*\.video-chat__header/)
   assert.match(styleText, /\.right-column--below\s+\.chat-room__content\s*>\s*:has\(~\s*\[class\*="chat-list--"\]\)/)
   assert.match(styleText, /\.right-column--below\s+\.chat-room__notifications/)
   assert.match(styleText, /\.right-column--below\s+\.chat-room__overlay/)
@@ -2696,7 +2697,7 @@ test('Twitch split-screen compact UI: CSS rules, tooltip dismissal on hidden hea
   assert.equal(env.api.captureLine(modLine, state.history), true)
   assert.equal(state.history.messages.length, 1)
 
-  // Tooltip closes cleanly when header/button collapses to 0x0 on split-screen resize
+  // Tooltip closes cleanly when button collapses to 0x0 (e.g. collapsed chat column)
   let tooltipCloses = 0
   const { tooltip } = state
   tooltip.showPopover = () => {}
@@ -2719,12 +2720,12 @@ test('Twitch split-screen compact UI: CSS rules, tooltip dismissal on hidden hea
   assert.equal(tooltip.getAttribute('data-visible'), 'false')
   assert.equal(tooltipCloses, 2)
 
-  // Active filter panel expands into reclaimed header and input-button space, and restores when leaving split screen
+  // Active filter panel keeps the 40px header boundary and expands into reclaimed input-button space, restoring when full input returns
   panel.showPopover = () => {}
   panel.hidePopover = () => {}
   let streamBox = { left: 0, top: 376, width: 669, height: 260, bottom: 636 }
-  let headerBox = { top: 0, bottom: 0, height: 0 }
-  let hostBox = { left: 0, top: 376, width: 669, height: 211, bottom: 587 }
+  let headerBox = { top: 376, bottom: 416, height: 40 }
+  let hostBox = { left: 0, top: 416, width: 669, height: 171, bottom: 587 }
   let inputBox = { top: 587, bottom: 636, height: 49 }
   stream.getBoundingClientRect = () => streamBox
   header.getBoundingClientRect = () => headerBox
@@ -2732,10 +2733,9 @@ test('Twitch split-screen compact UI: CSS rules, tooltip dismissal on hidden hea
   input.getBoundingClientRect = () => inputBox
 
   env.api.setEnabled(state, true)
-  assert.equal(panel.style.top, '376px')
-  assert.equal(panel.style.height, '211px')
+  assert.equal(panel.style.top, '416px')
+  assert.equal(panel.style.height, '171px')
 
-  headerBox = { top: 376, bottom: 416, height: 40 }
   inputBox = { top: 547, bottom: 636, height: 89 }
   env.api.positionFilterPanel(state)
   assert.equal(panel.style.top, '416px')

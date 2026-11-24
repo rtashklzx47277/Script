@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name        Twitch Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.11.0
+// @version     0.11.1
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
-// @description 依頻道主、管理員、VIP、回覆篩選目標與全域帳號包含／排除名單篩選 Twitch 直播與 VOD 聊天，保留回覆目標引言與最近 1000 則／7 天紀錄，支援跨日分隔、搜尋與自動跟隨；分割螢幕時隱藏聊天室標題、上方橫幅與輸入區底部列。
+// @description 依頻道主、管理員、VIP、回覆篩選目標與全域帳號包含／排除名單篩選 Twitch 直播與 VOD 聊天，保留回覆目標引言與最近 1000 則／7 天紀錄，支援跨日分隔、搜尋與自動跟隨；分割螢幕時隱藏聊天室上方橫幅與輸入區底部列。
 // @author      Derek
 // @match       *://www.twitch.tv/*
 // @run-at      document-idle
@@ -2285,8 +2285,6 @@
     .ttc-target-list button { flex-shrink: 0; padding: 3px 8px; background: var(--color-background-button-text-hover, #ffffff22); color: inherit; font-size: 11px; }
     .ttc-target-empty, .ttc-target-status { margin: 6px 0 0; font-size: 11px; color: var(--color-text-alt-2, #adadb8); }
     .ttc-target-status:empty { display: none; }
-    .right-column--below:not(.right-column--collapsed) .right-column__toggle-visibility,
-    .right-column--below :is(.stream-chat-header, .video-chat__header),
     .right-column--below .chat-room__content > :has(~ [class*="chat-list--"]),
     .right-column--below .chat-room__notifications,
     .right-column--below .chat-room__overlay,
