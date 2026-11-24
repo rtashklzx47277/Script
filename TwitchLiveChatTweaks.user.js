@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        Twitch Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.11.1
+// @version     0.11.2
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
 // @description 依頻道主、管理員、VIP、回覆篩選目標與全域帳號包含／排除名單篩選 Twitch 直播與 VOD 聊天，保留回覆目標引言與最近 1000 則／7 天紀錄，支援跨日分隔、搜尋與自動跟隨；分割螢幕時隱藏聊天室上方橫幅與輸入區底部列。
@@ -364,6 +364,7 @@
   const archiveRecord = (history, record) => ({
     scope: history.scope, storageId: record.storageId, id: record.id, user: record.user,
     createdAt: record.createdAt, order: record.order, expiresAt: record.createdAt + RETENTION_MS,
+    vodOffset: hasVodOffset(record) ? Math.floor(record.vodOffset) : null,
     moderator: record.moderator, broadcaster: record.broadcaster, vip: record.vip,
     reply: sanitizeReply(record.reply),
     fingerprint: record.fingerprint, tree: archiveTree(record.view),
@@ -373,6 +374,36 @@
     typeof saved.user === 'string' && /^[a-z0-9_]{1,25}$/.test(saved.user) &&
     Number.isFinite(saved.createdAt) && saved.createdAt <= Date.now() && saved.createdAt + RETENTION_MS > Date.now() &&
     saved.tree && typeof saved.tree === 'object'
+  const hasVodOffset = record => Number.isFinite(record?.vodOffset) && record.vodOffset >= 0
+  const formatVodTime = seconds => {
+    const total = Math.max(0, Math.floor(seconds))
+    const h = Math.floor(total / 3600)
+    const m = Math.floor((total % 3600) / 60)
+    const s = total % 60
+    return h > 0
+      ? `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+      : `${m}:${String(s).padStart(2, '0')}`
+  }
+  const parseVodTimestamp = text => {
+    const match = String(text || '').trim().match(/^(?:(\d+):)?(\d{1,2}):(\d{2})$/)
+    if (!match) return null
+    const h = match[1] ? Number(match[1]) : 0
+    const m = Number(match[2])
+    const s = Number(match[3])
+    if (s >= 60 || (match[1] && m >= 60)) return null
+    return h * 3600 + m * 60 + s
+  }
+  const applyVodTime = (time, view, vodOffset) => {
+    const offset = Math.floor(vodOffset)
+    const label = formatVodTime(offset)
+    time.textContent = label
+    time.setAttribute('datetime', `PT${offset}S`)
+    time.setAttribute('title', `影片時間 ${label}`)
+    if (view) viewDates.delete(view)
+  }
+  const compareRecords = (a, b) => (hasVodOffset(a) && hasVodOffset(b) && a.vodOffset !== b.vodOffset
+    ? a.vodOffset - b.vodOffset
+    : a.createdAt - b.createdAt || (a.order || 0) - (b.order || 0))
   const formatDateKey = timestamp => {
     const date = new Date(Number.isFinite(timestamp) ? timestamp : Date.now())
     return `${date.getFullYear()}/${String(date.getMonth() + 1).padStart(2, '0')}/${String(date.getDate()).padStart(2, '0')}`
@@ -445,11 +476,16 @@
     const time = viewTime(view)
     if (!view || !time) return null
     const reply = sanitizeReply(saved.reply)
+    const vodOffset = hasVodOffset(saved) ? Math.floor(saved.vodOffset) : null
     view.className = reply ? 'ttc-message ttc-has-reply' : 'ttc-message'
     if (reply && !$('.ttc-reply', view)) view.insertBefore(makeReplyView(reply), view.firstChild)
-    if (!time.getAttribute('datetime')) time.setAttribute('datetime', new Date(saved.createdAt).toISOString())
-    if (!time.getAttribute('title')) time.setAttribute('title', `${formatDateKey(saved.createdAt)} ${time.textContent}`)
-    viewDates.set(view, formatDateKey(saved.createdAt))
+    if (vodOffset !== null) {
+      applyVodTime(time, view, vodOffset)
+    } else {
+      if (!time.getAttribute('datetime')) time.setAttribute('datetime', new Date(saved.createdAt).toISOString())
+      if (!time.getAttribute('title')) time.setAttribute('title', `${formatDateKey(saved.createdAt)} ${time.textContent}`)
+      viewDates.set(view, formatDateKey(saved.createdAt))
+    }
     const authorNode = [...view.children].find(child => child.tagName?.toLowerCase() === 'strong')
     if (authorNode) authorNode.textContent = formatAuthorLabel(authorNode.textContent, saved.user)
     if (reply) {
@@ -458,6 +494,7 @@
       if (replyAuthor && replyLabel) replyAuthor.textContent = `@${replyLabel}`
     }
     return { id: saved.id, storageId: saved.storageId, user: saved.user, createdAt: saved.createdAt,
+      vodOffset,
       order: Number.isSafeInteger(saved.order) ? saved.order : 0,
       moderator: saved.moderator === true, broadcaster: saved.broadcaster === true, vip: saved.vip === true,
       reply,
@@ -551,8 +588,7 @@
         request.onerror = () => reject(request.error)
       })
       const [saved] = await Promise.all([read, done])
-      const records = saved.filter(item => validArchiveRecord(item, history.scope))
-        .sort((a, b) => a.createdAt - b.createdAt || (a.order || 0) - (b.order || 0))
+      const records = saved.filter(item => validArchiveRecord(item, history.scope)).sort(compareRecords)
       const restored = []
       let deadline = nowMs() + 50
       for (const item of records) {
@@ -560,14 +596,20 @@
         if (current) {
           current.createdAt = Math.min(current.createdAt, item.createdAt)
           current.order = Number.isSafeInteger(item.order) ? item.order : current.order
+          if (!hasVodOffset(current) && hasVodOffset(item)) current.vodOffset = Math.floor(item.vodOffset)
           const currentTime = viewTime(current.view)
           const savedTime = viewTime(restoreTree(item.tree))
-          if (currentTime) {
-            currentTime.textContent = savedTime?.textContent || currentTime.textContent
-            currentTime.setAttribute('datetime', new Date(current.createdAt).toISOString())
-            currentTime.setAttribute('title', `${formatDateKey(current.createdAt)} ${currentTime.textContent}`)
+          if (hasVodOffset(current)) {
+            if (currentTime) applyVodTime(currentTime, current.view, current.vodOffset)
+            else viewDates.delete(current.view)
+          } else {
+            if (currentTime) {
+              currentTime.textContent = savedTime?.textContent || currentTime.textContent
+              currentTime.setAttribute('datetime', new Date(current.createdAt).toISOString())
+              currentTime.setAttribute('title', `${formatDateKey(current.createdAt)} ${currentTime.textContent}`)
+            }
+            viewDates.set(current.view, formatDateKey(current.createdAt))
           }
-          viewDates.set(current.view, formatDateKey(current.createdAt))
           current._searchText = ''
           saveRecord(history, current)
         } else {
@@ -585,7 +627,7 @@
         }
       }
       history.messages.unshift(...restored)
-      history.messages.sort((a, b) => a.createdAt - b.createdAt || a.order - b.order)
+      history.messages.sort(compareRecords)
       const owner = history.channel.startsWith('vod:') ? getVodOwner() : history.channel
       for (const record of history.messages) {
         const authorNode = [...record.view.children].find(child => child.tagName?.toLowerCase() === 'strong')
@@ -765,7 +807,45 @@
     return { parentId, parentUser, parentDisplayName, parentText }
   }
 
-  const readMessage = (line, channel, history = null) => {
+  const readVodMeta = (line, expectedUser = '') => {
+    let id = ''
+    let vodOffset = null
+    try {
+      const key = Object.keys(line).find(name => name.startsWith('__reactFiber') || name.startsWith('__reactInternalInstance'))
+      let current = key ? line[key] : null
+      for (let step = 0; step < 20 && current; step++, current = current.return) {
+        const props = current.memoizedProps
+        if (!props || typeof props !== 'object') continue
+        const mc = props.messageContext
+        const comment = mc?.comment && typeof mc.comment === 'object' ? mc.comment : null
+        if (comment || Number.isFinite(props.timeStampOffset)) {
+          const fiberUser = String(
+            comment?.commenter?.login || comment?.commenter?.userLogin ||
+            mc?.author?.login || mc?.author?.userLogin || ''
+          ).toLowerCase()
+          if (expectedUser && fiberUser && fiberUser !== expectedUser) continue
+          if (!id && typeof comment?.id === 'string' && comment.id) id = comment.id
+          const rawOffset = [props.timeStampOffset, comment?.contentOffset, comment?.contentOffsetSeconds]
+            .find(value => Number.isFinite(value) && value >= 0)
+          if (vodOffset === null && Number.isFinite(rawOffset)) vodOffset = Math.floor(rawOffset)
+          if (id && vodOffset !== null) break
+        }
+      }
+    } catch (_) {}
+    if (vodOffset === null) {
+      const header = $('.vod-message__header', line)
+      const tsNode = $('.vod-message__timestamp, [data-test-selector="message-timestamp"]', line)
+      const headerParts = header ? [...$$('button, p', header), header] : []
+      for (const node of [...(tsNode ? [tsNode] : []), ...headerParts]) {
+        if (!node) continue
+        const parsed = parseVodTimestamp(node.textContent)
+        if (parsed !== null) { vodOffset = parsed; break }
+      }
+    }
+    return { id, vodOffset }
+  }
+
+  const readMessage = (line, channel, history = null, isVod = false) => {
     const author = $(USER_SELECTOR, line)
     // Use the author's badges only: quoted replies can contain another user's badges.
     const authorLink = author?.closest?.('.video-chat__message-author')
@@ -796,8 +876,12 @@
       (badge.getAttribute('srcset') || '').includes(VIP_BADGE) ||
       /^(vip|vip\s*(?:徽章|バッジ))$/i.test((badge.getAttribute('alt') || '').trim()))
     const fiberMsg = readFiberMessage(line, user)
+    const vodLine = Boolean(isVod || line.matches?.('.vod-message') || line.closest?.('.video-chat'))
+    const vodMeta = vodLine ? readVodMeta(line, user) : null
     const id = line.getAttribute('data-id') || line.getAttribute('data-message-id') || line.getAttribute('data-a-id') || line.id ||
-      (typeof fiberMsg?.id === 'string' ? fiberMsg.id : '')
+      (typeof fiberMsg?.id === 'string' ? fiberMsg.id : '') ||
+      vodMeta?.id ||
+      ''
     const rawReply = fiberMsg?.reply && typeof fiberMsg.reply === 'object' ? fiberMsg.reply : null
     const domReply = readDomReply(line, authorContainer, body)
     let reply = null
@@ -831,7 +915,7 @@
         parentVip,
       })
     }
-    return { user, moderator, broadcaster, vip, reply, author, body, badges, id }
+    return { user, moderator, broadcaster, vip, reply, author, body, badges, id, vodOffset: vodMeta ? vodMeta.vodOffset : null }
   }
 
   const matchesTarget = (target, settings) =>
@@ -858,18 +942,22 @@
     !(settings.excludedUsers || []).includes(message.user) &&
     (matchesTarget(message, settings) || matchesReplyTarget(message.reply, settings))
 
-  const makeMessageView = (message, createdAt = Date.now()) => {
+  const makeMessageView = (message, createdAt = Date.now(), vodOffset = message.vodOffset ?? null) => {
     // Copy presentation only. Never keep React-owned message nodes or inactive controls.
     const row = document.createElement('div')
     row.className = message.reply ? 'ttc-message ttc-has-reply' : 'ttc-message'
     if (message.reply) row.appendChild(makeReplyView(message.reply))
     const time = document.createElement('time')
     time.className = 'ttc-time'
-    const date = new Date(createdAt)
-    time.textContent = date.toLocaleTimeString('zh-TW', { hour12: false })
-    time.setAttribute('datetime', date.toISOString())
-    time.setAttribute('title', `${formatDateKey(createdAt)} ${time.textContent}`)
-    viewDates.set(row, formatDateKey(createdAt))
+    if (Number.isFinite(vodOffset) && vodOffset >= 0) {
+      applyVodTime(time, row, vodOffset)
+    } else {
+      const date = new Date(createdAt)
+      time.textContent = date.toLocaleTimeString('zh-TW', { hour12: false })
+      time.setAttribute('datetime', date.toISOString())
+      time.setAttribute('title', `${formatDateKey(createdAt)} ${time.textContent}`)
+      viewDates.set(row, formatDateKey(createdAt))
+    }
     row.appendChild(time)
     for (const badge of message.badges) {
       const copy = badge.cloneNode(false)
@@ -898,8 +986,9 @@
   }
 
   const captureLine = (line, history) => {
-    const owner = history.channel.startsWith('vod:') ? getVodOwner() : history.channel
-    const message = readMessage(line, owner, history)
+    const isVod = history.channel.startsWith('vod:')
+    const owner = isVod ? getVodOwner() : history.channel
+    const message = readMessage(line, owner, history, isVod)
     if (!message) return false
     rememberUser(history, message.user, message.author.textContent, {
       moderator: message.moderator,
@@ -917,25 +1006,30 @@
     const fingerprint = `${message.user}\n${message.moderator}\n${message.broadcaster}\n${message.vip}\n${replyKey}\n${message.author.textContent}\n${message.body.innerHTML}`
     if (previous?.fingerprint === fingerprint) { history.nodes.set(line, previous); return false }
     const createdAt = previous && previous.user === message.user && previous.retained ? previous.createdAt : Date.now()
-    const view = makeMessageView(message, createdAt)
+    const vodOffset = previous && previous.user === message.user && previous.retained && hasVodOffset(previous)
+      ? previous.vodOffset
+      : (hasVodOffset(message) ? Math.floor(message.vodOffset) : null)
+    const view = makeMessageView(message, createdAt, vodOffset)
     let record
     if (previous && previous.user === message.user && previous.retained) {
       // Reflect edits/deletion placeholders while the original line is still present.
       const prevTime = viewTime(previous.view)
       const nextTime = viewTime(view)
-      if (prevTime && nextTime) {
+      if (vodOffset === null && prevTime && nextTime) {
         nextTime.textContent = prevTime.textContent
         nextTime.setAttribute('datetime', new Date(createdAt).toISOString())
         nextTime.setAttribute('title', `${formatDateKey(createdAt)} ${nextTime.textContent}`)
       }
       record = Object.assign(previous, { moderator: message.moderator,
-        broadcaster: message.broadcaster, vip: message.vip, reply: message.reply, _searchText: '', view, fingerprint })
+        broadcaster: message.broadcaster, vip: message.vip, reply: message.reply, vodOffset, _searchText: '', view, fingerprint })
     } else {
       record = { id: message.id, user: message.user, moderator: message.moderator,
-        broadcaster: message.broadcaster, vip: message.vip, reply: message.reply, _searchText: '', view, fingerprint, retained: true,
+        broadcaster: message.broadcaster, vip: message.vip, reply: message.reply, vodOffset, _searchText: '', view, fingerprint, retained: true,
         storageId: message.id || `${pageKey}-${++anonymousMessage}`,
         createdAt, order: ++messageOrder }
+      const tail = history.messages.at(-1)
       history.messages.push(record)
+      if (hasVodOffset(record) && tail && compareRecords(record, tail) < 0) history.messages.sort(compareRecords)
       trimHistory(history)
     }
     history.nodes.set(line, record)
@@ -1056,7 +1150,7 @@
     const hits = history.messages
       .filter(record => record.retained && matchesFilter(record, history.settings) &&
         words.every(word => messageSearchText(record).includes(word)))
-      .sort((a, b) => a.createdAt - b.createdAt || (a.order || 0) - (b.order || 0))
+      .sort(compareRecords)
     const shown = new Set(hits)
     for (const record of state.searchShown || []) if (!shown.has(record)) unmountRecordView(state, record)
     let index = 0
@@ -1069,7 +1163,8 @@
         record.renderedView.remove()
       }
       view.hidden = false
-      viewDates.set(view, formatDateKey(record.createdAt))
+      if (hasVodOffset(record)) viewDates.delete(view)
+      else viewDates.set(view, formatDateKey(record.createdAt))
       syncDateMarker(view, previousView)
       previousView = view
       const existing = list.children[index++]
@@ -1153,7 +1248,7 @@
       }
     }
   }
-  const ensureReplyDrawer = (state, key, parentRecord, sampleReply, createdAt) => {
+  const ensureReplyDrawer = (state, key, parentRecord, sampleReply, createdAt, isVodTimeline = false) => {
     state.replyDrawers ||= new Map()
     state.openReplyThreads ||= new Set()
     const existing = state.replyDrawers.get(key)
@@ -1177,13 +1272,13 @@
       head.insertBefore(parentRecord.renderedView, toggle)
       parentRecord.renderedView.classList.add('ttc-has-replies')
       parentRecord.renderedView.removeAttribute('data-date')
-      viewDates.set(wrapper, formatDateKey(parentRecord.createdAt))
+      if (!hasVodOffset(parentRecord)) viewDates.set(wrapper, formatDateKey(parentRecord.createdAt))
       syncDateMarker(wrapper, adjacentDatedRow(wrapper, -1))
     } else {
       orphanRow = makeOrphanParentView(sampleReply, state.history)
       head = element('div', { class: 'ttc-thread-head ttc-orphan-head' }, [orphanRow, toggle])
       wrapper = element('div', { class: 'ttc-reply-group' }, [head, panel])
-      viewDates.set(wrapper, formatDateKey(createdAt))
+      if (!isVodTimeline) viewDates.set(wrapper, formatDateKey(createdAt))
       state.list.appendChild(wrapper)
       syncDateMarker(wrapper, adjacentDatedRow(wrapper, -1))
     }
@@ -1240,7 +1335,8 @@
       drawer.parentRecord?.view?.classList.remove('ttc-has-replies')
       if (unwrapParent && parentView && parentView.parentElement === drawer.head && drawer.wrapper.parentElement === state.list) {
         drawer.wrapper.replaceWith(parentView)
-        viewDates.set(parentView, formatDateKey(drawer.parentRecord.createdAt))
+        if (hasVodOffset(drawer.parentRecord)) viewDates.delete(parentView)
+        else viewDates.set(parentView, formatDateKey(drawer.parentRecord.createdAt))
         syncDateMarker(parentView, adjacentDatedRow(parentView, -1))
         const nextDated = adjacentDatedRow(parentView, 1)
         if (nextDated?.parentElement === state.list) syncDateMarker(nextDated, parentView)
@@ -1372,6 +1468,26 @@
     }
   }
 
+  const isOutOfOrder = (state, record) => {
+    if (hasVodOffset(record) && Number.isFinite(state.mountedTailOffset)) {
+      return record.vodOffset < state.mountedTailOffset ||
+        (record.vodOffset === state.mountedTailOffset && Boolean(state.mountedTailOrder && record.order <= state.mountedTailOrder))
+    }
+    return Boolean(state.mountedTailOrder && record.order <= state.mountedTailOrder)
+  }
+  const noteMountedTail = (state, record) => {
+    if (hasVodOffset(record)) {
+      if (!Number.isFinite(state.mountedTailOffset) || record.vodOffset > state.mountedTailOffset) {
+        state.mountedTailOffset = record.vodOffset
+        state.mountedTailOrder = record.order
+      } else if (record.vodOffset === state.mountedTailOffset && (!state.mountedTailOrder || record.order > state.mountedTailOrder)) {
+        state.mountedTailOrder = record.order
+      }
+      return
+    }
+    if (!state.mountedTailOrder || record.order > state.mountedTailOrder) state.mountedTailOrder = record.order
+  }
+
   const renderMessages = (state, rebuild = false, preservedAnchor = null) => {
     cancelMessageRender(state)
     cancelListFollow(state)
@@ -1389,6 +1505,7 @@
     if (full) {
       state.visibleCount = 0
       state.mountedTailOrder = 0
+      state.mountedTailOffset = null
       clearReplyDrawers(state)
       if (list.children.length) {
         state.messageResizeObserver?.disconnect()
@@ -1447,8 +1564,8 @@
         if (!full && record.orphanParentKey) detachOrphanAnchor(state, record)
         unregisterTargetReplyRef(state, record)
         const existed = state.replyDrawers.has(key)
-        const drawer = ensureReplyDrawer(state, key, parentRecord, record.reply, record.createdAt)
-        if (!full && !existed && drawer.group && state.mountedTailOrder && record.order <= state.mountedTailOrder) {
+        const drawer = ensureReplyDrawer(state, key, parentRecord, record.reply, record.createdAt, hasVodOffset(record))
+        if (!full && !existed && drawer.group && isOutOfOrder(state, record)) {
           needsReorder = true
         }
         record.view.hidden = false
@@ -1483,8 +1600,8 @@
           const anchorKey = parentId ? `id:${parentId}` : `quote:${record.reply.parentUser}\n${record.reply.parentText}`
           if (record.orphanParentKey && record.orphanParentKey !== anchorKey) detachOrphanAnchor(state, record)
           const existed = state.replyDrawers.has(anchorKey)
-          const anchorDrawer = ensureReplyDrawer(state, anchorKey, null, record.reply, record.createdAt)
-          if (!full && !existed && state.mountedTailOrder && record.order <= state.mountedTailOrder) {
+          const anchorDrawer = ensureReplyDrawer(state, anchorKey, null, record.reply, record.createdAt, hasVodOffset(record))
+          if (!full && !existed && isOutOfOrder(state, record)) {
             needsReorder = true
           }
           anchorDrawer.anchors.add(record)
@@ -1509,7 +1626,8 @@
           existingDrawer.head.insertBefore(record.view, existingDrawer.toggle)
         }
         existingDrawer.parentRecord = record
-        viewDates.set(existingDrawer.wrapper, formatDateKey(record.createdAt))
+        if (hasVodOffset(record)) viewDates.delete(existingDrawer.wrapper)
+        else viewDates.set(existingDrawer.wrapper, formatDateKey(record.createdAt))
         syncDateMarker(existingDrawer.wrapper, adjacentDatedRow(existingDrawer.wrapper, -1))
         record.renderedView = record.view
         record.visible = true
@@ -1518,7 +1636,8 @@
         continue
       }
       record.view.hidden = false
-      viewDates.set(record.view, formatDateKey(record.createdAt))
+      if (hasVodOffset(record)) viewDates.delete(record.view)
+      else viewDates.set(record.view, formatDateKey(record.createdAt))
       rowAnchorKeys.set(record.view, `msg:${record.storageId}`)
       if (oldView && oldView !== record.view) {
         state.messageResizeObserver?.unobserve(oldView)
@@ -1526,7 +1645,7 @@
         else oldView.remove()
       }
       if (full || record.view.parentElement !== list) {
-        if (!full && state.mountedTailOrder && record.order <= state.mountedTailOrder) needsReorder = true
+        if (!full && isOutOfOrder(state, record)) needsReorder = true
         list.appendChild(record.view)
       }
       if (existingDrawer?.group) needsReorder = true
@@ -1535,7 +1654,7 @@
         const nextDated = adjacentDatedRow(record.view, 1)
         if (nextDated?.parentElement === list) syncDateMarker(nextDated, record.view)
       }
-      if (!state.mountedTailOrder || record.order > state.mountedTailOrder) state.mountedTailOrder = record.order
+      noteMountedTail(state, record)
       record.renderedView = record.view
       record.visible = true
       record.replyThreadKey = ''
@@ -1590,6 +1709,7 @@
     state.searchShown = null
     state.renderedHistory = null
     state.mountedTailOrder = 0
+    state.mountedTailOffset = null
     state.history.removed.clear()
   }
 

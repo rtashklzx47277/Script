@@ -1358,6 +1358,9 @@ test('Twitch VOD chat: isolate per-VOD archive scope from live/other VODs, detec
   assert.equal(state.count.textContent, '2 則')
   assert.equal(state.list.children[0].querySelector('strong').textContent, '實況主 (streamer_one)')
   assert.equal(state.list.children[1].querySelector('strong').textContent, '管理員甲 (vod_mod)')
+  assert.equal(state.list.children[1].querySelector('.ttc-time').textContent, '1:47')
+  assert.equal(state.list.children[1].querySelector('.ttc-time').getAttribute('datetime'), 'PT107S')
+  assert.equal(state.list.children[1].getAttribute('data-date'), null)
   assert.equal(state.list.children[1].children.at(-1).textContent, 'vod hi ')
   assert.ok(state.list.children[1].querySelector('img.chat-image'))
   vodEnv.api.unmount()
@@ -2742,4 +2745,173 @@ test('Twitch split-screen compact UI: keep header visible, hide banners and inpu
   assert.equal(panel.style.height, '131px')
 
   env.api.unmount()
+})
+
+test('Twitch VOD timeline: display and sort by video offset from fiber/DOM, deduplicate via fiber comment id, skip capture date dividers, and persist across reload', async () => {
+  const database = fakeIndexedDB()
+  const day1 = new Date(2026, 10, 20, 14, 0, 0).getTime()
+  const day2 = new Date(2026, 10, 21, 9, 30, 0).getTime()
+  let now = day1
+
+  const setupVodPage = env => {
+    env.location.pathname = '/videos/2937944840'
+    const info = env.document.body.appendChild(new env.Element('div'))
+    info.className = 'channel-info-content'
+    const ownerLink = info.appendChild(new env.Element('a'))
+    ownerLink.setAttribute('href', '/vod_owner')
+    const vodChat = env.document.body.appendChild(new env.Element('div'))
+    vodChat.className = 'video-chat'
+    const vodHeader = vodChat.appendChild(new env.Element('div'))
+    vodHeader.className = 'video-chat__header'
+    const vodBody = vodChat.appendChild(new env.Element('div'))
+    const wrapper = vodBody.appendChild(new env.Element('div'))
+    wrapper.className = 'video-chat__message-list-wrapper'
+    const scroller = wrapper.appendChild(new env.Element('ul'))
+    return scroller
+  }
+
+  const makeVodLine = (env, scroller, user, text, { headerTimestamp = '', nestedButtonTs = false, fiber = null } = {}) => {
+    const line = scroller.appendChild(new env.Element('div'))
+    line.className = 'vod-message'
+    if (headerTimestamp) {
+      const hdr = line.appendChild(new env.Element('div'))
+      hdr.className = 'vod-message__header'
+      if (nestedButtonTs) {
+        const btn = hdr.appendChild(new env.Element('button'))
+        const p = btn.appendChild(new env.Element('p'))
+        p.textContent = headerTimestamp
+      } else {
+        hdr.textContent = headerTimestamp
+      }
+    }
+    const content = line.appendChild(new env.Element('div'))
+    const authorLink = content.appendChild(new env.Element('a'))
+    authorLink.className = 'video-chat__message-author'
+    authorLink.setAttribute('href', `/${user}`)
+    const author = authorLink.appendChild(new env.Element('span'))
+    author.setAttribute('data-a-target', 'chat-message-username')
+    author.setAttribute('data-a-user', user)
+    author.textContent = user
+    const msgBox = content.appendChild(new env.Element('div'))
+    msgBox.className = 'video-chat__message'
+    const body = msgBox.appendChild(new env.Element('span'))
+    const frag = body.appendChild(new env.Element('span'))
+    frag.className = 'text-fragment'
+    frag.setAttribute('data-a-target', 'chat-message-text')
+    frag.textContent = text
+    if (fiber) line.__reactFiber$1 = fiber
+    return line
+  }
+
+  const env1 = boot({ database, now: () => now })
+  const scroller1 = setupVodPage(env1)
+  env1.api.refresh()
+  const state1 = env1.api.mounted
+  await state1.history.restorePromise
+  env1.api.setEnabled(state1, true)
+
+  // Capture 4:55:31 via React fiber timeStampOffset + messageContext.comment.id on Day 1
+  makeVodLine(env1, scroller1, 'vod_owner', 'vod late', {
+    fiber: {
+      return: {
+        memoizedProps: {
+          timeStampOffset: 17731,
+          messageContext: {
+            author: { login: 'vod_owner' },
+            comment: { id: 'uuid-4h55m31s', contentOffset: 17731, commenter: { login: 'vod_owner' } },
+          },
+        },
+      },
+    },
+  })
+  env1.api.captureTree(scroller1, state1.history)
+  env1.api.renderMessages(state1)
+  assert.equal(state1.list.children.length, 1)
+  const lateTime = state1.list.children[0].querySelector('.ttc-time')
+  assert.equal(lateTime.textContent, '4:55:31')
+  assert.equal(lateTime.getAttribute('datetime'), 'PT17731S')
+  assert.equal(lateTime.getAttribute('title'), '影片時間 4:55:31')
+  assert.equal(state1.list.children[0].getAttribute('data-date'), null)
+
+  // Seek backward on Day 2 to 1:47 (nested DOM button>p timestamp) and 0:05 -> incrementally reorders to 0:05, 1:47, 4:55:31 with no date dividers
+  now = day2
+  makeVodLine(env1, scroller1, 'vod_owner', 'vod middle', {
+    headerTimestamp: '1:47',
+    nestedButtonTs: true,
+    fiber: {
+      memoizedProps: {
+        messageContext: { comment: { id: 'uuid-1m47s', commenter: { login: 'vod_owner' } } },
+      },
+    },
+  })
+  makeVodLine(env1, scroller1, 'vod_owner', 'vod early', {
+    headerTimestamp: '0:05',
+    fiber: {
+      memoizedProps: {
+        messageContext: { comment: { id: 'uuid-5s', commenter: { login: 'vod_owner' } } },
+      },
+    },
+  })
+  env1.api.captureTree(scroller1, state1.history)
+  env1.api.renderMessages(state1)
+  assert.deepEqual(
+    state1.list.children.map(row => row.querySelector('.ttc-time').textContent),
+    ['0:05', '1:47', '4:55:31'],
+  )
+  for (const row of state1.list.children) assert.equal(row.getAttribute('data-date'), null)
+
+  // Rewinding and re-capturing a fresh DOM node with the same fiber comment UUID deduplicates cleanly
+  const replayClone = makeVodLine(env1, scroller1, 'vod_owner', 'vod late', {
+    fiber: {
+      memoizedProps: {
+        timeStampOffset: 17731,
+        messageContext: { comment: { id: 'uuid-4h55m31s', contentOffset: 17731, commenter: { login: 'vod_owner' } } },
+      },
+    },
+  })
+  assert.equal(env1.api.captureLine(replayClone, state1.history), false)
+  assert.equal(state1.history.messages.length, 3)
+
+  // Search mode preserves VOD timeline order and omits capture-date dividers
+  state1.messageSearch.value = 'vod'
+  state1.messageSearch.listeners.get('input')()
+  assert.equal(state1.count.textContent, '3 則符合')
+  assert.deepEqual(
+    state1.list.children.map(row => row.querySelector('.ttc-time').textContent),
+    ['0:05', '1:47', '4:55:31'],
+  )
+  for (const row of state1.list.children) assert.equal(row.getAttribute('data-date'), null)
+
+  // Mismatched fiber commenter login must not leak another user's offset onto an unrelated message
+  const mismatched = makeVodLine(env1, scroller1, 'vod_owner', 'vod mismatched fiber', {
+    headerTimestamp: 'invalid:ts',
+    fiber: {
+      memoizedProps: {
+        timeStampOffset: 999,
+        messageContext: { comment: { id: 'wrong-user-id', contentOffset: 999, commenter: { login: 'someone_else' } } },
+      },
+    },
+  })
+  const parsedMismatch = env1.api.readMessage(mismatched, 'vod_owner', state1.history, true)
+  assert.equal(parsedMismatch.id, '')
+  assert.equal(parsedMismatch.vodOffset, null)
+
+  await env1.api.flushHistory(state1.history)
+  env1.api.unmount()
+
+  // Reload in fresh VM -> IndexedDB restore preserves vodOffset, timestamps, timeline sort, and no date dividers
+  const env2 = boot({ database, now: () => now })
+  setupVodPage(env2)
+  env2.api.refresh()
+  const state2 = env2.api.mounted
+  await state2.history.restorePromise
+  env2.api.setEnabled(state2, true)
+  assert.equal(state2.count.textContent, '3 則')
+  assert.deepEqual(
+    state2.list.children.map(row => row.querySelector('.ttc-time').textContent),
+    ['0:05', '1:47', '4:55:31'],
+  )
+  assert.equal(state2.list.children[2].querySelector('.ttc-time').getAttribute('datetime'), 'PT17731S')
+  for (const row of state2.list.children) assert.equal(row.getAttribute('data-date'), null)
+  env2.api.unmount()
 })
