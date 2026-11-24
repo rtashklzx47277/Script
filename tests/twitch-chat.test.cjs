@@ -2658,3 +2658,88 @@ test('Twitch scroll stability: avoid overflow-anchor: none, keep toggles anchore
 
   env.api.unmount()
 })
+
+test('Twitch split-screen compact UI: CSS rules, tooltip dismissal on hidden header, filter panel expansion, and background capture', () => {
+  const env = boot({ withResizeObserver: true })
+  env.window.innerWidth = 669
+  env.window.innerHeight = 636
+  const styleText = env.document.head.querySelector('style').textContent
+
+  assert.match(styleText, /\.right-column--below:not\(\.right-column--collapsed\)\s+\.right-column__toggle-visibility/)
+  assert.match(styleText, /\.right-column--below\s+:is\(\.stream-chat-header,\s*\.video-chat__header\)/)
+  assert.match(styleText, /\.right-column--below\s+\.chat-room__content\s*>\s*:has\(~\s*\[class\*="chat-list--"\]\)/)
+  assert.match(styleText, /\.right-column--below\s+\.chat-room__notifications/)
+  assert.match(styleText, /\.right-column--below\s+\.chat-room__overlay/)
+  assert.match(styleText, /\.right-column--below\s+:is\(\.chat-input__buttons-container,\s*\[data-test-selector="chat-input-buttons-container"\]\)/)
+  assert.match(styleText, /\.right-column--below\s+\.chat-scrollable-area__message-container\s*\{\s*padding-top:\s*0\s*!important;\s*\}/)
+
+  const rightCol = env.document.body.appendChild(new env.Element('div'))
+  rightCol.className = 'right-column right-column--theatre right-column--below'
+  const stream = rightCol.appendChild(new env.Element('div'))
+  stream.className = 'stream-chat'
+  const header = stream.appendChild(new env.Element('div'))
+  header.className = 'stream-chat-header'
+  const host = stream.appendChild(new env.Element('div'))
+  const scroller = host.appendChild(new env.Element('div'))
+  scroller.setAttribute('data-a-target', 'chat-scroller')
+  const input = stream.appendChild(new env.Element('div'))
+  input.className = 'chat-input'
+
+  env.api.refresh()
+  const state = env.api.mounted
+  assert.ok(state)
+  const { button, panel } = state
+
+  // Verify background message capture works while mounted inside .right-column--below
+  const modLine = env.message('mod_split', 'split screen msg', 'moderator', 'split-1').line
+  scroller.appendChild(modLine)
+  assert.equal(env.api.captureLine(modLine, state.history), true)
+  assert.equal(state.history.messages.length, 1)
+
+  // Tooltip closes cleanly when header/button collapses to 0x0 on split-screen resize
+  let tooltipCloses = 0
+  const { tooltip } = state
+  tooltip.showPopover = () => {}
+  tooltip.hidePopover = () => { tooltipCloses++ }
+  tooltip.getBoundingClientRect = () => ({ left: 0, top: 0, width: 120, height: 28, right: 120, bottom: 28 })
+  button.getBoundingClientRect = () => ({ left: 581, top: 380, width: 32, height: 32, right: 613, bottom: 412 })
+  button.listeners.get('mouseenter')()
+  env.flushFrames()
+  assert.equal(tooltip.getAttribute('data-visible'), 'true')
+
+  button.getBoundingClientRect = () => ({ left: 0, top: 0, width: 0, height: 0, right: 0, bottom: 0 })
+  env.listeners.get('resize')()
+  env.flushFrames()
+  assert.equal(tooltip.getAttribute('data-visible'), 'false')
+  assert.equal(tooltipCloses, 1)
+
+  // Opening tooltip while button already has 0x0 rect dismisses immediately instead of positioning at (8, 11)
+  button.listeners.get('mouseenter')()
+  env.flushFrames()
+  assert.equal(tooltip.getAttribute('data-visible'), 'false')
+  assert.equal(tooltipCloses, 2)
+
+  // Active filter panel expands into reclaimed header and input-button space, and restores when leaving split screen
+  panel.showPopover = () => {}
+  panel.hidePopover = () => {}
+  let streamBox = { left: 0, top: 376, width: 669, height: 260, bottom: 636 }
+  let headerBox = { top: 0, bottom: 0, height: 0 }
+  let hostBox = { left: 0, top: 376, width: 669, height: 211, bottom: 587 }
+  let inputBox = { top: 587, bottom: 636, height: 49 }
+  stream.getBoundingClientRect = () => streamBox
+  header.getBoundingClientRect = () => headerBox
+  host.getBoundingClientRect = () => hostBox
+  input.getBoundingClientRect = () => inputBox
+
+  env.api.setEnabled(state, true)
+  assert.equal(panel.style.top, '376px')
+  assert.equal(panel.style.height, '211px')
+
+  headerBox = { top: 376, bottom: 416, height: 40 }
+  inputBox = { top: 547, bottom: 636, height: 89 }
+  env.api.positionFilterPanel(state)
+  assert.equal(panel.style.top, '416px')
+  assert.equal(panel.style.height, '131px')
+
+  env.api.unmount()
+})

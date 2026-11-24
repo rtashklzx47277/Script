@@ -6,9 +6,15 @@
   :root { --color-background-base: #18181b; --color-text-base: #efeff1; --color-text-alt-2: #adadb8; }
   body { margin: 32px; color: #efeff1; background: #0e0e10; font: 14px Arial, sans-serif; }
   .stream-chat { width: 340px; border: 1px solid #45454a; }
+  .right-column { position: relative; width: 342px; }
+  .right-column__toggle-visibility { position: absolute; left: 8px; top: 14px; z-index: 2; }
+  .right-column__toggle-visibility button { color: inherit; background: none; border: 0; cursor: pointer; }
   .stream-chat-header { position: relative; display: flex; height: 60px; justify-content: center; align-items: center; }
   .actions { display: flex; position: absolute; right: 8px; align-items: center; }
   .actions button { color: inherit; background: none; border: 0; cursor: pointer; }
+  .chat-room__content { display: flex; flex-direction: column; }
+  .fixture-banner { padding: 10px 14px; border-bottom: 1px solid #45454a; background: #1f1f23; font-size: 12px; }
+  .fixture-banner p { margin: 2px 0 0; color: #adadb8; }
   .chat-host, [data-a-target="chat-scroller"] { height: 430px; }
   [data-a-target="chat-scroller"] { overflow: auto; }
   .chat-line__message { padding: 8px 10px; }
@@ -16,19 +22,38 @@
   .chat-badge { width: 18px; vertical-align: middle; }
   .chat-image { width: 28px; vertical-align: middle; }
   .fixture-emote { padding: 0; border: 0; background: transparent; color: inherit; }
-  .input-area { padding: 14px; border-top: 1px solid #45454a; }
-  .input-area input { box-sizing: border-box; width: 100%; padding: 8px; color: inherit; background: #303034; border: 0; }
+  .chat-input { padding: 10px 12px; border-top: 1px solid #45454a; }
+  .chat-input__textarea input { box-sizing: border-box; width: 100%; padding: 8px; color: inherit; background: #303034; border: 0; }
+  .chat-input__buttons-container { display: flex; justify-content: space-between; align-items: center; margin-top: 8px; color: #adadb8; font-size: 12px; }
+  .chat-input__buttons-container button { color: #fff; background: #9147ff; border: 0; border-radius: 999px; padding: 4px 10px; cursor: pointer; }
   .fixture-tools { margin-top: 20px; display: flex; gap: 8px; flex-wrap: wrap; }
   .fixture-overlay { position: fixed; z-index: 2147483647; left: 32px; top: 170px; box-sizing: border-box; width: 320px; height: 220px; padding: 20px; background: #71412d; }
 </style>
 <h2>聊天室測試頁</h2>
-<div class="stream-chat">
-  <div class="stream-chat-header">
-    <h4 id="chat-room-header-label">實況聊天室</h4>
-    <div class="actions"><div><button data-test-selector="chat-viewer-list" aria-label="社群">♙</button></div></div>
+<div class="right-column">
+  <div class="right-column__toggle-visibility"><button type="button" aria-label="摺疊">↦</button></div>
+  <div class="stream-chat">
+    <div class="stream-chat-header">
+      <h4 id="chat-room-header-label">實況聊天室</h4>
+      <div class="actions"><div><button data-test-selector="chat-viewer-list" aria-label="社群">♙</button></div></div>
+    </div>
+    <section class="chat-room">
+      <div class="chat-room__content">
+        <div class="fixture-banner"><strong>成為英雄！</strong><p>送給 100 位實況追隨者！</p></div>
+        <div class="chat-list--default">
+          <div class="chat-host"><div data-a-target="chat-scroller"><div class="chat-scrollable-area__message-container" style="padding-top: 16px;"></div></div></div>
+        </div>
+        <div class="chat-room__notifications"></div>
+        <div class="chat-input">
+          <div class="chat-input__textarea"><input aria-label="傳送訊息" placeholder="傳送訊息（測試頁不傳送）"></div>
+          <div class="chat-input__buttons-container" data-test-selector="chat-input-buttons-container">
+            <span>◆ 0 ○ 43.4萬</span>
+            <span><button type="button">聊天</button></span>
+          </div>
+        </div>
+      </div>
+    </section>
   </div>
-  <section class="chat-room"><div class="chat-host"><div data-a-target="chat-scroller"></div></div></section>
-  <div class="input-area"><input aria-label="傳送訊息" placeholder="傳送訊息（測試頁不傳送）"></div>
 </div>
 <div class="fixture-tools">
   <button id="add-mod">新增管理員訊息</button>
@@ -45,6 +70,7 @@
   <button id="prune">清空原聊天室 DOM</button>
   <button id="remount">重建聊天室</button>
   <button id="navigate">切換頻道</button>
+  <button id="split-toggle">切換分割螢幕模式</button>
   <button id="overlay-toggle">顯示遮擋測試物件</button>
 </div>
 <div class="fixture-overlay" id="fixture-overlay" hidden>原生浮動物件遮擋測試</div>
@@ -54,7 +80,7 @@
     overlay.hidden = !overlay.hidden
   }
   if (new URL(location.href).searchParams.has('overlay')) document.getElementById('fixture-overlay').hidden = false
-  const scroller = () => document.querySelector('[data-a-target="chat-scroller"]')
+  const scroller = () => document.querySelector('.chat-scrollable-area__message-container') || document.querySelector('[data-a-target="chat-scroller"]')
   let serial = 0
   function addMessage(user, role = '', reply = null) {
     const line = document.createElement('div')
@@ -126,12 +152,15 @@
     copy.querySelectorAll('.ttc-panel, .ttc-toggle').forEach(node => node.remove())
     copy.querySelector('.chat-host').className = 'chat-host'
     copy.querySelector('[data-a-target="chat-scroller"]').className = ''
-    copy.querySelector('[data-a-target="chat-scroller"]').replaceChildren()
+    ;(copy.querySelector('.chat-scrollable-area__message-container') || copy.querySelector('[data-a-target="chat-scroller"]')).replaceChildren()
     chat.replaceWith(copy)
   }
   document.getElementById('navigate').onclick = () => {
     history.pushState({}, '', location.pathname === '/fixture_channel' ? '/other_channel' : '/fixture_channel')
     scroller().replaceChildren()
+  }
+  document.getElementById('split-toggle').onclick = () => {
+    document.querySelector('.right-column').classList.toggle('right-column--below')
   }
 </script>
 <script src="/TwitchLiveChatTweaks.user.js"></script>
