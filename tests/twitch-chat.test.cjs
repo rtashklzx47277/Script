@@ -2915,3 +2915,334 @@ test('Twitch VOD timeline: display and sort by video offset from fiber/DOM, dedu
   for (const row of state2.list.children) assert.equal(row.getAttribute('data-date'), null)
   env2.api.unmount()
 })
+
+test('Twitch VOD replies: reconstruct threads from leading fiber/DOM mentions, handle seeking/relinking, respect window/roles/exclusions, and persist across reload', async () => {
+  const database = fakeIndexedDB()
+  let now = new Date(2026, 10, 23, 6, 15, 0).getTime()
+
+  const setupVodPage = env => {
+    env.location.pathname = '/videos/2937944840'
+    const info = env.document.body.appendChild(new env.Element('div'))
+    info.className = 'channel-info-content'
+    const ownerLink = info.appendChild(new env.Element('a'))
+    ownerLink.setAttribute('href', '/vod_owner')
+    const vodChat = env.document.body.appendChild(new env.Element('div'))
+    vodChat.className = 'video-chat'
+    const vodHeader = vodChat.appendChild(new env.Element('div'))
+    vodHeader.className = 'video-chat__header'
+    const vodBody = vodChat.appendChild(new env.Element('div'))
+    const wrapper = vodBody.appendChild(new env.Element('div'))
+    wrapper.className = 'video-chat__message-list-wrapper'
+    const scroller = wrapper.appendChild(new env.Element('ul'))
+    return scroller
+  }
+
+  const formatTs = offset => {
+    const h = Math.floor(offset / 3600)
+    const m = Math.floor((offset % 3600) / 60)
+    const s = offset % 60
+    return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}` : `${m}:${String(s).padStart(2, '0')}`
+  }
+
+  const makeVodMsg = (env, scroller, {
+    user, displayName = user, color = '', id = '', offset,
+    tokens = null, mentionPrefix = '', bodyText = '', emoteAlt = '', midMention = '',
+    withFiber = true, fiberAuthorName = user,
+  }) => {
+    const line = scroller.appendChild(new env.Element('div'))
+    line.className = 'vod-message'
+    const hdr = line.appendChild(new env.Element('div'))
+    hdr.className = 'vod-message__header'
+    const btn = hdr.appendChild(new env.Element('button'))
+    const p = btn.appendChild(new env.Element('p'))
+    p.textContent = formatTs(offset)
+
+    const content = line.appendChild(new env.Element('div'))
+    const authorLink = content.appendChild(new env.Element('a'))
+    authorLink.className = 'video-chat__message-author'
+    authorLink.setAttribute('href', `/${user}`)
+    const author = authorLink.appendChild(new env.Element('span'))
+    author.setAttribute('data-a-target', 'chat-message-username')
+    author.setAttribute('data-a-user', user)
+    author.textContent = displayName
+    if (color) author.style.color = color
+
+    const msgBox = content.appendChild(new env.Element('div'))
+    msgBox.className = 'video-chat__message'
+    const colon = msgBox.appendChild(new env.Element('span'))
+    colon.textContent = ':'
+    const body = msgBox.appendChild(new env.Element('span'))
+
+    if (mentionPrefix) {
+      const m = body.appendChild(new env.Element('span'))
+      m.className = 'mention-fragment'
+      m.setAttribute('data-a-target', 'chat-message-mention')
+      m.textContent = `@${mentionPrefix}`
+    }
+    if (bodyText) {
+      const frag = body.appendChild(new env.Element('span'))
+      frag.className = 'text-fragment'
+      frag.setAttribute('data-a-target', 'chat-message-text')
+      frag.textContent = bodyText
+    }
+    if (midMention) {
+      const m = body.appendChild(new env.Element('span'))
+      m.className = 'mention-fragment'
+      m.setAttribute('data-a-target', 'chat-message-mention')
+      m.textContent = `@${midMention}`
+      const tail = body.appendChild(new env.Element('span'))
+      tail.className = 'text-fragment'
+      tail.setAttribute('data-a-target', 'chat-message-text')
+      tail.textContent = ' 好強'
+    }
+    if (emoteAlt) {
+      const emoteWrap = body.appendChild(new env.Element('div'))
+      const img = emoteWrap.appendChild(new env.Element('img'))
+      img.className = 'chat-image'
+      img.setAttribute('alt', emoteAlt)
+      img.setAttribute('src', 'https://static-cdn.jtvnw.net/emoticons/v2/41/default/dark/1.0')
+    }
+
+    if (withFiber) {
+      const msgTokens = tokens || [
+        ...(bodyText ? [{ type: 0, content: bodyText }] : []),
+      ]
+      line.__reactFiber$1 = {
+        return: {
+          memoizedProps: {
+            timeStampOffset: offset,
+            messageContext: {
+              author: { id: `${user}-uid`, name: fiberAuthorName, displayName },
+              comment: {
+                id,
+                contentOffset: offset,
+                commenter: '123456',
+                message: { tokens: msgTokens },
+              },
+            },
+          },
+        },
+      }
+    }
+    return line
+  }
+
+  const saved = JSON.stringify({
+    broadcaster: true, moderators: true, vip: true, replies: true,
+    users: ['mea_07311', 'never_loses'], excludedUsers: [],
+  })
+  const env1 = boot({ saved, database, now: () => now })
+  const scroller1 = setupVodPage(env1)
+  env1.api.refresh()
+  const state1 = env1.api.mounted
+  await state1.history.restorePromise
+  env1.api.setEnabled(state1, true)
+
+  // 1. Localized target sends two messages (5:06:17 & 5:06:52); fiber type:4 reply + DOM mention reply attach to closest parent
+  makeVodMsg(env1, scroller1, {
+    user: 'mea_07311', displayName: '小碗泡咪', color: '#C9E1FF',
+    id: 'vod-p1', offset: 18377, bodyText: '外套好看',
+  })
+  makeVodMsg(env1, scroller1, {
+    user: 'sss316070', displayName: '阿任',
+    id: 'vod-r1', offset: 18383, mentionPrefix: '小碗泡咪', emoteAlt: 'gunoSiu',
+    tokens: [{ type: 4, content: { recipient: '小碗泡咪', currentUserMentionRelation: 0 } }, { type: 6, content: { alt: 'gunoSiu' } }],
+  })
+  makeVodMsg(env1, scroller1, {
+    user: 'mea_07311', displayName: '小碗泡咪', color: '#C9E1FF',
+    id: 'vod-p2', offset: 18412, emoteAlt: 'shaxy101',
+    tokens: [{ type: 6, content: { alt: 'shaxy101' } }],
+  })
+  // DOM-only mention fallback (no fiber tokens)
+  makeVodMsg(env1, scroller1, {
+    user: 'hayger123', displayName: '西歐榔',
+    id: 'vod-r2', offset: 18423, mentionPrefix: '小碗泡咪', bodyText: ' 7',
+    withFiber: false,
+  })
+  // Target B replying to Target A's recent VOD message -> top-level with quote including emote alt text
+  makeVodMsg(env1, scroller1, {
+    user: 'never_loses', displayName: 'NeVeR_LosEs',
+    id: 'vod-tb', offset: 18428, mentionPrefix: '小碗泡咪', bodyText: ' 好害羞',
+    tokens: [{ type: 4, content: { recipient: '小碗泡咪', currentUserMentionRelation: 0 } }, { type: 0, content: ' 好害羞' }],
+  })
+  // Mid-message mention, self-mention, viewer->non-target, and target->non-target
+  makeVodMsg(env1, scroller1, {
+    user: 'mid_user', id: 'vod-mid', offset: 18430, bodyText: '哈哈 ', midMention: '小碗泡咪',
+    tokens: [{ type: 0, content: '哈哈 ' }, { type: 4, content: { recipient: '小碗泡咪' } }, { type: 0, content: ' 好強' }],
+  })
+  makeVodMsg(env1, scroller1, {
+    user: 'mea_07311', displayName: '小碗泡咪', id: 'vod-self', offset: 18432,
+    mentionPrefix: '小碗泡咪', bodyText: ' 自回測試',
+    tokens: [{ type: 4, content: { recipient: '小碗泡咪' } }, { type: 0, content: ' 自回測試' }],
+  })
+  makeVodMsg(env1, scroller1, {
+    user: 'v_non', id: 'vod-vnon', offset: 18434, mentionPrefix: 'other_user', bodyText: ' hi',
+    tokens: [{ type: 4, content: { recipient: 'other_user' } }, { type: 0, content: ' hi' }],
+  })
+  makeVodMsg(env1, scroller1, {
+    user: 'never_loses', displayName: 'NeVeR_LosEs', id: 'vod-tnon', offset: 18436,
+    mentionPrefix: 'other_user', bodyText: ' Yo',
+    tokens: [{ type: 4, content: { recipient: 'other_user' } }, { type: 0, content: ' Yo' }],
+  })
+
+  env1.api.captureTree(scroller1, state1.history)
+  env1.api.renderMessages(state1)
+
+  // Captured: p1, r1, p2, r2, tb, self, tnon (7 retained; mid_user & v_non ignored)
+  assert.equal(state1.history.messages.length, 7)
+  assert.equal(state1.count.textContent, '7 則')
+  assert.equal(state1.history.ids.has('vod-mid'), false)
+  assert.equal(state1.history.ids.has('vod-vnon'), false)
+  assert.equal(state1.history.ids.get('vod-self').reply, null)
+  assert.equal(state1.history.ids.get('vod-tnon').reply, null)
+
+  // Verify two .ttc-thread drawers (p1 -> [r1], p2 -> [r2]) and Target B top-level quote
+  const p1Thread = state1.history.ids.get('vod-p1').view.closest('.ttc-thread')
+  assert.ok(p1Thread)
+  assert.equal(p1Thread.querySelector('.ttc-replies-toggle').textContent, '1 則回覆')
+  assert.equal(p1Thread.querySelector('.ttc-replies-list').children.length, 1)
+  assert.equal(p1Thread.querySelector('.ttc-replies-list').querySelector('.ttc-time').textContent, '5:06:23')
+
+  const p2Thread = state1.history.ids.get('vod-p2').view.closest('.ttc-thread')
+  assert.ok(p2Thread)
+  assert.equal(p2Thread.querySelector('.ttc-replies-toggle').textContent, '1 則回覆')
+  const r2Record = state1.history.messages.find(m => m.user === 'hayger123')
+  assert.equal(r2Record.vodOffset, 18423)
+  assert.equal(r2Record.reply.parentId, 'vod-p2')
+  assert.equal(r2Record.reply.parentText, 'shaxy101')
+  assert.equal(r2Record.view.parentElement, p2Thread.querySelector('.ttc-replies-list'))
+
+  const tbView = state1.history.ids.get('vod-tb').view
+  assert.equal(tbView.parentElement, state1.list)
+  assert.equal(tbView.querySelector('.ttc-reply-author').textContent, '@小碗泡咪 (mea_07311)')
+  assert.equal(tbView.querySelector('.ttc-reply-body').textContent, 'shaxy101')
+
+  // 2. Window limit (>300s) + out-of-order seeking + drawer timeline reorder + relink from orphan -> p3 -> closer p4
+  now += 10000
+  const lateR2 = makeVodMsg(env1, scroller1, {
+    user: 'late_v2', id: 'vod-r3-later', offset: 18765, mentionPrefix: '小碗泡咪', bodyText: ' +1',
+    tokens: [{ type: 4, content: { recipient: '小碗泡咪' } }, { type: 0, content: ' +1' }],
+  })
+  env1.api.captureLine(lateR2, state1.history)
+  env1.api.renderMessages(state1)
+
+  const lateR1 = makeVodMsg(env1, scroller1, {
+    user: 'late_v1', id: 'vod-r3-late', offset: 18760, mentionPrefix: '小碗泡咪', bodyText: ' 真的嗎',
+    tokens: [{ type: 4, content: { recipient: '小碗泡咪' } }, { type: 0, content: ' 真的嗎' }],
+  })
+  env1.api.captureLine(lateR1, state1.history)
+  env1.api.renderMessages(state1)
+
+  // Both >300s after p2 (18412s): grouped into one orphan [原留言] drawer sorted 5:12:40, 5:12:45
+  assert.equal(state1.history.ids.get('vod-r3-late').reply.parentId, '')
+  const orphanGroup = state1.list.querySelector('.ttc-reply-group')
+  assert.ok(orphanGroup)
+  assert.equal(orphanGroup.querySelector('.ttc-orphan-author').textContent, '小碗泡咪 (mea_07311)')
+  assert.equal(orphanGroup.querySelector('.ttc-replies-toggle').textContent, '2 則回覆')
+  assert.deepEqual(
+    orphanGroup.querySelector('.ttc-replies-list').querySelectorAll('.ttc-time').map(t => t.textContent),
+    ['5:12:40', '5:12:45'],
+  )
+
+  // Rewind to 18750s (p3) -> relinks orphan replies onto p3 thread
+  const vodP3 = makeVodMsg(env1, scroller1, {
+    user: 'mea_07311', displayName: '小碗泡咪', color: '#C9E1FF',
+    id: 'vod-p3', offset: 18750, bodyText: '吃飽了',
+  })
+  env1.api.captureLine(vodP3, state1.history)
+  env1.api.renderMessages(state1)
+
+  assert.equal(state1.list.querySelectorAll('.ttc-reply-group').length, 0)
+  const p3Thread = state1.history.ids.get('vod-p3').view.closest('.ttc-thread')
+  assert.ok(p3Thread)
+  assert.equal(p3Thread.querySelector('.ttc-replies-toggle').textContent, '2 則回覆')
+  assert.equal(state1.history.ids.get('vod-r3-late').reply.parentText, '吃飽了')
+  assert.deepEqual(
+    p3Thread.querySelector('.ttc-replies-list').querySelectorAll('.ttc-time').map(t => t.textContent),
+    ['5:12:40', '5:12:45'],
+  )
+
+  // Rewind closer to 18755s (p4) -> provisionally linked replies upgrade from p3 to closer p4
+  const vodP4 = makeVodMsg(env1, scroller1, {
+    user: 'mea_07311', displayName: '小碗泡咪', color: '#C9E1FF',
+    id: 'vod-p4', offset: 18755, bodyText: '甜點也吃了',
+  })
+  env1.api.captureLine(vodP4, state1.history)
+  env1.api.renderMessages(state1)
+
+  assert.equal(state1.history.ids.get('vod-p3').view.parentElement, state1.list)
+  assert.equal(state1.history.ids.get('vod-p3').view.classList.contains('ttc-has-replies'), false)
+  const p4Thread = state1.history.ids.get('vod-p4').view.closest('.ttc-thread')
+  assert.ok(p4Thread)
+  assert.equal(p4Thread.querySelector('.ttc-replies-toggle').textContent, '2 則回覆')
+  assert.equal(state1.history.ids.get('vod-r3-late').reply.parentId, 'vod-p4')
+  assert.equal(state1.history.ids.get('vod-r3-late').reply.parentText, '甜點也吃了')
+  assert.equal(state1.history.ids.get('vod-r3-late').view.querySelector('.ttc-reply-body').textContent, '甜點也吃了')
+
+  // 3. Respects replies toggle off/on
+  const repliesCheckbox = state1.panel.querySelector('[name="replies"]')
+  repliesCheckbox.checked = false
+  repliesCheckbox.listeners.get('change')()
+  assert.equal(state1.list.querySelectorAll('.ttc-thread').length, 0)
+  assert.equal(state1.count.textContent, '7 則')
+
+  repliesCheckbox.checked = true
+  repliesCheckbox.listeners.get('change')()
+  assert.equal(state1.list.querySelectorAll('.ttc-thread').length, 3)
+  assert.equal(state1.count.textContent, '11 則')
+
+  // 4. Respects excludedUsers (excluded replier and excluded target)
+  const updateTargets = (excludedUsers) => {
+    state1.updateSettings({ ...state1.history.settings, excludedUsers }, '')
+  }
+  updateTargets(['sss316070'])
+  assert.equal(state1.history.ids.get('vod-p1').view.parentElement, state1.list)
+  assert.equal(state1.count.textContent, '10 則')
+
+  updateTargets(['mea_07311'])
+  assert.equal(state1.history.ids.get('vod-tb').view.parentElement, state1.list)
+  assert.equal(state1.list.querySelectorAll('.ttc-thread').length, 0)
+  assert.equal(state1.count.textContent, '2 則')
+
+  updateTargets([])
+  assert.equal(state1.list.querySelectorAll('.ttc-thread').length, 3)
+  assert.equal(state1.count.textContent, '11 則')
+
+  // 5. Rejects mismatched mc.author.name in VOD React fiber
+  const badFiberLine = makeVodMsg(env1, scroller1, {
+    user: 'vod_owner', id: 'vod-bad', offset: 18800, bodyText: 'mismatch',
+    fiberAuthorName: 'someone_else',
+  })
+  // Override header timestamp to verify fiber rejection only affects mismatched fiber
+  badFiberLine.querySelector('.vod-message__header').querySelector('p').textContent = 'bad:ts'
+  const parsedBad = env1.api.readMessage(badFiberLine, 'vod_owner', state1.history, true)
+  assert.equal(parsedBad.id, '')
+  assert.equal(parsedBad.vodOffset, null)
+  badFiberLine.remove()
+
+  // 6. Persists vodOffset, inferred reply metadata, and drawer structure across reload with no date dividers
+  await env1.api.flushHistory(state1.history)
+  env1.api.unmount()
+
+  const env2 = boot({ saved, database, now: () => now })
+  setupVodPage(env2)
+  env2.api.refresh()
+  const state2 = env2.api.mounted
+  await state2.history.restorePromise
+  env2.api.setEnabled(state2, true)
+
+  assert.equal(state2.count.textContent, '11 則')
+  assert.equal(state2.list.querySelectorAll('.ttc-thread').length, 3)
+  assert.equal(state2.list.querySelectorAll('.ttc-reply-group').length, 0)
+  const restoredP4Thread = state2.history.ids.get('vod-p4').view.closest('.ttc-thread')
+  assert.ok(restoredP4Thread)
+  assert.equal(restoredP4Thread.querySelector('.ttc-replies-toggle').textContent, '2 則回覆')
+  assert.deepEqual(
+    restoredP4Thread.querySelector('.ttc-replies-list').querySelectorAll('.ttc-time').map(t => t.textContent),
+    ['5:12:40', '5:12:45'],
+  )
+  assert.equal(state2.history.ids.get('vod-r3-late').reply.inferred, true)
+  assert.equal(state2.history.ids.get('vod-tb').view.querySelector('.ttc-reply-body').textContent, 'shaxy101')
+  for (const row of state2.list.children) assert.equal(row.getAttribute('data-date'), null)
+  env2.api.unmount()
+})

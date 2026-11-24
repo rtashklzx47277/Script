@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        Twitch Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.11.2
+// @version     0.11.3
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
 // @description 依頻道主、管理員、VIP、回覆篩選目標與全域帳號包含／排除名單篩選 Twitch 直播與 VOD 聊天，保留回覆目標引言與最近 1000 則／7 天紀錄，支援跨日分隔、搜尋與自動跟隨；分割螢幕時隱藏聊天室上方橫幅與輸入區底部列。
@@ -23,6 +23,7 @@
   const MAX_CHANNELS = 5
   const MAX_DISPLAY_NAMES = 500
   const RETENTION_MS = 7 * 24 * 60 * 60 * 1000
+  const VOD_REPLY_WINDOW_S = 300
   const ARCHIVE_DB = 'twitch-live-chat-tweaks-history-v1'
   const pageKey = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`
   const nowMs = () => typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now()
@@ -314,6 +315,7 @@
       parentModerator: reply.parentModerator === true,
       parentBroadcaster: reply.parentBroadcaster === true,
       parentVip: reply.parentVip === true,
+      ...(reply.inferred === true ? { inferred: true } : {}),
     }
   }
   const stripLoginSuffix = (name, user) => {
@@ -448,6 +450,14 @@
     }
     quote.appendChild(text)
     return quote
+  }
+  const syncReplyView = record => {
+    if (!record?.view || !record.reply) return
+    const nextQuote = makeReplyView(record.reply)
+    const oldQuote = $('.ttc-reply', record.view)
+    if (oldQuote) oldQuote.replaceWith(nextQuote)
+    else record.view.insertBefore(nextQuote, record.view.firstChild || null)
+    record.view.className = 'ttc-message ttc-has-reply'
   }
   const makeOrphanParentView = (reply, history) => {
     const row = element('div', { class: 'ttc-message ttc-orphan-message' }, [
@@ -640,29 +650,38 @@
       }
       for (const record of history.messages) {
         if (!record.reply) continue
-        const parentRecord = record.reply.parentId ? history.ids.get(record.reply.parentId) : null
+        let parentRecord = record.reply.parentId ? (history.ids.get(record.reply.parentId) || history.byStorageId?.get(record.reply.parentId)) : null
         const resolvedUser = record.reply.parentUser ||
           parentRecord?.user ||
           (record.reply.parentDisplayName ? history.displayNames?.get(record.reply.parentDisplayName.toLowerCase()) : '') ||
           ''
+        if (!parentRecord && record.reply.inferred && resolvedUser && resolvedUser !== record.user && hasVodOffset(record)) {
+          parentRecord = findVodReplyParent(history, resolvedUser, record.vodOffset, record.id || record.storageId)
+        }
+        const nextParentId = parentRecord ? (parentRecord.id || parentRecord.storageId) : record.reply.parentId
+        const nextParentText = parentRecord && record.reply.inferred
+          ? (extractViewBodyText(parentRecord.view) || record.reply.parentText)
+          : record.reply.parentText
         const known = resolvedUser ? history.knownRoles?.get(resolvedUser) : null
         const nextModerator = Boolean(record.reply.parentModerator || parentRecord?.moderator || known?.moderator)
         const nextBroadcaster = Boolean(record.reply.parentBroadcaster || (owner && resolvedUser === owner) || parentRecord?.broadcaster || known?.broadcaster)
         const nextVip = Boolean(record.reply.parentVip || parentRecord?.vip || known?.vip)
-        if (resolvedUser !== record.reply.parentUser ||
+        if (nextParentId !== record.reply.parentId ||
+          nextParentText !== record.reply.parentText ||
+          resolvedUser !== record.reply.parentUser ||
           nextModerator !== record.reply.parentModerator ||
           nextBroadcaster !== record.reply.parentBroadcaster ||
           nextVip !== record.reply.parentVip) {
           record.reply = sanitizeReply({
             ...record.reply,
+            parentId: nextParentId,
             parentUser: resolvedUser,
+            parentText: nextParentText,
             parentModerator: nextModerator,
             parentBroadcaster: nextBroadcaster,
             parentVip: nextVip,
           })
-          const replyAuthor = $('.ttc-reply-author', record.view)
-          const replyLabel = record.reply ? formatAuthorLabel(record.reply.parentDisplayName, record.reply.parentUser) : ''
-          if (replyAuthor && replyLabel) replyAuthor.textContent = `@${replyLabel}`
+          syncReplyView(record)
           record._searchText = ''
           history.dirty.add(record)
           saveRecord(history, record)
@@ -807,9 +826,66 @@
     return { parentId, parentUser, parentDisplayName, parentText }
   }
 
+  const extractNodeText = node => {
+    if (!node) return ''
+    if (node.nodeType === 3 || node.tagName === '#text') return String(node.textContent || '')
+    if (node.nodeType !== 1) return ''
+    const tag = (node.localName || node.tagName || '').toLowerCase()
+    if (tag === 'img') return node.getAttribute?.('alt') || ''
+    if (tag === 'br') return ' '
+    const parts = []
+    for (const child of [...(node.childNodes || [])]) {
+      const piece = extractNodeText(child)
+      if (piece) parts.push(piece)
+    }
+    return parts.join('')
+  }
+
+  const extractViewBodyText = view => {
+    if (!view?.children) return ''
+    const body = [...view.children].reverse().find(child => {
+      const tag = (child.localName || child.tagName || '').toLowerCase()
+      return tag && tag !== '#text' && tag !== 'time' && tag !== 'strong' && tag !== 'img' &&
+        !child.classList?.contains?.('ttc-reply') && !child.matches?.('.ttc-reply')
+    })
+    return extractNodeText(body).replace(/\s+/g, ' ').trim()
+  }
+
+  const readVodMentionFromTokens = tokens => {
+    if (!Array.isArray(tokens)) return ''
+    for (const token of tokens) {
+      if (token?.type === 0) {
+        if (!String(token.content || '').trim()) continue
+        return ''
+      }
+      if (token?.type === 4 && typeof token.content?.recipient === 'string') {
+        return token.content.recipient.replace(/^@/, '').trim()
+      }
+      return ''
+    }
+    return ''
+  }
+
+  const readVodMentionFromDom = body => {
+    for (const node of [...(body?.childNodes || [])]) {
+      if (node.nodeType === 3 || node.tagName === '#text') {
+        if (!String(node.textContent || '').trim()) continue
+        return ''
+      }
+      if (node.nodeType !== 1) continue
+      if (node.matches?.('[data-a-target="chat-message-mention"], .mention-fragment')) {
+        return String(node.textContent || '').trim().replace(/^@/, '').trim()
+      }
+      if (!String(node.textContent || '').trim() && !$('img', node)) continue
+      return ''
+    }
+    return ''
+  }
+
   const readVodMeta = (line, expectedUser = '') => {
     let id = ''
     let vodOffset = null
+    let mentionRecipient = ''
     try {
       const key = Object.keys(line).find(name => name.startsWith('__reactFiber') || name.startsWith('__reactInternalInstance'))
       let current = key ? line[key] : null
@@ -821,14 +897,17 @@
         if (comment || Number.isFinite(props.timeStampOffset)) {
           const fiberUser = String(
             comment?.commenter?.login || comment?.commenter?.userLogin ||
-            mc?.author?.login || mc?.author?.userLogin || ''
+            mc?.author?.login || mc?.author?.userLogin || mc?.author?.name || ''
           ).toLowerCase()
           if (expectedUser && fiberUser && fiberUser !== expectedUser) continue
           if (!id && typeof comment?.id === 'string' && comment.id) id = comment.id
           const rawOffset = [props.timeStampOffset, comment?.contentOffset, comment?.contentOffsetSeconds]
             .find(value => Number.isFinite(value) && value >= 0)
           if (vodOffset === null && Number.isFinite(rawOffset)) vodOffset = Math.floor(rawOffset)
-          if (id && vodOffset !== null) break
+          if (!mentionRecipient && Array.isArray(comment?.message?.tokens)) {
+            mentionRecipient = readVodMentionFromTokens(comment.message.tokens)
+          }
+          if (id && vodOffset !== null && (mentionRecipient || Array.isArray(comment?.message?.tokens))) break
         }
       }
     } catch (_) {}
@@ -842,7 +921,18 @@
         if (parsed !== null) { vodOffset = parsed; break }
       }
     }
-    return { id, vodOffset }
+    return { id, vodOffset, mentionRecipient }
+  }
+
+  const resolveParentRoles = (channel, history, parentUser, parentRecord, existing = null) => {
+    const known = parentUser ? history?.knownRoles?.get(parentUser) : null
+    return {
+      parentModerator: Boolean(existing?.parentModerator || (parentRecord ? parentRecord.moderator : known?.moderator)),
+      parentBroadcaster: Boolean(existing?.parentBroadcaster ||
+        (Boolean(channel) && parentUser && parentUser === channel) ||
+        (parentRecord ? parentRecord.broadcaster : known?.broadcaster)),
+      parentVip: Boolean(existing?.parentVip || (parentRecord ? parentRecord.vip : known?.vip)),
+    }
   }
 
   const readMessage = (line, channel, history = null, isVod = false) => {
@@ -859,7 +949,7 @@
       loginFromHref(author?.closest?.('a')?.getAttribute('href') || $$('a', authorContainer || line).find(a => a.getAttribute('href'))?.getAttribute('href')) ||
       ''
     ).toLowerCase()
-    const contentParent = $('[data-a-target="chat-message-text"], .text-fragment, .chat-line__message--emote-button', line)?.parentElement ||
+    const contentParent = $('[data-a-target="chat-message-text"], .text-fragment, .chat-line__message--emote-button, [data-a-target="chat-message-mention"], .mention-fragment', line)?.parentElement ||
       $('.video-chat__message', line)?.lastElementChild
     const body = $(BODY_SELECTOR, line) || (contentParent && contentParent !== authorContainer ? contentParent : null)
     if (!user || !author || !body || body.contains?.(author)) return null
@@ -888,7 +978,7 @@
     if (rawReply || domReply) {
       const parentId = String(rawReply?.parentMsgId || domReply?.parentId || '').trim()
       const parentDisplayName = String(rawReply?.parentDisplayName || domReply?.parentDisplayName || '').replace(/\s+/g, ' ').trim()
-      const parentRecord = parentId ? history?.ids?.get(parentId) : null
+      const parentRecord = parentId ? (history?.ids?.get(parentId) || history?.byStorageId?.get(parentId)) : null
       const parentUser = normalizeLogin(rawReply?.parentUserLogin) ||
         normalizeLogin(domReply?.parentUser) ||
         parentRecord?.user ||
@@ -899,21 +989,46 @@
       const parentText = domReply?.parentText ||
         String(rawReply?.parentMessageBody || '').replace(/\s+/g, ' ').trim() ||
         (parentDeleted ? '訊息已刪除' : '')
-      const known = parentUser ? history?.knownRoles?.get(parentUser) : null
-      const parentModerator = Boolean(parentRecord ? parentRecord.moderator : known?.moderator)
-      const parentBroadcaster = Boolean((Boolean(channel) && parentUser && parentUser === channel) ||
-        (parentRecord ? parentRecord.broadcaster : known?.broadcaster))
-      const parentVip = Boolean(parentRecord ? parentRecord.vip : known?.vip)
       reply = sanitizeReply({
         parentId,
         parentUser,
         parentDisplayName,
         parentText,
         parentDeleted,
-        parentModerator,
-        parentBroadcaster,
-        parentVip,
+        ...resolveParentRoles(channel, history, parentUser, parentRecord),
       })
+    } else if (vodLine) {
+      const mentionRecipient = vodMeta?.mentionRecipient || readVodMentionFromDom(body)
+      if (mentionRecipient) {
+        const parentUser = (history?.displayNames?.get(mentionRecipient.toLowerCase())) || normalizeLogin(mentionRecipient) || ''
+        if (parentUser && parentUser !== user) {
+          const parentRecord = findVodReplyParent(history, parentUser, vodMeta?.vodOffset ?? null, id)
+          const roles = resolveParentRoles(channel, history, parentUser, parentRecord)
+          if (parentRecord) {
+            reply = sanitizeReply({
+              parentId: parentRecord.id || parentRecord.storageId || '',
+              parentUser,
+              parentDisplayName: mentionRecipient,
+              parentText: extractViewBodyText(parentRecord.view),
+              parentDeleted: false,
+              ...roles,
+              inferred: true,
+            })
+          } else if (history?.settings &&
+            isReplyToActiveTarget({ parentUser, ...roles }, history.settings) &&
+            !matchesTarget({ user, moderator, broadcaster, vip }, history.settings)) {
+            reply = sanitizeReply({
+              parentId: '',
+              parentUser,
+              parentDisplayName: mentionRecipient,
+              parentText: '',
+              parentDeleted: false,
+              ...roles,
+              inferred: true,
+            })
+          }
+        }
+      }
     }
     return { user, moderator, broadcaster, vip, reply, author, body, badges, id, vodOffset: vodMeta ? vodMeta.vodOffset : null }
   }
@@ -941,6 +1056,65 @@
   const matchesFilter = (message, settings) =>
     !(settings.excludedUsers || []).includes(message.user) &&
     (matchesTarget(message, settings) || matchesReplyTarget(message.reply, settings))
+
+  const findVodReplyParent = (history, parentUser, replyOffset, selfId = '') => {
+    if (!history || !parentUser) return null
+    let best = null
+    for (const record of history.messages) {
+      if (!record.retained || record.user !== parentUser) continue
+      if (selfId && (record.id === selfId || record.storageId === selfId)) continue
+      if (history.settings && !matchesTarget(record, history.settings)) continue
+      if (Number.isFinite(replyOffset)) {
+        if (!hasVodOffset(record) || record.vodOffset > replyOffset || replyOffset - record.vodOffset > VOD_REPLY_WINDOW_S) continue
+      }
+      if (!best || compareRecords(record, best) > 0) best = record
+    }
+    return best
+  }
+
+  const relinkVodReplies = (history, parentRecord) => {
+    if (!history || !parentRecord?.retained || !hasVodOffset(parentRecord)) return
+    if (history.settings && !matchesTarget(parentRecord, history.settings)) return
+    const parentKeyId = parentRecord.id || parentRecord.storageId
+    if (!parentKeyId) return
+    const parentText = extractViewBodyText(parentRecord.view)
+    for (const candidate of history.messages) {
+      if (candidate === parentRecord || !candidate.retained || !candidate.reply?.inferred) continue
+      if (candidate.reply.parentUser !== parentRecord.user || !hasVodOffset(candidate)) continue
+      if (parentRecord.vodOffset > candidate.vodOffset || candidate.vodOffset - parentRecord.vodOffset > VOD_REPLY_WINDOW_S) continue
+      const currentParentId = candidate.reply.parentId
+      let shouldLink = false
+      if (!currentParentId) {
+        shouldLink = true
+      } else if (currentParentId === parentKeyId) {
+        shouldLink = (Boolean(parentText) && candidate.reply.parentText !== parentText) ||
+          candidate.reply.parentModerator !== Boolean(parentRecord.moderator) ||
+          candidate.reply.parentBroadcaster !== Boolean(parentRecord.broadcaster) ||
+          candidate.reply.parentVip !== Boolean(parentRecord.vip)
+      } else {
+        const currentParent = history.ids?.get(currentParentId) || history.byStorageId?.get(currentParentId)
+        shouldLink = !currentParent || !hasVodOffset(currentParent) ||
+          currentParent.vodOffset < parentRecord.vodOffset ||
+          (currentParent.vodOffset === parentRecord.vodOffset && compareRecords(currentParent, parentRecord) < 0)
+      }
+      if (!shouldLink) continue
+      const nextReply = sanitizeReply({
+        ...candidate.reply,
+        parentId: parentKeyId,
+        parentText,
+        parentModerator: parentRecord.moderator,
+        parentBroadcaster: parentRecord.broadcaster,
+        parentVip: parentRecord.vip,
+        inferred: true,
+      })
+      if (!nextReply) continue
+      candidate.reply = nextReply
+      syncReplyView(candidate)
+      candidate._searchText = ''
+      history.dirty.add(candidate)
+      saveRecord(history, candidate)
+    }
+  }
 
   const makeMessageView = (message, createdAt = Date.now(), vodOffset = message.vodOffset ?? null) => {
     // Copy presentation only. Never keep React-owned message nodes or inactive controls.
@@ -1000,6 +1174,10 @@
     // Only retain messages matching the active filter so unchecked roles and
     // excluded accounts cannot evict matching history from the 1000-message cap.
     if (!(previous?.retained && previous.user === message.user) && !matchesFilter(message, history.settings)) return false
+    if (previous?.retained && previous.user === message.user && previous.reply?.inferred && previous.reply.parentId &&
+      message.reply?.inferred && !message.reply.parentId && message.reply.parentUser === previous.reply.parentUser) {
+      message.reply = previous.reply
+    }
     const replyKey = message.reply
       ? `${message.reply.parentId}\n${message.reply.parentUser}\n${message.reply.parentDisplayName}\n${message.reply.parentText}\n${message.reply.parentDeleted}\n${message.reply.parentModerator}\n${message.reply.parentBroadcaster}\n${message.reply.parentVip}`
       : ''
@@ -1037,6 +1215,7 @@
     history.byStorageId?.set(record.storageId, record)
     history.dirty.add(record)
     saveRecord(history, record)
+    if (isVod && hasVodOffset(record)) relinkVodReplies(history, record)
     return true
   }
 
@@ -1218,7 +1397,7 @@
   const resolveReplyThread = (record, history, settings, list) => {
     const parentId = record.reply?.parentId
     if (parentId) {
-      const parent = history.ids.get(parentId)
+      const parent = history.ids.get(parentId) || history.byStorageId?.get(parentId)
       const mountedParent = parent?.retained && parent.visible && parent.renderedView &&
         (parent.renderedView.parentElement === list ||
           parent.renderedView.closest?.('.ttc-thread')?.parentElement === list) &&
@@ -1285,7 +1464,7 @@
     const drawer = {
       key, wrapper, head, toggle, panel, list: replyList, orphanRow,
       group: parentRecord ? null : wrapper, parentRecord: parentRecord || null,
-      open: false, replies: new Set(), anchors: new Set(),
+      open: false, replies: new Set(), anchors: new Set(), lastReply: null,
     }
     rowAnchorKeys.set(wrapper, parentRecord ? `msg:${parentRecord.storageId}` : `drawer:${key}`)
     setDrawerOpen(drawer, state.openReplyThreads.has(key))
@@ -1354,6 +1533,12 @@
     record.replyThreadKey = ''
     if (!drawer) return
     drawer.replies.delete(record)
+    if (drawer.lastReply === record) {
+      drawer.lastReply = null
+      for (const item of drawer.replies) {
+        if (!drawer.lastReply || compareRecords(item, drawer.lastReply) > 0) drawer.lastReply = item
+      }
+    }
     if (drawer.replies.size > 0 || drawer.anchors.size > 0) updateDrawerSummary(state, drawer)
     else removeDrawer(state, drawer)
   }
@@ -1515,12 +1700,13 @@
     let needsReorder = false
     for (const record of history.removed) {
       const wasVisible = Boolean(record.renderedView?.parentElement && record.visible)
-      const existingDrawer = !full && record.id ? state.replyDrawers.get(`id:${record.id}`) : null
+      const threadId = record.id || record.storageId
+      const existingDrawer = !full && threadId ? state.replyDrawers.get(`id:${threadId}`) : null
       if (record.renderedView) state.messageResizeObserver?.unobserve(record.renderedView)
       if (!full && wasVisible) state.visibleCount--
       record.renderedView?.remove()
       if (record.replyThreadKey) detachFromDrawer(state, record)
-      else if (record.id && (existingDrawer || state.targetReplyRefs.get(record.id)?.size)) needsReorder = true
+      else if (threadId && (existingDrawer || state.targetReplyRefs.get(threadId)?.size)) needsReorder = true
       if (record.orphanParentKey) detachOrphanAnchor(state, record)
       unregisterTargetReplyRef(state, record)
       record.renderedView = null
@@ -1537,7 +1723,8 @@
       const show = matchesFilter(record, history.settings)
       state.visibleCount += Number(show) - (full ? 0 : Number(!!wasVisible))
       if (!show) {
-        const existingDrawer = !full && record.id ? state.replyDrawers.get(`id:${record.id}`) : null
+        const threadId = record.id || record.storageId
+        const existingDrawer = !full && threadId ? state.replyDrawers.get(`id:${threadId}`) : null
         if (oldView) {
           const datedAnchor = oldView.parentElement === list
             ? oldView
@@ -1546,7 +1733,7 @@
           state.messageResizeObserver?.unobserve(oldView)
           oldView.remove()
           if (record.replyThreadKey) detachFromDrawer(state, record)
-          else if (record.id && (existingDrawer || state.targetReplyRefs.get(record.id)?.size)) needsReorder = true
+          else if (threadId && (existingDrawer || state.targetReplyRefs.get(threadId)?.size)) needsReorder = true
           if (nextDated?.parentElement === list) syncDateMarker(nextDated, adjacentDatedRow(nextDated, -1))
         }
         if (record.orphanParentKey) detachOrphanAnchor(state, record)
@@ -1565,8 +1752,9 @@
         unregisterTargetReplyRef(state, record)
         const existed = state.replyDrawers.has(key)
         const drawer = ensureReplyDrawer(state, key, parentRecord, record.reply, record.createdAt, hasVodOffset(record))
-        if (!full && !existed && drawer.group && isOutOfOrder(state, record)) {
-          needsReorder = true
+        if (!existed && drawer.group) {
+          if (!full && isOutOfOrder(state, record)) needsReorder = true
+          noteMountedTail(state, record)
         }
         record.view.hidden = false
         record.view.removeAttribute('data-date')
@@ -1575,8 +1763,14 @@
           if (oldView.parentElement === drawer.list) oldView.replaceWith(record.view)
           else oldView.remove()
         }
-        if (full || record.view.parentElement !== drawer.list) drawer.list.appendChild(record.view)
+        if (full || record.view.parentElement !== drawer.list) {
+          if (!full && hasVodOffset(record) && drawer.lastReply && compareRecords(record, drawer.lastReply) < 0) {
+            needsReorder = true
+          }
+          drawer.list.appendChild(record.view)
+        }
         drawer.replies.add(record)
+        if (!drawer.lastReply || compareRecords(record, drawer.lastReply) > 0) drawer.lastReply = record
         updateDrawerSummary(state, drawer)
         record.renderedView = record.view
         record.visible = true
@@ -1590,7 +1784,7 @@
       }
       if (record.reply && isReplyToActiveTarget(record.reply, history.settings)) {
         const parentId = record.reply.parentId
-        const realParent = parentId ? history.ids.get(parentId) : null
+        const realParent = parentId ? (history.ids.get(parentId) || history.byStorageId?.get(parentId)) : null
         const hasRealParent = Boolean(realParent?.retained && matchesTarget(realParent, history.settings))
         if (hasRealParent) {
           if (record.orphanParentKey) detachOrphanAnchor(state, record)
@@ -1612,7 +1806,8 @@
         if (record.orphanParentKey) detachOrphanAnchor(state, record)
         unregisterTargetReplyRef(state, record)
       }
-      const existingDrawer = !full && record.id ? state.replyDrawers.get(`id:${record.id}`) : null
+      const threadId = record.id || record.storageId
+      const existingDrawer = !full && threadId ? state.replyDrawers.get(`id:${threadId}`) : null
       if (existingDrawer && !existingDrawer.group) {
         record.view.hidden = false
         record.view.classList.add('ttc-has-replies')
