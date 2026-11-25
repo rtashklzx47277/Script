@@ -6,8 +6,9 @@ const vm = require('node:vm')
 
 // Execute the complete userscript. DOM mutations and time are driven explicitly
 // so navigation and delayed rendering can be reproduced without a live account.
-function createBrowser() {
+function createBrowser({ now, navigator: customNavigator, sessionStorage: customSessionStorage, location: locationOverrides } = {}) {
   const selectors = new Map()
+  const selectorLists = new Map()
   const timeouts = new Map()
   const intervals = new Map()
   const frames = new Map()
@@ -70,8 +71,18 @@ function createBrowser() {
     getAttribute(name) { return this.attrs.get(name) ?? null }
     hasAttribute(name) { return this.attrs.has(name) }
     querySelector(selector) { return this.queries?.[selector] || null }
-    querySelectorAll() { return [] }
-    matches() { return false }
+    querySelectorAll(selector) { return selectorLists.get(selector) || [] }
+    matches(selector) {
+      return selector.split(',').some((part) => {
+        const trimmed = part.trim()
+        if (!trimmed) return false
+        if (trimmed.startsWith('#')) return this.id === trimmed.slice(1)
+        return this.tagName?.toLowerCase() === trimmed.toLowerCase()
+      })
+    }
+    closest(selector) {
+      return this.matches(selector) ? this : this.parentElement?.closest(selector) || null
+    }
     insertAdjacentElement(_, element) { this.parentElement.appendChild(element) }
     click() {
       this.clickCount = (this.clickCount || 0) + 1
@@ -111,11 +122,18 @@ function createBrowser() {
     href: 'https://www.youtube.com/watch?v=example',
     origin: 'https://www.youtube.com',
     pathname: '/watch',
+    search: '',
+    reloadCount: 0,
+    reload() { this.reloadCount++ },
+    ...locationOverrides,
   }
   const context = vm.createContext({
     document, window, location, MutationObserver, HTMLElement: Element,
     Node: { ELEMENT_NODE: 1 }, AbortController, Event, URL,
     screen: { availWidth: 1920 }, console,
+    ...(now ? { Date: class extends Date { static now() { return now() } } } : {}),
+    ...(customNavigator ? { navigator: customNavigator } : {}),
+    ...(customSessionStorage ? { sessionStorage: customSessionStorage } : {}),
     getComputedStyle: (element) => ({ display: 'block', visibility: 'visible', color: 'white', ...element.computedStyle }),
     setTimeout: (callback, delay) => { timeouts.set(++nextId, { callback, delay }); return nextId },
     clearTimeout: (id) => timeouts.delete(id),
@@ -126,7 +144,7 @@ function createBrowser() {
   })
 
   return {
-    selectors, timeouts, intervals, frames, observers, Element, document, window,
+    selectors, selectorLists, timeouts, intervals, frames, observers, Element, document, window, location,
     run(filename) {
       vm.runInContext(fs.readFileSync(path.join(__dirname, '..', filename), 'utf8'), context, { filename })
     },
@@ -706,4 +724,281 @@ test('layout: hidden waiting slate skips background style lookup and setStyle sk
   await settle()
   assert.equal(computedCalls.includes(background), false)
   assert.equal(cssWrites, initialWrites, 'unchanged CSS must not reassign style textContent')
+})
+
+test('chat: foreground recovery unsticks scoped items, smoothScroll-blocked atBottom, leaked contextMenuOpen, and Alt+Tab blur while preserving manual pause', () => {
+  const browser = createBrowser()
+  const { scroller, items: realItems } = addChat(browser)
+  const decoyItems = new browser.Element()
+  browser.selectors.set('#items', decoyItems)
+  scroller.queries = { '#items': realItems }
+
+  const itemList = new browser.Element('yt-live-chat-item-list-renderer')
+  let flushCount = 0
+  let resetSmoothCount = 0
+  const ctrl = {
+    atBottom: false,
+    smoothScrollRafHandle_: 42,
+    contextMenuOpen: true,
+    moderationModeEnabled: false,
+    activeItems_: [{ id: 'm1' }],
+    get allowScroll() { return !(this.contextMenuOpen || this.moderationModeEnabled) },
+    resetSmoothScroll_() { resetSmoothCount++; this.smoothScrollRafHandle_ = null },
+    flushActiveItems_() {
+      if (this.atBottom && this.allowScroll && this.activeItems_.length) {
+        flushCount++
+        this.activeItems_ = []
+      }
+    },
+  }
+  itemList.polymerController = ctrl
+  itemList.appendChild(scroller)
+
+  const dropdown = new browser.Element('tp-yt-iron-dropdown')
+  dropdown.getClientRects = () => (dropdown.hidden ? [] : [{}])
+  browser.selectorLists.set('tp-yt-iron-dropdown', [dropdown])
+
+  browser.run('YouTubeLiveChatTweaks.user.js')
+  assert.equal(browser.observers.some(o => o.active && o.target === realItems), true)
+  assert.equal(browser.observers.some(o => o.active && o.target === decoyItems), false)
+
+  // Real open dropdown keeps contextMenuOpen intact, while atBottom/smoothScroll still unsticks.
+  scroller.scrollHeight = 1200
+  browser.tickIntervals()
+  assert.equal(ctrl.contextMenuOpen, true)
+  assert.equal(resetSmoothCount, 1)
+  assert.equal(ctrl.atBottom, true)
+  assert.equal(flushCount, 0)
+
+  // Once the dropdown is hidden, the leaked flag clears and queued items flush.
+  dropdown.hidden = true
+  browser.tickIntervals()
+  assert.equal(ctrl.contextMenuOpen, false)
+  assert.equal(flushCount, 1)
+  assert.equal(scroller.scrollTop, scroller.scrollHeight)
+
+  // Alt+Tab blur clears stuck moderationModeEnabled and flushes.
+  ctrl.moderationModeEnabled = true
+  ctrl.activeItems_ = [{ id: 'm2' }]
+  browser.window.dispatchEvent(browser.event('blur'))
+  assert.equal(ctrl.moderationModeEnabled, false)
+  assert.equal(flushCount, 2)
+
+  // Queued activeItems_ lingering for two foreground ticks flushes on the second tick.
+  ctrl.activeItems_ = [{ id: 'm3' }]
+  browser.tickIntervals()
+  assert.equal(flushCount, 2)
+  browser.tickIntervals()
+  assert.equal(flushCount, 3)
+
+  // Manual upward scroll pauses auto-follow and does not force-unstick.
+  scroller.dispatchEvent(browser.event('wheel', { deltaY: -100 }))
+  scroller.scrollTop = 400
+  ctrl.atBottom = false
+  ctrl.activeItems_ = [{ id: 'm4' }]
+  browser.tickIntervals()
+  browser.tickIntervals()
+  assert.equal(scroller.scrollTop, 400)
+  assert.equal(ctrl.atBottom, false)
+  assert.equal(flushCount, 3)
+})
+
+function setupWatchdogEnv({ nowStart = 1000, pathname = '/live_chat', search = '?v=live123', onLine = true, streaming = false } = {}) {
+  let time = nowStart
+  const store = new Map()
+  const sessionStorage = {
+    getItem: key => (store.has(key) ? store.get(key) : null),
+    setItem: (key, value) => store.set(key, String(value)),
+    removeItem: key => store.delete(key),
+  }
+  const browser = createBrowser({
+    now: () => time,
+    navigator: { onLine },
+    sessionStorage,
+    location: {
+      href: `https://www.youtube.com${pathname}${search}`,
+      origin: 'https://www.youtube.com',
+      pathname,
+      search,
+    },
+  })
+  addChat(browser)
+
+  const invCont = new browser.Element('yt-invalidation-continuation')
+  invCont.triggered_ = false
+  invCont.timeoutAsyncHandle_ = 1
+  invCont.forceTriggerCount = 0
+  invCont.forceTrigger = () => { invCont.forceTriggerCount++ }
+
+  const reloadCont = { reloadContinuationData: { continuation: 'reload-token-1' } }
+  const header = new browser.Element('yt-live-chat-header-renderer')
+  header.data = {
+    viewSelector: {
+      sortFilterSubMenuRenderer: {
+        subMenuItems: [{ title: 'Live chat', selected: true, continuation: reloadCont }],
+      },
+    },
+  }
+  browser.selectors.set('yt-live-chat-header-renderer', header)
+
+  const chatRenderer = new browser.Element('yt-live-chat-renderer')
+  const ctrl = {
+    data: {
+      isReplay: false,
+      continuations: [{ invalidationContinuationData: { timeoutMs: 10000 } }],
+    },
+    activeRequest: null,
+    forceCalls: 0,
+    reloadCalls: [],
+    teardownCalls: 0,
+    maybeUpdateCalls: 0,
+    isStreamingActive: () => streaming,
+    forceChatPoll(arg) { this.forceCalls++; if (arg?.continuation) this.reloadCalls.push(arg) },
+    handleYtReloadLiveChatCommand(arg) { this.reloadCalls.push(arg) },
+    teardownStreaming() { this.teardownCalls++ },
+    maybeUpdateStreaming() { this.maybeUpdateCalls++ },
+  }
+  chatRenderer.polymerController = ctrl
+  chatRenderer.queries = { 'yt-invalidation-continuation, yt-timed-continuation': invCont }
+  browser.selectors.set('yt-live-chat-renderer', chatRenderer)
+
+  return {
+    browser, chatRenderer, ctrl, invCont, store, reloadCont,
+    advance(ms) { time += ms },
+    setTime(ms) { time = ms },
+  }
+}
+
+test('chat: connection watchdog escalates through soft poll nudge, in-place reload continuation, and guarded iframe reload', () => {
+  const env = setupWatchdogEnv({ nowStart: 1000 })
+  env.browser.run('YouTubeLiveChatTweaks.user.js')
+
+  // Initial healthy poll resets baseline.
+  env.chatRenderer.dispatchEvent(env.browser.event('yt-live-chat-continuation-behavior-incremental-success'))
+  env.invCont.triggered_ = true
+  env.invCont.timeoutAsyncHandle_ = null
+  env.browser.tickIntervals()
+  assert.equal(env.invCont.forceTriggerCount, 0)
+
+  // Before DEAD_CONTINUATION_MS (6000ms), no recovery runs.
+  env.advance(5000)
+  env.browser.tickIntervals()
+  assert.equal(env.invCont.forceTriggerCount, 0)
+
+  // Stage 1: soft re-trigger at +6000ms.
+  env.advance(2000)
+  env.browser.tickIntervals()
+  assert.equal(env.invCont.forceTriggerCount, 1)
+  assert.equal(env.invCont.triggered_, false)
+  assert.equal(env.ctrl.reloadCalls.length, 0)
+  assert.equal(env.browser.location.reloadCount, 0)
+
+  // Re-break continuation; Stage 2 fires after 12s cooldown (and 6s dead check).
+  env.invCont.triggered_ = true
+  env.invCont.timeoutAsyncHandle_ = null
+  env.browser.tickIntervals()
+  env.advance(13000)
+  env.browser.tickIntervals()
+  assert.equal(env.ctrl.reloadCalls.length, 1)
+  assert.equal(env.ctrl.reloadCalls[0]?.continuation?.reloadContinuationData?.continuation, 'reload-token-1')
+  assert.equal(env.browser.location.reloadCount, 0)
+
+  // Stage 3: iframe reload after 15s cooldown if still dead.
+  env.invCont.triggered_ = true
+  env.invCont.timeoutAsyncHandle_ = null
+  env.browser.tickIntervals()
+  env.advance(16000)
+  env.browser.tickIntervals()
+  assert.equal(env.browser.location.reloadCount, 1)
+  const saved = JSON.parse(env.store.get('youtube-live-chat-tweaks-autoreload-v1'))
+  assert.equal(saved.scope, 'v:live123')
+  assert.equal(saved.count, 1)
+
+  // A successful poll clears stall stage and auto-reload history.
+  env.chatRenderer.dispatchEvent(env.browser.event('yt-live-chat-continuation-behavior-incremental-success'))
+  assert.equal(env.store.has('youtube-live-chat-tweaks-autoreload-v1'), false)
+
+  // Hung activeRequest also triggers Stage 1 and cancels the stuck promise.
+  let cancelled = false
+  env.ctrl.activeRequest = { promise: { cancel() { cancelled = true } } }
+  env.browser.tickIntervals()
+  env.advance(21000)
+  env.browser.tickIntervals()
+  assert.equal(cancelled, true)
+  assert.equal(env.ctrl.activeRequest, null)
+  assert.equal(env.invCont.forceTriggerCount, 2)
+})
+
+test('chat: connection watchdog skips replays, ended streams, offline state, hidden-paused chat, typing, and enforces reload cap', () => {
+  // Replay URL skips watchdog.
+  const replay = setupWatchdogEnv({ pathname: '/live_chat_replay', nowStart: 1000 })
+  replay.browser.run('YouTubeLiveChatTweaks.user.js')
+  replay.invCont.triggered_ = true
+  replay.invCont.timeoutAsyncHandle_ = null
+  replay.advance(40000)
+  replay.browser.tickIntervals()
+  assert.equal(replay.invCont.forceTriggerCount, 0)
+
+  // Ended parent stream skips watchdog.
+  const ended = setupWatchdogEnv({ nowStart: 1000 })
+  ended.browser.window.parent = {
+    document: { querySelector: () => ({ ended: true }) },
+  }
+  ended.browser.run('YouTubeLiveChatTweaks.user.js')
+  ended.invCont.triggered_ = true
+  ended.invCont.timeoutAsyncHandle_ = null
+  ended.advance(40000)
+  ended.browser.tickIntervals()
+  assert.equal(ended.invCont.forceTriggerCount, 0)
+
+  // Offline and pauseWhenHidden+isChatHidden skip watchdog.
+  const offline = setupWatchdogEnv({ nowStart: 1000, onLine: false })
+  offline.browser.run('YouTubeLiveChatTweaks.user.js')
+  offline.invCont.triggered_ = true
+  offline.invCont.timeoutAsyncHandle_ = null
+  offline.advance(40000)
+  offline.browser.tickIntervals()
+  assert.equal(offline.invCont.forceTriggerCount, 0)
+
+  const hiddenPaused = setupWatchdogEnv({ nowStart: 1000 })
+  hiddenPaused.ctrl.pauseWhenHidden = true
+  hiddenPaused.ctrl.isChatHidden = true
+  hiddenPaused.browser.run('YouTubeLiveChatTweaks.user.js')
+  hiddenPaused.invCont.triggered_ = true
+  hiddenPaused.invCont.timeoutAsyncHandle_ = null
+  hiddenPaused.advance(40000)
+  hiddenPaused.browser.tickIntervals()
+  assert.equal(hiddenPaused.invCont.forceTriggerCount, 0)
+
+  // Active typing blocks Stage 2 & Stage 3, and reload cap stops after 3 reloads.
+  const guarded = setupWatchdogEnv({ nowStart: 1000 })
+  const input = new guarded.browser.Element('div')
+  input.textContent = 'draft message'
+  guarded.browser.selectors.set('#input[contenteditable], yt-live-chat-text-input-field-renderer #input', input)
+  guarded.browser.run('YouTubeLiveChatTweaks.user.js')
+  guarded.invCont.triggered_ = true
+  guarded.invCont.timeoutAsyncHandle_ = null
+  guarded.browser.tickIntervals()
+  guarded.advance(7000)
+  guarded.browser.tickIntervals()
+  assert.equal(guarded.invCont.forceTriggerCount, 1)
+  guarded.invCont.triggered_ = true
+  guarded.invCont.timeoutAsyncHandle_ = null
+  guarded.browser.tickIntervals()
+  guarded.advance(15000)
+  guarded.browser.tickIntervals()
+  assert.equal(guarded.ctrl.reloadCalls.length, 0, 'typing defers Stage 2')
+  input.textContent = ''
+  guarded.browser.tickIntervals()
+  assert.equal(guarded.ctrl.reloadCalls.length, 1)
+
+  guarded.store.set('youtube-live-chat-tweaks-autoreload-v1', JSON.stringify({
+    scope: 'v:live123', count: 3, lastAt: 1000,
+  }))
+  guarded.invCont.triggered_ = true
+  guarded.invCont.timeoutAsyncHandle_ = null
+  guarded.browser.tickIntervals()
+  guarded.advance(80000)
+  guarded.browser.tickIntervals()
+  assert.equal(guarded.browser.location.reloadCount, 0, 'caps auto-reload at 3 attempts per stream')
 })

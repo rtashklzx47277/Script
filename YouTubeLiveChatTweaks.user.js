@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name        YouTube Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.8.15
+// @version     0.8.16
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
-// @description 提供 YouTube 聊天室用戶資訊卡、獨立 SC／會員事件紀錄與類型顏色篩選、全域角色與帳號包含／排除篩選、表情複製、重新載入與自動跟隨。
+// @description 提供 YouTube 聊天室用戶資訊卡、獨立 SC／會員事件紀錄與類型顏色篩選、全域角色與帳號包含／排除篩選、表情複製、重新載入、斷線自動恢復與自動跟隨。
 // @author      Derek
 // @match       *://www.youtube.com/live_chat*
 // @match       *://www.youtube.com/live_chat_replay*
@@ -30,6 +30,15 @@
   const EMOJI_SELECTOR =
     'img.emoji[shared-tooltip-text][alt]:not([data-copy-processed])'
   const SCROLL_UP_KEYS = new Set(['ArrowUp', 'PageUp', 'Home'])
+  const AUTO_RELOAD_STORAGE_KEY = 'youtube-live-chat-tweaks-autoreload-v1'
+  const AUTO_RELOAD_COOLDOWN_MS = 60000
+  const AUTO_RELOAD_MAX_ATTEMPTS = 3
+  const RECOVERY_COOLDOWN_MS = 12000
+  const STAGE3_COOLDOWN_MS = 15000
+  const REQUEST_HUNG_MS = 20000
+  const DEAD_CONTINUATION_MS = 6000
+  const POLL_FAILURE_DELAY_MS = 3000
+  const VISIBLE_GRACE_MS = 12000
   const SELECTORS = {
     closeButton: '#close-button',
     contextMenu: '#live-chat-header-context-menu',
@@ -54,6 +63,19 @@
   let pointerScrolling = false
   let pointerCancelTimer = 0
   let scrollFrame = 0
+  let pendingActiveItemsTicks = 0
+
+  let chatRenderer
+  let chatWatchdogController
+  let observedPollEvent = false
+  let chatWatchdogStartedAt = 0
+  let lastPollSuccessAt = 0
+  let pollFailureDetectedAt = 0
+  let activeRequestSeenSince = 0
+  let deadContinuationSince = 0
+  let lastRecoveryAt = 0
+  let stallStage = 0
+  let becameVisibleAt = 0
 
   addStyle(`
     :root {
@@ -300,6 +322,7 @@
     reloadButton.appendChild(createReloadIcon())
 
     reloadButton.addEventListener('click', () => {
+      clearAutoReloadState()
       location.reload()
     })
 
@@ -439,8 +462,346 @@
   }
 
   const handleAutoFollowVisibility = () => {
+    if (!document.hidden) becameVisibleAt = Date.now()
     cancelScrollFrame()
     keepFollowingLatest()
+  }
+
+  const getItemListController = () => {
+    const list = scroller?.closest?.('yt-live-chat-item-list-renderer')
+    return list?.polymerController || list || null
+  }
+
+  const hasVisibleNativeDropdown = () => {
+    for (const menu of document.querySelectorAll('tp-yt-iron-dropdown')) {
+      if (!menu.hidden && menu.getAttribute('aria-hidden') !== 'true' && menu.getClientRects().length > 0) {
+        return true
+      }
+    }
+    return false
+  }
+
+  const handleWindowBlur = () => {
+    const ctrl = getItemListController()
+    if (!ctrl || ctrl.moderationModeEnabled !== true) return
+    ctrl.moderationModeEnabled = false
+    if (followLatest && typeof ctrl.flushActiveItems_ === 'function') {
+      ctrl.flushActiveItems_()
+    }
+  }
+
+  const recoverNativeItemList = () => {
+    const ctrl = getItemListController()
+    if (!ctrl) {
+      pendingActiveItemsTicks = 0
+      return false
+    }
+    let stuck = false
+    if (ctrl.contextMenuOpen === true && !hasVisibleNativeDropdown()) {
+      ctrl.contextMenuOpen = false
+      stuck = true
+    }
+    if (ctrl.atBottom === false) {
+      if (ctrl.smoothScrollRafHandle_ && typeof ctrl.resetSmoothScroll_ === 'function') {
+        ctrl.resetSmoothScroll_()
+      }
+      ctrl.atBottom = true
+      stuck = true
+    }
+    if (
+      Array.isArray(ctrl.activeItems_) &&
+      ctrl.activeItems_.length > 0 &&
+      ctrl.atBottom !== false &&
+      ctrl.allowScroll !== false
+    ) {
+      pendingActiveItemsTicks++
+    } else {
+      pendingActiveItemsTicks = 0
+    }
+    if (stuck || pendingActiveItemsTicks >= 2) {
+      scroller.scrollTop = scroller.scrollHeight
+      ctrl.flushActiveItems_?.()
+      pendingActiveItemsTicks = 0
+      return true
+    }
+    return false
+  }
+
+  const isLiveChatPage = () => !String(location.pathname || '').startsWith('/live_chat_replay')
+
+  const getChatRendererController = (el) => el?.polymerController || el || null
+
+  const getReloadScopeKey = () => {
+    try {
+      const url = new URL(location.href, location.origin || 'https://www.youtube.com')
+      let video = url.searchParams.get('v')
+      if (!video) {
+        try {
+          if (window.parent && window.parent !== window && window.parent.location?.href) {
+            video = new URL(window.parent.location.href).searchParams.get('v')
+          }
+        } catch (_) {}
+      }
+      if (video) return `v:${video}`
+      return `${url.pathname}${url.search}`
+    } catch (_) {
+      return `${location.pathname || ''}${location.search || ''}`
+    }
+  }
+
+  const getSessionStorage = () => {
+    try {
+      return typeof sessionStorage !== 'undefined' ? sessionStorage : null
+    } catch (_) {
+      return null
+    }
+  }
+
+  const readAutoReloadState = () => {
+    const storage = getSessionStorage()
+    if (!storage) return null
+    try {
+      const raw = storage.getItem(AUTO_RELOAD_STORAGE_KEY)
+      if (!raw) return null
+      const parsed = JSON.parse(raw)
+      if (!parsed || typeof parsed !== 'object') return null
+      return {
+        scope: typeof parsed.scope === 'string' ? parsed.scope : '',
+        count: Number.isFinite(parsed.count) ? parsed.count : 0,
+        lastAt: Number.isFinite(parsed.lastAt) ? parsed.lastAt : 0,
+      }
+    } catch (_) {
+      return null
+    }
+  }
+
+  const writeAutoReloadState = (state) => {
+    const storage = getSessionStorage()
+    if (!storage) return
+    try {
+      storage.setItem(AUTO_RELOAD_STORAGE_KEY, JSON.stringify(state))
+    } catch (_) {}
+  }
+
+  const clearAutoReloadState = () => {
+    const storage = getSessionStorage()
+    if (!storage) return
+    try {
+      storage.removeItem(AUTO_RELOAD_STORAGE_KEY)
+    } catch (_) {}
+  }
+
+  const getContinuationTimeoutMs = (renderer) => {
+    const continuations = rendererData(renderer).continuations
+    if (!Array.isArray(continuations)) return 10000
+    for (const entry of continuations) {
+      const ms = entry?.invalidationContinuationData?.timeoutMs ?? entry?.timedContinuationData?.timeoutMs
+      if (Number.isFinite(ms) && ms > 0) {
+        return Math.max(5000, Math.min(60000, ms))
+      }
+    }
+    return 10000
+  }
+
+  const getSelectedReloadContinuation = () => {
+    const header = $('yt-live-chat-header-renderer')
+    if (!header) return null
+    const subMenuItems = rendererData(header)?.viewSelector?.sortFilterSubMenuRenderer?.subMenuItems
+    if (!Array.isArray(subMenuItems) || !subMenuItems.length) return null
+    const selected = subMenuItems.find(item => item?.selected && item?.continuation?.reloadContinuationData?.continuation)
+    const fallback = subMenuItems.find(item => item?.continuation?.reloadContinuationData?.continuation)
+    return (selected || fallback)?.continuation || null
+  }
+
+  const isUserTyping = () => {
+    const input = $('#input[contenteditable], yt-live-chat-text-input-field-renderer #input')
+    return Boolean(input?.textContent?.trim().length)
+  }
+
+  const isTargetManagerOpen = () => {
+    const targets = $('.ytcf-targets')
+    return Boolean(targets && !targets.hidden)
+  }
+
+  const isParentVideoEnded = () => {
+    try {
+      const parentWindow = window.parent
+      if (parentWindow && parentWindow !== window && parentWindow.document) {
+        return parentWindow.document.querySelector('#movie_player video')?.ended === true
+      }
+    } catch (_) {}
+    return false
+  }
+
+  const isStreamEnded = (renderer, ctrl) =>
+    !isLiveChatPage() || ctrl?.data?.isReplay === true || isParentVideoEnded()
+
+  const resetPollHealth = (now = Date.now()) => {
+    lastPollSuccessAt = now
+    pollFailureDetectedAt = 0
+    activeRequestSeenSince = 0
+    deadContinuationSince = 0
+    lastRecoveryAt = 0
+    stallStage = 0
+    clearAutoReloadState()
+  }
+
+  const bindChatWatchdog = () => {
+    const nextRenderer = $('yt-live-chat-renderer')
+    if (nextRenderer === chatRenderer && chatRenderer?.isConnected) return true
+    chatWatchdogController?.abort()
+    chatWatchdogController = null
+    chatRenderer = nextRenderer
+    if (!chatRenderer) return false
+    const now = Date.now()
+    chatWatchdogStartedAt = now
+    lastPollSuccessAt = now
+    observedPollEvent = false
+    pollFailureDetectedAt = 0
+    activeRequestSeenSince = 0
+    deadContinuationSince = 0
+    lastRecoveryAt = 0
+    stallStage = 0
+    chatWatchdogController = new AbortController()
+    const { signal } = chatWatchdogController
+    chatRenderer.addEventListener('yt-live-chat-continuation-behavior-incremental-success', () => {
+      observedPollEvent = true
+      resetPollHealth()
+    }, { signal })
+    chatRenderer.addEventListener('yt-live-chat-reload-success', () => {
+      resetPollHealth()
+    }, { signal })
+    chatRenderer.addEventListener('yt-live-chat-continuation-behavior-incremental-failure', () => {
+      if (!pollFailureDetectedAt) pollFailureDetectedAt = Date.now()
+    }, { signal })
+    chatRenderer.addEventListener('yt-live-chat-reload-fail', () => {
+      if (!pollFailureDetectedAt) pollFailureDetectedAt = Date.now()
+    }, { signal })
+    return true
+  }
+
+  const cancelHungRequest = (ctrl) => {
+    if (!ctrl.activeRequest) return
+    try {
+      ctrl.activeRequest.promise?.cancel?.()
+    } catch (_) {}
+    ctrl.activeRequest = null
+    activeRequestSeenSince = 0
+  }
+
+  const checkChatConnectionHealth = () => {
+    if (!isLiveChatPage()) return
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) return
+    if (!bindChatWatchdog()) return
+    const ctrl = getChatRendererController(chatRenderer)
+    if (!ctrl || isStreamEnded(chatRenderer, ctrl)) return
+    const now = Date.now()
+    if (ctrl.pauseWhenHidden && ctrl.isChatHidden) {
+      lastPollSuccessAt = now
+      activeRequestSeenSince = 0
+      deadContinuationSince = 0
+      return
+    }
+    const timeoutMs = getContinuationTimeoutMs(chatRenderer)
+    const stallThresholdMs = Math.max(25000, timeoutMs * 2 + 10000)
+    if (ctrl.activeRequest) {
+      if (!activeRequestSeenSince) activeRequestSeenSince = now
+    } else {
+      activeRequestSeenSince = 0
+    }
+    const isRequestHung = activeRequestSeenSince > 0 && now - activeRequestSeenSince >= REQUEST_HUNG_MS
+    const streaming = Boolean(typeof ctrl.isStreamingActive === 'function' && ctrl.isStreamingActive())
+    const contEl = chatRenderer.querySelector?.('yt-invalidation-continuation, yt-timed-continuation')
+    const invCtrl = contEl?.polymerController || contEl || null
+    const continuationDeadNow = !streaming && Boolean(
+      invCtrl &&
+      invCtrl.triggered_ === true &&
+      !ctrl.activeRequest &&
+      (invCtrl.timeoutAsyncHandle_ === null || invCtrl.timeoutAsyncHandle_ === undefined)
+    )
+    if (continuationDeadNow) {
+      if (!deadContinuationSince) deadContinuationSince = now
+    } else {
+      deadContinuationSince = 0
+    }
+    const isContinuationDead = deadContinuationSince > 0 && now - deadContinuationSince >= DEAD_CONTINUATION_MS
+    const isPollFailed = pollFailureDetectedAt > 0 && now - pollFailureDetectedAt >= POLL_FAILURE_DELAY_MS
+    const continuations = Array.isArray(ctrl.data?.continuations) ? ctrl.data.continuations : []
+    const hasContinuations = continuations.length > 0
+    const sinceSuccess = now - lastPollSuccessAt
+    const sinceVisible = becameVisibleAt ? now - becameVisibleAt : Infinity
+    const isPollSilent =
+      (observedPollEvent || (!streaming && !contEl)) &&
+      sinceSuccess >= stallThresholdMs &&
+      (document.hidden ? sinceSuccess >= Math.max(stallThresholdMs, 45000) : sinceVisible >= VISIBLE_GRACE_MS)
+    const isMissingContinuations =
+      !hasContinuations &&
+      !ctrl.activeRequest &&
+      (observedPollEvent || now - chatWatchdogStartedAt >= 20000) &&
+      sinceSuccess >= 10000
+
+    if (!(isPollFailed || isRequestHung || isContinuationDead || isPollSilent || isMissingContinuations)) return
+    const cooldown = stallStage >= 2 ? STAGE3_COOLDOWN_MS : RECOVERY_COOLDOWN_MS
+    if (lastRecoveryAt && now - lastRecoveryAt < cooldown) return
+
+    if (stallStage === 0) {
+      cancelHungRequest(ctrl)
+      if (streaming) {
+        ctrl.teardownStreaming?.()
+        if (hasContinuations) ctrl.maybeUpdateStreaming?.(continuations)
+        stallStage = 1
+        lastRecoveryAt = now
+        return
+      }
+      if (hasContinuations && (invCtrl || typeof ctrl.forceChatPoll === 'function')) {
+        if (invCtrl) {
+          invCtrl.triggered_ = false
+          if (typeof invCtrl.forceTrigger === 'function') invCtrl.forceTrigger()
+          else ctrl.forceChatPoll?.()
+        } else {
+          ctrl.forceChatPoll()
+        }
+        deadContinuationSince = 0
+        stallStage = 1
+        lastRecoveryAt = now
+        return
+      }
+      stallStage = 1
+    }
+
+    if (stallStage === 1) {
+      if (isUserTyping()) return
+      cancelHungRequest(ctrl)
+      const reloadCont = getSelectedReloadContinuation()
+      if (reloadCont) {
+        if (typeof ctrl.handleYtReloadLiveChatCommand === 'function') {
+          ctrl.handleYtReloadLiveChatCommand({ continuation: reloadCont })
+        } else if (typeof ctrl.forceChatPoll === 'function') {
+          ctrl.forceChatPoll({ continuation: reloadCont })
+        } else if (typeof ctrl.updateContinuations === 'function') {
+          ctrl.updateContinuations([reloadCont])
+        }
+        deadContinuationSince = 0
+      }
+      stallStage = 2
+      lastRecoveryAt = now
+      return
+    }
+
+    if (isUserTyping() || getAuthorCard() || isTargetManagerOpen()) return
+    const scope = getReloadScopeKey()
+    const state = readAutoReloadState()
+    const sameScope = state && state.scope === scope
+    if (sameScope && (now - state.lastAt < AUTO_RELOAD_COOLDOWN_MS || state.count >= AUTO_RELOAD_MAX_ATTEMPTS)) {
+      return
+    }
+    writeAutoReloadState({
+      scope,
+      count: sameScope ? state.count + 1 : 1,
+      lastAt: now,
+    })
+    lastRecoveryAt = now
+    if (typeof location.reload === 'function') location.reload()
   }
 
   // Window/document-level handlers live outside bindAutoFollow so rebinding
@@ -479,7 +840,7 @@
 
   const bindAutoFollow = () => {
     scroller = $(SELECTORS.scroller)
-    items = $(SELECTORS.items)
+    items = scroller?.querySelector(SELECTORS.items) || $(SELECTORS.items)
     showMoreButton = $(SELECTORS.showMore)
 
     if (!scroller || !items || !showMoreButton) return false
@@ -489,6 +850,7 @@
     autoFollowController = new AbortController()
     const { signal } = autoFollowController
     pointerScrolling = false
+    pendingActiveItemsTicks = 0
     clearTimeout(pointerCancelTimer)
     pointerCancelTimer = 0
 
@@ -554,11 +916,19 @@
   const setupAutoFollow = () => {
     window.addEventListener('pointerup', handlePointerUp)
     window.addEventListener('pointercancel', handlePointerCancel)
+    window.addEventListener('blur', handleWindowBlur)
+    window.addEventListener('online', () => {
+      if (chatRenderer?.isConnected) {
+        lastRecoveryAt = 0
+        checkChatConnectionHealth()
+      }
+    })
     document.addEventListener('keydown', handleScrollKeys)
     document.addEventListener('visibilitychange', handleAutoFollowVisibility)
 
     refreshHeader()
     bindAutoFollow()
+    bindChatWatchdog()
 
     // YouTube can replace the chat internals wholesale (e.g. switching
     // Top chat / Live chat), which strands listeners and observers on dead
@@ -572,11 +942,18 @@
         showMoreButton?.isConnected
       ) {
         // Also recover from native pause/layout changes without new items.
-        if (document.hidden) keepFollowingLatest()
-        return
+        if (document.hidden) {
+          keepFollowingLatest()
+        } else if (followLatest && !pointerScrolling) {
+          const recovered = recoverNativeItemList()
+          if (recovered || isShowMoreVisible() || !isNearBottom(scroller)) {
+            keepFollowingLatest()
+          }
+        }
+      } else {
+        bindAutoFollow()
       }
-
-      bindAutoFollow()
+      checkChatConnectionHealth()
     }, 1000)
   }
 
