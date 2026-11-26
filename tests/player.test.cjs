@@ -9,7 +9,7 @@ const assertClose = (actual, expected) => assert.ok(Math.abs(actual - expected) 
 
 // Run the real userscript and expose its closed-over functions at the end of
 // its IIFE. Only browser primitives are mocked; production functions are intact.
-function boot(file, mode = 'worker', pathname = '/', { trustedTypes = false, setupWindow } = {}) {
+function boot(file, mode = 'worker', pathname = '/', { trustedTypes = false, setupWindow, fetch, now } = {}) {
   const isYouTube = file === scripts[0]
   let nextId = 0
   let activeWorker
@@ -235,6 +235,12 @@ function boot(file, mode = 'worker', pathname = '/', { trustedTypes = false, set
         if (index !== -1) list.splice(index, 1)
       }, { once: true })
     }
+    removeEventListener(name, callback) {
+      const list = this.events?.get(name)
+      if (!list) return
+      const index = list.indexOf(callback)
+      if (index !== -1) list.splice(index, 1)
+    }
     dispatchEvent(event) {
       for (const callback of [...(this.events?.get(event.type) || [])]) {
         callback(event)
@@ -342,6 +348,9 @@ function boot(file, mode = 'worker', pathname = '/', { trustedTypes = false, set
       disconnect() { this.connected = false }
     },
     AbortController,
+    AbortSignal,
+    ...(fetch ? { fetch } : {}),
+    ...(now ? { Date: class extends Date { static now() { return now() } } } : {}),
   }
 
   if (mode !== 'unsupported') {
@@ -407,6 +416,7 @@ function boot(file, mode = 'worker', pathname = '/', { trustedTypes = false, set
         encode: encodeScreenshot, jobs: () => screenshotWorkerJobs.size,
         changeVolume, ensurePlayerState, ensureVolumeGain, refresh,
         showTooltip, hideTooltip, ensureScreenshotButtons,
+        getVodIdFromUrl, formatVodDate, parseVodTimestamp, fetchVodStartTime, vodStartCache,
       };`
   const source = fs.readFileSync(path.join(__dirname, '..', file), 'utf8')
   assert.match(source, /\}\)\(\)\s*$/)
@@ -2071,4 +2081,203 @@ test('Tooltips WCAG 1.4.13 (Twitch & YouTube): role=tooltip, aria-describedby, h
   photoBtn.dispatchEvent({ type: 'blur' })
   assert.equal(ytTooltip.dataset.visible, 'false')
   assert.equal(photoBtn.getAttribute('aria-describedby'), null)
+})
+
+test('Twitch VOD clock: fetches ARCHIVE start time via GQL, tracks seekbar & video time, ignores highlights/stale navigation, and supports JSON-LD fallback', async () => {
+  const twoDigit = n => String(n).padStart(2, '0')
+  const formatLocal = ms => {
+    const d = new Date(ms)
+    return `(${d.getFullYear()}/${twoDigit(d.getMonth() + 1)}/${twoDigit(d.getDate())} ${twoDigit(d.getHours())}:${twoDigit(d.getMinutes())}:${twoDigit(d.getSeconds())})`
+  }
+  const flushMicrotasks = async () => {
+    for (let i = 0; i < 6; i++) await Promise.resolve()
+  }
+
+  // 1. ARCHIVE VOD via /videos/<id>: mounts after seekbar current-time, updates on MutationObserver and video timeupdate/seeked
+  const startIso = '2026-10-31T06:00:00Z'
+  const startMs = Date.parse(startIso)
+  const gqlRequests = []
+  let now = 1_700_000_000_000
+  const env = boot(scripts[1], 'worker', '/videos/2937944840', {
+    now: () => now,
+    fetch: async (url, init) => {
+      gqlRequests.push({ url, init })
+      const body = JSON.parse(init.body)
+      if (body.variables.id === '2937944840') {
+        return {
+          ok: true,
+          async json() {
+            return { data: { video: { id: '2937944840', createdAt: startIso, broadcastType: 'ARCHIVE' } } }
+          },
+        }
+      }
+      return {
+        ok: true,
+        async json() {
+          return { data: { video: { id: body.variables.id, createdAt: startIso, broadcastType: 'HIGHLIGHT' } } }
+        },
+      }
+    },
+  })
+
+  const player = new env.Element()
+  player.setAttribute('data-a-target', 'video-player')
+  const video = player.appendChild(new env.Element('video'))
+  video.currentTime = 0
+  const controls = player.appendChild(new env.Element())
+  controls.className = 'player-controls__left-control-group'
+  const timeWrap = controls.appendChild(new env.Element())
+  const currentTimeEl = timeWrap.appendChild(new env.Element('p'))
+  currentTimeEl.setAttribute('data-a-target', 'player-seekbar-current-time')
+  currentTimeEl.textContent = '01:02:03'
+  const durationEl = timeWrap.appendChild(new env.Element('p'))
+  durationEl.setAttribute('data-a-target', 'player-seekbar-duration')
+  durationEl.textContent = '03:00:00'
+  env.selectors.set('[data-a-target="video-player"]', [player])
+
+  env.api.refresh()
+  await flushMicrotasks()
+
+  assert.equal(gqlRequests.length, 1)
+  assert.equal(gqlRequests[0].url, 'https://gql.twitch.tv/gql')
+  assert.equal(gqlRequests[0].init.headers['Client-ID'], 'kimne78kx3ncx6brgo4mv6wki5h1ko')
+
+  const clock = timeWrap.children[1]
+  assert.ok(clock)
+  assert.equal(clock.dataset.twitchPlayerTweaks, 'vod-clock')
+  assert.equal(clock.textContent, formatLocal(startMs + 3723 * 1000))
+  assert.equal(timeWrap.children[2], durationEl, 'clock sits right after current-time before duration')
+
+  // Seekbar text mutation updates clock
+  currentTimeEl.textContent = '02:00:00'
+  const seekbarObserver = env.observers.find(o => o.connected && o !== env.observers[0])
+  assert.ok(seekbarObserver)
+  seekbarObserver.callback()
+  assert.equal(clock.textContent, formatLocal(startMs + 7200 * 1000))
+
+  // Falls back to video.currentTime when seekbar text is temporarily unavailable
+  currentTimeEl.textContent = '--:--'
+  video.currentTime = 45.9
+  video.dispatchEvent({ type: 'seeked' })
+  assert.equal(clock.textContent, formatLocal(startMs + 45 * 1000))
+
+  // Navigating to a HIGHLIGHT VOD removes the clock and disconnects its observer
+  env.location.pathname = '/streamer/video/999999'
+  env.location.href = 'https://www.twitch.tv/streamer/video/999999'
+  assert.equal(env.api.getVodIdFromUrl(env.location.href), '999999')
+  env.api.refresh()
+  await flushMicrotasks()
+  assert.equal(player.querySelector('[data-twitch-player-tweaks="vod-clock"]'), null)
+  assert.equal(seekbarObserver.connected, false)
+
+  // Navigating to a live channel (/streamer) removes the clock too
+  env.location.pathname = '/videos/2937944840'
+  env.location.href = 'https://www.twitch.tv/videos/2937944840'
+  env.api.refresh()
+  await flushMicrotasks()
+  assert.ok(player.querySelector('[data-twitch-player-tweaks="vod-clock"]'))
+  env.location.pathname = '/streamer'
+  env.location.href = 'https://www.twitch.tv/streamer'
+  env.emit('popstate', {})
+  env.flush(0)
+  assert.equal(player.querySelector('[data-twitch-player-tweaks="vod-clock"]'), null)
+
+  // 2. Fallback placement in .player-controls__left-control-group when seekbar label is missing
+  const envFallbackBar = boot(scripts[1], 'worker', '/streamer/video/555123', {
+    fetch: async () => ({
+      ok: true,
+      async json() {
+        return { data: { video: { id: '555123', createdAt: startIso, broadcastType: 'ARCHIVE' } } }
+      },
+    }),
+  })
+  const p2 = new envFallbackBar.Element()
+  const v2 = p2.appendChild(new envFallbackBar.Element('video'))
+  v2.currentTime = 120
+  const left = p2.appendChild(new envFallbackBar.Element())
+  left.className = 'player-controls__left-control-group'
+  envFallbackBar.selectors.set('[data-a-target="video-player"]', [p2])
+  envFallbackBar.api.refresh()
+  await flushMicrotasks()
+  const leftClock = left.querySelector('[data-twitch-player-tweaks="vod-clock"]')
+  assert.ok(leftClock)
+  assert.equal(leftClock.textContent, formatLocal(startMs + 120 * 1000))
+  v2.currentTime = 185
+  v2.dispatchEvent({ type: 'timeupdate' })
+  assert.equal(leftClock.textContent, formatLocal(startMs + 185 * 1000))
+
+  // 3. Stale in-flight response for an old VOD ID must not mount on the newly navigated VOD
+  let resolveOld
+  const envRace = boot(scripts[1], 'worker', '/videos/111', {
+    fetch: () => new Promise(resolve => { resolveOld = resolve }),
+  })
+  const pRace = new envRace.Element()
+  const tWrapRace = pRace.appendChild(new envRace.Element())
+  tWrapRace.className = 'player-controls__left-control-group'
+  const tElRace = tWrapRace.appendChild(new envRace.Element('p'))
+  tElRace.setAttribute('data-a-target', 'player-seekbar-current-time')
+  tElRace.textContent = '0:10'
+  envRace.selectors.set('[data-a-target="video-player"]', [pRace])
+  envRace.api.refresh()
+  envRace.location.pathname = '/videos/222'
+  envRace.location.href = 'https://www.twitch.tv/videos/222'
+  resolveOld({
+    ok: true,
+    async json() {
+      return { data: { video: { id: '111', createdAt: startIso, broadcastType: 'ARCHIVE' } } }
+    },
+  })
+  await flushMicrotasks()
+  assert.equal(pRace.querySelector('[data-twitch-player-tweaks="vod-clock"]'), null)
+
+  // 4. JSON-LD fallback on GQL error (must match vodId) & transient retry cooldown
+  let jsonLdCalls = 0
+  let raceNow = 1_700_000_000_000
+  const envJsonLd = boot(scripts[1], 'worker', '/videos/777888', {
+    now: () => raceNow,
+    fetch: async () => { jsonLdCalls++; throw new Error('network error') },
+  })
+  const wrongLd = new envJsonLd.Element('script')
+  wrongLd.textContent = JSON.stringify({ '@type': 'VideoObject', contentUrl: 'https://www.twitch.tv/videos/999000', uploadDate: '2020-01-01T00:00:00Z' })
+  const rightLd = new envJsonLd.Element('script')
+  rightLd.textContent = JSON.stringify({ '@graph': [{ '@type': 'VideoObject', contentUrl: 'https://www.twitch.tv/videos/777888', uploadDate: startIso }] })
+  envJsonLd.selectors.set('script[type="application/ld+json"]', [wrongLd, rightLd])
+  assert.equal(await envJsonLd.api.fetchVodStartTime('777888'), startMs)
+  assert.equal(await envJsonLd.api.fetchVodStartTime('666555'), null)
+  assert.equal(jsonLdCalls, 2)
+  assert.equal(await envJsonLd.api.fetchVodStartTime('666555'), null, 'cooldown prevents immediate retry spam')
+  assert.equal(jsonLdCalls, 2)
+  raceNow += 31000
+  assert.equal(await envJsonLd.api.fetchVodStartTime('666555'), null, 'retries after cooldown')
+  assert.equal(jsonLdCalls, 3)
+
+  // 5. VOD_CLOCK_FORMAT presets match YouTubeLiveClock formats
+  const source = fs.readFileSync(path.join(__dirname, '..', scripts[1]), 'utf8')
+  const sampleDate = new Date(startMs + 3723 * 1000)
+  const weekdayShort = new Intl.DateTimeFormat('en-US', { weekday: 'short' }).format(sampleDate)
+  const d = twoDigit(sampleDate.getDate())
+  const m = twoDigit(sampleDate.getMonth() + 1)
+  const y = sampleDate.getFullYear()
+  const t = `${twoDigit(sampleDate.getHours())}:${twoDigit(sampleDate.getMinutes())}:${twoDigit(sampleDate.getSeconds())}`
+  const presetContext = { Intl, String }
+  vm.createContext(presetContext)
+  const formatFn = source.replace('const VOD_CLOCK_FORMAT = 1', 'const VOD_CLOCK_FORMAT = 4')
+  const envPreset = {
+    document: {
+      head: { appendChild() {} },
+      body: {},
+      createElement: () => ({ textContent: '' }),
+      addEventListener() {},
+      querySelector: () => null,
+      querySelectorAll: () => [],
+    },
+    window: { JSON: { parse: JSON.parse }, addEventListener() {} },
+    location: { pathname: '/', href: 'https://www.twitch.tv/', origin: 'https://www.twitch.tv' },
+    MutationObserver: class { observe() {}; disconnect() {} },
+    setTimeout() { return 1 }, clearTimeout() {},
+    Intl, console,
+  }
+  vm.createContext(envPreset)
+  vm.runInContext(formatFn.replace(/\}\)\(\)\s*$/, 'globalThis.__format = formatVodDate; })()'), envPreset)
+  assert.equal(envPreset.__format(sampleDate), `(${weekdayShort} ${d}/${m}/${y} ${t})`)
 })

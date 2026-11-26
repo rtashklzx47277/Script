@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name        Twitch Player Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.3.7
+// @version     0.3.8
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchPlayerTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchPlayerTweaks.user.js
-// @description 提供 Twitch 原解析度 PNG 截圖、滾輪音量與音量增益，隱藏剪輯按鈕及互動擴充。
+// @description 提供 Twitch 原解析度 PNG 截圖、滾輪音量與音量增益、VOD 直播當下時間，隱藏剪輯按鈕及互動擴充。
 // @author      Derek
 // @match       *://www.twitch.tv/*
 // @run-at      document-idle
@@ -14,6 +14,17 @@
 
 (() => {
   'use strict'
+
+  // You can choose your ideal VOD broadcast date format by changing VOD_CLOCK_FORMAT below.
+  const VOD_CLOCK_FORMAT = 1
+  /*
+    1: 2022/10/31 06:37:10 (default)
+    2: 10/31/2022 06:37:10
+    3: 31/10/2022 06:37:10
+    4: Mon 31/10/2022 06:37:10
+    5: Monday 31/10/2022 06:37:10
+    6: Monday 31 October 2022 06:37:10
+  */
 
   const PLAYER_SELECTOR = '[data-a-target="video-player"]'
   // Prefer Twitch's data-a-target test hook (locale-independent), but keep
@@ -26,15 +37,29 @@
   ].join(', ')
   const VOLUME_SLIDER_SELECTOR =
     'input[data-a-target="player-volume-slider"]'
+  const VOD_SEEKBAR_TIME_SELECTOR =
+    '[data-a-target="player-seekbar-current-time"]'
+  const LEFT_CONTROLS_SELECTOR = '.player-controls__left-control-group'
 
   const VOLUME_STEP = 0.05
   const MAX_VOLUME_GAIN = 3
   const VOLUME_BAR_DURATION = 3000
   const TOOLTIP_VERTICAL_GAP = 10
   const SCREENSHOT_WORKER_TIMEOUT = 15000
+  const GQL_URL = 'https://gql.twitch.tv/gql'
+  const GQL_CLIENT_ID = 'kimne78kx3ncx6brgo4mv6wki5h1ko'
+  const GQL_TIMEOUT_MS = 8000
+  const GQL_RETRY_COOLDOWN_MS = 30000
+  const MAX_VOD_START_CACHE = 50
+  const WEEK_SHORT_FORMAT = new Intl.DateTimeFormat('en-US', { weekday: 'short' })
+  const WEEK_FULL_FORMAT = new Intl.DateTimeFormat('en-US', { weekday: 'long' })
+  const MONTH_FULL_FORMAT = new Intl.DateTimeFormat('en-US', { month: 'long' })
 
   const SVG_NS = 'http://www.w3.org/2000/svg'
   const playerStates = new WeakMap()
+  const activeVodClockPlayers = new Set()
+  const vodStartCache = new Map()
+  const vodStartRequests = new Map()
   const volumeSources = new WeakMap()
   const boundVolumeVideos = new WeakSet()
   const failedVolumeVideos = new WeakSet()
@@ -140,6 +165,27 @@
       display: inline-block;
       pointer-events: auto;
     }
+
+    .twitch-player-tweaks-vod-clock {
+      margin-left: 0.6em !important;
+      margin-right: auto !important;
+      color: #fff;
+      font-size: 13px;
+      font-weight: 400;
+      line-height: 1.5;
+      white-space: nowrap !important;
+      font-variant-numeric: tabular-nums;
+      user-select: text;
+    }
+
+    .player-controls__left-control-group > .twitch-player-tweaks-vod-clock {
+      margin-right: 0 !important;
+    }
+
+    :has(> [data-a-target="player-seekbar-current-time"] + .twitch-player-tweaks-vod-clock) {
+      display: flex;
+      align-items: center;
+    }
   `)
 
   const setNativeInputValue = (input, value) => {
@@ -201,6 +247,13 @@
         tooltipFrame: 0,
         tooltipHideTimer: 0,
         tooltipButton: null,
+        vodClock: null,
+        vodClockTimeEl: null,
+        vodClockObserver: null,
+        vodClockVideo: null,
+        vodClockVideoHandler: null,
+        vodClockId: null,
+        vodClockStartMs: null,
       }
 
       tooltip.addEventListener('mouseenter', () => {
@@ -775,13 +828,314 @@
     }
   }
 
+  const twoDigit = (num) => String(num).padStart(2, '0')
+
+  const getVodIdFromUrl = (rawUrl = location.href) => {
+    try {
+      const url = new URL(rawUrl, location.origin)
+      const parts = url.pathname.split('/').filter(Boolean)
+      if (parts[0]?.toLowerCase() === 'videos' && /^\d+$/.test(parts[1] || '')) {
+        return parts[1]
+      }
+      if (parts.length >= 3 && parts[1]?.toLowerCase() === 'video' && /^\d+$/.test(parts[2] || '')) {
+        return parts[2]
+      }
+    } catch (_) {}
+    return null
+  }
+
+  const parseVodTimestamp = (text) => {
+    const match = String(text || '').trim().match(/^(?:(\d+):)?(\d{1,2}):(\d{2})$/)
+    if (!match) return null
+    const hour = match[1] ? Number(match[1]) : 0
+    const minute = Number(match[2])
+    const second = Number(match[3])
+    if (second >= 60 || (match[1] && minute >= 60)) return null
+    return hour * 3600 + minute * 60 + second
+  }
+
+  const formatVodDate = (date) => {
+    const year = date.getFullYear()
+    const month = twoDigit(date.getMonth() + 1)
+    const day = twoDigit(date.getDate())
+    const time = `${twoDigit(date.getHours())}:${twoDigit(date.getMinutes())}:${twoDigit(date.getSeconds())}`
+
+    switch (VOD_CLOCK_FORMAT) {
+      case 2:
+        return `(${month}/${day}/${year} ${time})`
+      case 3:
+        return `(${day}/${month}/${year} ${time})`
+      case 4:
+        return `(${WEEK_SHORT_FORMAT.format(date)} ${day}/${month}/${year} ${time})`
+      case 5:
+        return `(${WEEK_FULL_FORMAT.format(date)} ${day}/${month}/${year} ${time})`
+      case 6:
+        return `(${WEEK_FULL_FORMAT.format(date)} ${day} ${MONTH_FULL_FORMAT.format(date)} ${year} ${time})`
+      case 1:
+      default:
+        return `(${year}/${month}/${day} ${time})`
+    }
+  }
+
+  const matchesVodJsonLdUrl = (rawUrl, vodId) => {
+    if (typeof rawUrl !== 'string' || !rawUrl) return false
+    try {
+      const url = new URL(rawUrl, location.origin)
+      if (getVodIdFromUrl(url.href) === vodId) return true
+      if (url.searchParams.get('video') === vodId) return true
+    } catch (_) {}
+    return false
+  }
+
+  const flattenJsonLdItems = (node, items = []) => {
+    if (!node || typeof node !== 'object') return items
+    if (Array.isArray(node)) {
+      for (const entry of node) flattenJsonLdItems(entry, items)
+      return items
+    }
+    if (Array.isArray(node['@graph'])) {
+      for (const entry of node['@graph']) flattenJsonLdItems(entry, items)
+    }
+    items.push(node)
+    return items
+  }
+
+  const readVodStartFromJsonLd = (vodId) => {
+    if (!vodId) return null
+    for (const script of $$('script[type="application/ld+json"]')) {
+      try {
+        const parsed = JSON.parse(script.textContent || '')
+        for (const item of flattenJsonLdItems(parsed)) {
+          const type = item?.['@type']
+          const isVideoObject = Array.isArray(type) ? type.includes('VideoObject') : type === 'VideoObject'
+          if (!isVideoObject) continue
+          const matched =
+            matchesVodJsonLdUrl(item.contentUrl, vodId) ||
+            matchesVodJsonLdUrl(item.embedUrl, vodId) ||
+            matchesVodJsonLdUrl(item['@id'], vodId)
+          if (!matched) continue
+          const startMs = Date.parse(item.uploadDate || '')
+          if (Number.isFinite(startMs)) return startMs
+        }
+      } catch (_) {}
+    }
+    return null
+  }
+
+  const setVodStartCache = (vodId, entry) => {
+    vodStartCache.delete(vodId)
+    vodStartCache.set(vodId, entry)
+    if (vodStartCache.size > MAX_VOD_START_CACHE) {
+      vodStartCache.delete(vodStartCache.keys().next().value)
+    }
+  }
+
+  const fetchVodStartTime = (vodId) => {
+    if (!vodId) return Promise.resolve(null)
+    const cached = vodStartCache.get(vodId)
+    if (cached && Date.now() < cached.retryAfter) {
+      return Promise.resolve(cached.value)
+    }
+    const inflight = vodStartRequests.get(vodId)
+    if (inflight) return inflight
+
+    const request = (async () => {
+      try {
+        if (typeof fetch !== 'function') throw new Error('fetch is unavailable')
+        const signal =
+          typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
+            ? AbortSignal.timeout(GQL_TIMEOUT_MS)
+            : undefined
+        const response = await fetch(GQL_URL, {
+          method: 'POST',
+          headers: {
+            'Client-ID': GQL_CLIENT_ID,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            query: 'query($id: ID!) { video(id: $id) { id createdAt publishedAt broadcastType } }',
+            variables: { id: vodId },
+          }),
+          ...(signal ? { signal } : {}),
+        })
+        if (!response?.ok) throw new Error(`HTTP ${response?.status}`)
+        const payload = await response.json()
+        const video = payload?.data?.video
+        if (!video || (video.id && String(video.id) !== String(vodId))) {
+          setVodStartCache(vodId, { value: null, retryAfter: Date.now() + GQL_RETRY_COOLDOWN_MS })
+          return null
+        }
+        const broadcastType = String(video.broadcastType || '').toUpperCase()
+        if (broadcastType && broadcastType !== 'ARCHIVE') {
+          setVodStartCache(vodId, { value: null, retryAfter: Infinity })
+          return null
+        }
+        const startMs = Date.parse(video.createdAt || video.publishedAt || '')
+        if (Number.isFinite(startMs)) {
+          setVodStartCache(vodId, { value: startMs, retryAfter: Infinity })
+          return startMs
+        }
+        setVodStartCache(vodId, { value: null, retryAfter: Date.now() + GQL_RETRY_COOLDOWN_MS })
+        return null
+      } catch (_) {
+        const fallbackMs = readVodStartFromJsonLd(vodId)
+        if (Number.isFinite(fallbackMs)) {
+          setVodStartCache(vodId, { value: fallbackMs, retryAfter: Infinity })
+          return fallbackMs
+        }
+        setVodStartCache(vodId, { value: null, retryAfter: Date.now() + GQL_RETRY_COOLDOWN_MS })
+        return null
+      } finally {
+        vodStartRequests.delete(vodId)
+      }
+    })()
+
+    vodStartRequests.set(vodId, request)
+    return request
+  }
+
+  const removeVodClock = (state) => {
+    if (!state) return
+    state.vodClockObserver?.disconnect()
+    state.vodClockObserver = null
+    if (state.vodClockVideo && state.vodClockVideoHandler) {
+      state.vodClockVideo.removeEventListener?.('timeupdate', state.vodClockVideoHandler)
+      state.vodClockVideo.removeEventListener?.('seeked', state.vodClockVideoHandler)
+    }
+    state.vodClockVideo = null
+    state.vodClockVideoHandler = null
+    state.vodClockTimeEl = null
+    state.vodClockId = null
+    state.vodClockStartMs = null
+    state.vodClock?.remove()
+    state.vodClock = null
+    const owner = [...activeVodClockPlayers].find((player) => playerStates.get(player) === state)
+    if (owner) activeVodClockPlayers.delete(owner)
+  }
+
+  const getPlayerSeconds = (player, currentTimeEl) => {
+    const parsed = parseVodTimestamp(currentTimeEl?.textContent)
+    if (parsed !== null) return parsed
+    const video = $('video', player)
+    if (video && Number.isFinite(video.currentTime) && video.currentTime >= 0) {
+      return Math.floor(video.currentTime)
+    }
+    return null
+  }
+
+  const updateVodClock = (player, state) => {
+    if (!state.vodClock || !Number.isFinite(state.vodClockStartMs)) return
+    const seconds = getPlayerSeconds(player, state.vodClockTimeEl)
+    if (seconds === null) {
+      state.vodClock.hidden = true
+      if (state.vodClock.textContent !== '') state.vodClock.textContent = ''
+      return
+    }
+    const nextText = formatVodDate(new Date(state.vodClockStartMs + seconds * 1000))
+    state.vodClock.hidden = false
+    if (state.vodClock.textContent !== nextText) state.vodClock.textContent = nextText
+  }
+
+  const ensureVodClock = (player, vodId) => {
+    const state = ensurePlayerState(player)
+    if (!vodId) {
+      removeVodClock(state)
+      return
+    }
+    if (state.vodClockId && state.vodClockId !== vodId) {
+      removeVodClock(state)
+    }
+
+    const cached = vodStartCache.get(vodId)
+    if (!cached || Date.now() >= cached.retryAfter) {
+      fetchVodStartTime(vodId).then((startMs) => {
+        if (startMs !== null && getVodIdFromUrl(location.href) === vodId) refresh()
+      })
+      return
+    }
+    if (!Number.isFinite(cached.value)) {
+      removeVodClock(state)
+      return
+    }
+
+    const currentTimeEl = $(VOD_SEEKBAR_TIME_SELECTOR, player)
+    const leftControls = currentTimeEl ? null : $(LEFT_CONTROLS_SELECTOR, player)
+    if (!currentTimeEl?.parentElement && !leftControls) return
+
+    let clock = state.vodClock || $('[data-twitch-player-tweaks="vod-clock"]', player)
+    if (!clock) {
+      clock = document.createElement('span')
+      clock.className = 'twitch-player-tweaks-vod-clock'
+      clock.dataset.twitchPlayerTweaks = 'vod-clock'
+      clock.setAttribute('data-twitch-player-tweaks', 'vod-clock')
+      clock.setAttribute('title', '直播當下時間')
+    }
+
+    if (currentTimeEl?.parentElement) {
+      const parent = currentTimeEl.parentElement
+      const siblings = [...parent.children]
+      const index = siblings.indexOf(currentTimeEl)
+      if (siblings[index + 1] !== clock) {
+        parent.insertBefore(clock, siblings[index + 1] || null)
+      }
+    } else if (leftControls && clock.parentElement !== leftControls) {
+      leftControls.appendChild(clock)
+    }
+
+    state.vodClock = clock
+    state.vodClockId = vodId
+    state.vodClockStartMs = cached.value
+    activeVodClockPlayers.add(player)
+
+    if (state.vodClockTimeEl !== currentTimeEl) {
+      state.vodClockObserver?.disconnect()
+      state.vodClockObserver = null
+      state.vodClockTimeEl = currentTimeEl || null
+      if (currentTimeEl && typeof MutationObserver === 'function') {
+        state.vodClockObserver = new MutationObserver(() => updateVodClock(player, state))
+        state.vodClockObserver.observe(currentTimeEl, {
+          childList: true,
+          characterData: true,
+          subtree: true,
+        })
+      }
+    }
+
+    const video = $('video', player) || null
+    if (state.vodClockVideo !== video) {
+      if (state.vodClockVideo && state.vodClockVideoHandler) {
+        state.vodClockVideo.removeEventListener?.('timeupdate', state.vodClockVideoHandler)
+        state.vodClockVideo.removeEventListener?.('seeked', state.vodClockVideoHandler)
+      }
+      state.vodClockVideo = video
+      if (video) {
+        state.vodClockVideoHandler = () => updateVodClock(player, state)
+        video.addEventListener?.('timeupdate', state.vodClockVideoHandler)
+        video.addEventListener?.('seeked', state.vodClockVideoHandler)
+      } else {
+        state.vodClockVideoHandler = null
+      }
+    }
+
+    updateVodClock(player, state)
+  }
+
   const refresh = () => {
+    const vodId = getVodIdFromUrl(location.href)
+    const currentPlayers = new Set()
     const currentVideos = new Set()
     for (const player of $$(PLAYER_SELECTOR)) {
+      currentPlayers.add(player)
       ensurePlayerState(player)
       ensureScreenshotButtons(player)
+      ensureVodClock(player, vodId)
       const video = $('video', player)
       if (video) currentVideos.add(video)
+    }
+    for (const player of [...activeVodClockPlayers]) {
+      if (!currentPlayers.has(player) || !vodId) {
+        removeVodClock(playerStates.get(player))
+      }
     }
     for (const video of activeVolumeVideos) {
       if (currentVideos.has(video)) continue
@@ -829,6 +1183,8 @@
   })
 
   refresh()
+
+  window.addEventListener?.('popstate', scheduleRefresh)
 
   observer.observe(document.body, {
     childList: true,

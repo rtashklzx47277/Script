@@ -4,7 +4,7 @@ const fs = require('node:fs')
 const vm = require('node:vm')
 const path = require('node:path')
 
-function boot({ saved, blocked = false, trustedTypes = false, withResizeObserver = false, database, now, scheduler, performance } = {}) {
+function boot({ saved, blocked = false, trustedTypes = false, withResizeObserver = false, database, now, scheduler, performance, fetch } = {}) {
   class Element {
     constructor(tag = 'div') {
       this.tagName = tag
@@ -90,6 +90,8 @@ function boot({ saved, blocked = false, trustedTypes = false, withResizeObserver
         if (part.startsWith('.')) return (this.className || '').split(' ').includes(part.slice(1))
         const attr = part.match(/^\[([^=\]]+)(?:="([^"]*)")?\]$/)
         if (attr) return attr[2] === undefined ? this.attrs.has(attr[1]) : this.getAttribute(attr[1]) === attr[2]
+        const tagAttr = part.match(/^([a-z0-9-]+)\[([^=\]]+)(?:="([^"]*)")?\]$/i)
+        if (tagAttr) return this.tagName === tagAttr[1].toLowerCase() && (tagAttr[3] === undefined ? this.attrs.has(tagAttr[2]) : this.getAttribute(tagAttr[2]) === tagAttr[3])
         if (part === 'img.chat-badge' || part === '[data-a-target="chat-badge"] img') {
           return this.tagName === 'img' && (this.className === 'chat-badge' ||
             this.parentElement?.getAttribute('data-a-target') === 'chat-badge')
@@ -169,6 +171,7 @@ function boot({ saved, blocked = false, trustedTypes = false, withResizeObserver
   const context = {
     document, location: { pathname: '/sample_channel', href: 'https://www.twitch.tv/sample_channel' }, console, URL,
     indexedDB: database,
+    ...(fetch ? { fetch } : {}),
     ...(scheduler ? { scheduler } : {}),
     ...(performance !== undefined ? { performance } : { performance: { now: () => 0 } }),
     Date: now ? class extends Date { static now() { return now() } } : Date,
@@ -197,6 +200,7 @@ function boot({ saved, blocked = false, trustedTypes = false, withResizeObserver
     matchesFilter, captureLine, captureTree, captureMutations, renderMessages, changeTargetUsers, showTargetStatus,
     scheduleMessageRender, releaseMessageViews, handleMessageVisibility,
     archiveTree, restoreTree, archiveRecord, restoreRecord, flushHistory, pruneHistories, pruneArchive,
+    fetchVodStartTime, ensureVodStartTime, syncHistoryTimes,
     setPanelLayer, positionFilterPanel, createPanel, setEnabled, refresh, unmount, releaseMessageViews,
     get mounted() { return mounted },
     setMounted: state => { mounted = state }
@@ -3244,5 +3248,187 @@ test('Twitch VOD replies: reconstruct threads from leading fiber/DOM mentions, h
   assert.equal(state2.history.ids.get('vod-r3-late').reply.inferred, true)
   assert.equal(state2.history.ids.get('vod-tb').view.querySelector('.ttc-reply-body').textContent, 'shaxy101')
   for (const row of state2.list.children) assert.equal(row.getAttribute('data-date'), null)
+  env2.api.unmount()
+})
+
+test('Twitch VOD time mode: toggle relative offset vs broadcast clock across live capture, reply drawers, search, midnight dividers, cross-tab sync, and reload', async () => {
+  const database = fakeIndexedDB()
+  const localMidnight = new Date(2026, 10, 20, 23, 59, 50)
+  const vodStartIso = localMidnight.toISOString()
+  const vodStartMs = localMidnight.getTime()
+  const twoDigit = n => String(n).padStart(2, '0')
+  const dateKey = ms => {
+    const d = new Date(ms)
+    return `${d.getFullYear()}/${twoDigit(d.getMonth() + 1)}/${twoDigit(d.getDate())}`
+  }
+  const clockLabel = ms => {
+    const d = new Date(ms)
+    return `${twoDigit(d.getHours())}:${twoDigit(d.getMinutes())}:${twoDigit(d.getSeconds())}`
+  }
+
+  const setupPage = (env, pathname = '/vod_owner/video/31415926') => {
+    env.location.pathname = pathname
+    const vodChat = env.document.body.appendChild(new env.Element('div'))
+    vodChat.className = 'video-chat'
+    const vodHeader = vodChat.appendChild(new env.Element('div'))
+    vodHeader.className = 'video-chat__header'
+    const vodBody = vodChat.appendChild(new env.Element('div'))
+    const wrapper = vodBody.appendChild(new env.Element('div'))
+    wrapper.className = 'video-chat__message-list-wrapper'
+    const scroller = wrapper.appendChild(new env.Element('ul'))
+    return scroller
+  }
+
+  const addVodMsg = (env, scroller, { user, id, offset, text, createdAtIso = '', mention = '' }) => {
+    const line = scroller.appendChild(new env.Element('div'))
+    line.className = 'vod-message'
+    const hdr = line.appendChild(new env.Element('div'))
+    hdr.className = 'vod-message__header'
+    const h = Math.floor(offset / 3600)
+    const m = Math.floor((offset % 3600) / 60)
+    const s = offset % 60
+    hdr.textContent = h > 0 ? `${h}:${twoDigit(m)}:${twoDigit(s)}` : `${m}:${twoDigit(s)}`
+    const content = line.appendChild(new env.Element('div'))
+    const authorLink = content.appendChild(new env.Element('a'))
+    authorLink.className = 'video-chat__message-author'
+    authorLink.setAttribute('href', `/${user}`)
+    const author = authorLink.appendChild(new env.Element('span'))
+    author.setAttribute('data-a-target', 'chat-message-username')
+    author.setAttribute('data-a-user', user)
+    author.textContent = user
+    const msgBox = content.appendChild(new env.Element('div'))
+    msgBox.className = 'video-chat__message'
+    const body = msgBox.appendChild(new env.Element('span'))
+    if (mention) {
+      const mEl = body.appendChild(new env.Element('span'))
+      mEl.className = 'mention-fragment'
+      mEl.setAttribute('data-a-target', 'chat-message-mention')
+      mEl.textContent = `@${mention}`
+    }
+    const frag = body.appendChild(new env.Element('span'))
+    frag.className = 'text-fragment'
+    frag.setAttribute('data-a-target', 'chat-message-text')
+    frag.textContent = text
+    line.__reactFiber$1 = {
+      memoizedProps: {
+        timeStampOffset: offset,
+        messageContext: {
+          author: { login: user },
+          comment: {
+            id,
+            contentOffset: offset,
+            ...(createdAtIso ? { createdAt: createdAtIso } : {}),
+            commenter: { login: user },
+            message: { tokens: mention ? [{ type: 4, content: { recipient: mention } }, { type: 0, content: text }] : [{ type: 0, content: text }] },
+          },
+        },
+      },
+    }
+    return line
+  }
+
+  // Live channel hides .ttc-vod-time-modes
+  const liveEnv = boot()
+  const liveHeader = liveEnv.document.body.appendChild(new liveEnv.Element('div'))
+  liveHeader.className = 'stream-chat'
+  const hEl = liveHeader.appendChild(new liveEnv.Element('div'))
+  hEl.className = 'stream-chat-header'
+  const liveScroller = liveHeader.appendChild(new liveEnv.Element('div'))
+  liveScroller.setAttribute('data-a-target', 'chat-scroller')
+  liveEnv.api.refresh()
+  assert.equal(liveEnv.api.mounted.panel.querySelector('.ttc-vod-time-modes').hidden, true)
+  liveEnv.api.unmount()
+
+  // VOD page via /<channel>/video/<id> shows .ttc-vod-time-modes and defaults to offset
+  const gqlFetch = async () => ({
+    ok: true,
+    async json() {
+      return { data: { video: { id: '31415926', createdAt: vodStartIso, broadcastType: 'ARCHIVE' } } }
+    },
+  })
+  const env1 = boot({ database, fetch: gqlFetch })
+  const scroller1 = setupPage(env1)
+  env1.api.refresh()
+  const state1 = env1.api.mounted
+  assert.equal(state1.history.channel, 'vod:31415926')
+  await Promise.all([state1.history.restorePromise, state1.history.vodStartPromise])
+  env1.api.setEnabled(state1, true)
+
+  const modeGroup = state1.panel.querySelector('.ttc-vod-time-modes')
+  const offsetBtn = state1.panel.querySelector('.ttc-vod-time-offset')
+  const broadcastBtn = state1.panel.querySelector('.ttc-vod-time-broadcast')
+  assert.equal(modeGroup.hidden, false)
+  assert.equal(offsetBtn.getAttribute('aria-pressed'), 'true')
+  assert.equal(broadcastBtn.getAttribute('aria-pressed'), 'false')
+
+  // Capture message before midnight (offset 5s -> 23:59:55), reply after midnight (offset 20s -> 00:00:10), and message with fiber createdAt
+  addVodMsg(env1, scroller1, { user: 'vod_owner', id: 'm-day1', offset: 5, text: 'before midnight' })
+  addVodMsg(env1, scroller1, { user: 'viewer_1', id: 'm-reply', offset: 15, mention: 'vod_owner', text: ' reply' })
+  const day2AtMs = vodStartMs + 25 * 1000
+  addVodMsg(env1, scroller1, { user: 'vod_owner', id: 'm-day2', offset: 25, text: 'after midnight', createdAtIso: new Date(day2AtMs).toISOString() })
+
+  env1.api.captureTree(scroller1, state1.history)
+  env1.api.renderMessages(state1)
+  assert.equal(state1.history.ids.get('m-day1').view.querySelector('.ttc-time').textContent, '0:05')
+  assert.equal(state1.list.children[0].getAttribute('data-date'), null)
+
+  // Switch to broadcast clock -> shows HH:MM:SS, date dividers across midnight, and rich title
+  broadcastBtn.listeners.get('click')()
+  assert.equal(broadcastBtn.getAttribute('aria-pressed'), 'true')
+  assert.equal(offsetBtn.getAttribute('aria-pressed'), 'false')
+  assert.equal(JSON.parse(env1.storage.get('twitch-live-chat-tweaks-settings-v1')).vodTimeMode, 'broadcast')
+
+  const day1Time = state1.history.ids.get('m-day1').view.querySelector('.ttc-time')
+  const replyTime = state1.history.ids.get('m-reply').view.querySelector('.ttc-time')
+  const day2Time = state1.history.ids.get('m-day2').view.querySelector('.ttc-time')
+  assert.equal(day1Time.textContent, clockLabel(vodStartMs + 5000))
+  assert.equal(day1Time.getAttribute('title'), `${dateKey(vodStartMs + 5000)} ${clockLabel(vodStartMs + 5000)}（影片時間 0:05）`)
+  assert.equal(replyTime.textContent, clockLabel(vodStartMs + 15000))
+  assert.equal(day2Time.textContent, clockLabel(day2AtMs))
+  assert.equal(state1.list.children[0].getAttribute('data-date'), dateKey(vodStartMs + 5000))
+  assert.equal(state1.list.children[1].getAttribute('data-date'), dateKey(day2AtMs))
+
+  // Search mode preserves broadcast timestamps and date dividers
+  state1.messageSearch.value = 'midnight'
+  state1.messageSearch.listeners.get('input')()
+  assert.equal(state1.list.children[0].querySelector('.ttc-time').textContent, clockLabel(vodStartMs + 5000))
+  assert.equal(state1.list.children[0].getAttribute('data-date'), dateKey(vodStartMs + 5000))
+  assert.equal(state1.list.children[1].getAttribute('data-date'), dateKey(day2AtMs))
+  state1.messageSearch.value = ''
+  state1.messageSearch.listeners.get('input')()
+
+  // Switch back to offset mode -> restores relative time and clears date dividers
+  offsetBtn.listeners.get('click')()
+  assert.equal(day1Time.textContent, '0:05')
+  assert.equal(replyTime.textContent, '0:15')
+  assert.equal(day2Time.textContent, '0:25')
+  assert.equal(state1.list.children[0].getAttribute('data-date'), null)
+  assert.equal(state1.list.children[1].getAttribute('data-date'), null)
+
+  // Cross-tab storage sync switches back to broadcast mode
+  env1.storage.set('twitch-live-chat-tweaks-settings-v1', JSON.stringify({
+    broadcaster: true, moderators: true, vip: true, replies: true, vodTimeMode: 'broadcast', users: [], excludedUsers: [],
+  }))
+  env1.listeners.get('storage')({ key: 'twitch-live-chat-tweaks-settings-v1' })
+  assert.equal(broadcastBtn.getAttribute('aria-pressed'), 'true')
+  assert.equal(day2Time.textContent, clockLabel(day2AtMs))
+
+  await env1.api.flushHistory(state1.history)
+  env1.api.unmount()
+
+  // Reload when GQL fails: per-message broadcastAt survives IndexedDB reload, while messages without broadcastAt or vodStartTime gracefully fall back to relative offset
+  const env2 = boot({
+    database,
+    saved: env1.storage.get('twitch-live-chat-tweaks-settings-v1'),
+    fetch: async () => { throw new Error('offline') },
+  })
+  setupPage(env2, '/videos/31415926')
+  env2.api.refresh()
+  const state2 = env2.api.mounted
+  await Promise.all([state2.history.restorePromise, state2.history.vodStartPromise])
+  env2.api.setEnabled(state2, true)
+  assert.equal(state2.history.ids.get('m-day1').view.querySelector('.ttc-time').textContent, '0:05')
+  assert.equal(state2.history.ids.get('m-day2').view.querySelector('.ttc-time').textContent, clockLabel(day2AtMs))
+  assert.equal(state2.history.ids.get('m-day2').view.getAttribute('data-date'), dateKey(day2AtMs))
   env2.api.unmount()
 })

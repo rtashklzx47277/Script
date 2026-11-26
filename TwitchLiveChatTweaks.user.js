@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name        Twitch Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.11.3
+// @version     0.11.4
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
-// @description 依頻道主、管理員、VIP、回覆篩選目標與全域帳號包含／排除名單篩選 Twitch 直播與 VOD 聊天，保留回覆目標引言與最近 1000 則／7 天紀錄，支援跨日分隔、搜尋與自動跟隨；分割螢幕時隱藏聊天室上方橫幅與輸入區底部列。
+// @description 依頻道主、管理員、VIP、回覆篩選目標與全域帳號包含／排除名單篩選 Twitch 直播與 VOD 聊天，保留回覆目標引言與最近 1000 則／7 天紀錄，支援跨日分隔、搜尋、自動跟隨與 VOD 時間切換（影片秒數／直播時刻）；分割螢幕時隱藏聊天室上方橫幅與輸入區底部列。
 // @author      Derek
 // @match       *://www.twitch.tv/*
 // @run-at      document-idle
@@ -24,6 +24,11 @@
   const MAX_DISPLAY_NAMES = 500
   const RETENTION_MS = 7 * 24 * 60 * 60 * 1000
   const VOD_REPLY_WINDOW_S = 300
+  const GQL_URL = 'https://gql.twitch.tv/gql'
+  const GQL_CLIENT_ID = 'kimne78kx3ncx6brgo4mv6wki5h1ko'
+  const GQL_TIMEOUT_MS = 8000
+  const GQL_RETRY_COOLDOWN_MS = 30000
+  const MAX_VOD_START_CACHE = 50
   const ARCHIVE_DB = 'twitch-live-chat-tweaks-history-v1'
   const pageKey = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`
   const nowMs = () => typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now()
@@ -38,9 +43,12 @@
   const BROADCASTER_BADGE = '5527c58c-fb7d-422d-b71b-f309dcb85cc1'
   const RESERVED_PATHS = new Set(['directory', 'downloads', 'settings', 'subscriptions', 'wallet', 'inventory', 'videos', 'popout', 'moderator', 'search', 'p', 'jobs', 'turbo', 'prime'])
   const histories = new Map()
+  const vodStartCache = new Map()
+  const vodStartRequests = new Map()
   const viewDates = new WeakMap()
   const rowAnchorKeys = new WeakMap()
-  const defaultSettings = () => ({ moderators: true, broadcaster: true, vip: true, replies: true, users: [], excludedUsers: [] })
+  const normalizeVodTimeMode = value => value === 'broadcast' ? 'broadcast' : 'offset'
+  const defaultSettings = () => ({ moderators: true, broadcaster: true, vip: true, replies: true, vodTimeMode: 'offset', users: [], excludedUsers: [] })
   let globalSettings = defaultSettings()
   let mounted = null
   let refreshTimer = 0
@@ -92,6 +100,9 @@
         if (login) return login
       }
     }
+    const parts = location.pathname.toLowerCase().split('/').filter(Boolean)
+    if (parts.length >= 3 && parts[1] === 'video' && /^\d+$/.test(parts[2]) &&
+      /^[a-z0-9_]{1,25}$/.test(parts[0]) && !RESERVED_PATHS.has(parts[0])) return parts[0]
     return ''
   }
 
@@ -99,6 +110,8 @@
     const parts = location.pathname.toLowerCase().split('/').filter(Boolean)
     if (parts[0] === 'popout' && parts[2] === 'chat' && /^[a-z0-9_]{1,25}$/.test(parts[1])) return parts[1]
     if (parts[0] === 'videos' && /^\d+$/.test(parts[1])) return `vod:${parts[1]}`
+    if (parts.length >= 3 && parts[1] === 'video' && /^\d+$/.test(parts[2]) &&
+      /^[a-z0-9_]{1,25}$/.test(parts[0]) && !RESERVED_PATHS.has(parts[0])) return `vod:${parts[2]}`
     if (parts.length === 1 && /^[a-z0-9_]+$/.test(parts[0]) && !RESERVED_PATHS.has(parts[0])) {
       return parts[0]
     }
@@ -118,6 +131,7 @@
     broadcaster: settings.broadcaster !== false,
     vip: settings.vip !== false,
     replies: settings.replies !== false,
+    vodTimeMode: normalizeVodTimeMode(settings.vodTimeMode),
     users: [...(settings.users || [])],
     excludedUsers: [...(settings.excludedUsers || [])],
   })
@@ -126,13 +140,14 @@
     try {
       const stored = readSavedSettings()
       const flat = 'moderators' in stored || 'broadcaster' in stored || 'vip' in stored || 'replies' in stored ||
-        Array.isArray(stored.users) || Array.isArray(stored.excludedUsers)
+        'vodTimeMode' in stored || Array.isArray(stored.users) || Array.isArray(stored.excludedUsers)
       if (flat) {
         globalSettings = {
           moderators: stored.moderators !== false,
           broadcaster: stored.broadcaster !== false,
           vip: stored.vip !== false,
           replies: stored.replies !== false,
+          vodTimeMode: normalizeVodTimeMode(stored.vodTimeMode),
           users: normalizeUsers(Array.isArray(stored.users) ? stored.users.join(' ') : ''),
           excludedUsers: normalizeUsers(Array.isArray(stored.excludedUsers) ? stored.excludedUsers.join(' ') : ''),
         }
@@ -147,6 +162,7 @@
         broadcaster: legacyGlobal?.broadcaster ?? legacyChannel?.broadcaster ?? !entries.some(entry => entry.broadcaster === false),
         vip: legacyGlobal?.vip ?? legacyChannel?.vip ?? !entries.some(entry => entry.vip === false),
         replies: legacyGlobal?.replies ?? legacyChannel?.replies ?? !entries.some(entry => entry.replies === false),
+        vodTimeMode: normalizeVodTimeMode(legacyGlobal?.vodTimeMode ?? legacyChannel?.vodTimeMode ?? entries.find(entry => entry.vodTimeMode === 'broadcast')?.vodTimeMode),
         users: normalizeUsers(entries.flatMap(entry => Array.isArray(entry.users) ? entry.users : []).join(' ')),
         excludedUsers: normalizeUsers(entries.flatMap(entry => Array.isArray(entry.excludedUsers) ? entry.excludedUsers : []).join(' ')),
       }
@@ -162,6 +178,7 @@
       broadcaster: history.settings.broadcaster !== false,
       vip: history.settings.vip !== false,
       replies: history.settings.replies !== false,
+      vodTimeMode: normalizeVodTimeMode(history.settings.vodTimeMode),
       users: normalizeUsers((history.settings.users || []).join(' ')),
       excludedUsers: normalizeUsers((history.settings.excludedUsers || []).join(' ')),
     }
@@ -367,6 +384,7 @@
     scope: history.scope, storageId: record.storageId, id: record.id, user: record.user,
     createdAt: record.createdAt, order: record.order, expiresAt: record.createdAt + RETENTION_MS,
     vodOffset: hasVodOffset(record) ? Math.floor(record.vodOffset) : null,
+    broadcastAt: Number.isFinite(record.broadcastAt) ? record.broadcastAt : null,
     moderator: record.moderator, broadcaster: record.broadcaster, vip: record.vip,
     reply: sanitizeReply(record.reply),
     fingerprint: record.fingerprint, tree: archiveTree(record.view),
@@ -395,6 +413,131 @@
     if (s >= 60 || (match[1] && m >= 60)) return null
     return h * 3600 + m * 60 + s
   }
+  const formatClockTime = timestamp => {
+    const date = new Date(timestamp)
+    return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}:${String(date.getSeconds()).padStart(2, '0')}`
+  }
+  const vodIdFromJsonLdUrl = rawUrl => {
+    if (typeof rawUrl !== 'string' || !rawUrl) return ''
+    try {
+      const url = new URL(rawUrl, location.origin)
+      const parts = url.pathname.toLowerCase().split('/').filter(Boolean)
+      if (parts[0] === 'videos' && /^\d+$/.test(parts[1] || '')) return parts[1]
+      if (parts.length >= 3 && parts[1] === 'video' && /^\d+$/.test(parts[2] || '') &&
+        /^[a-z0-9_]{1,25}$/.test(parts[0]) && !RESERVED_PATHS.has(parts[0])) return parts[2]
+      const queryId = url.searchParams.get('video') || ''
+      if (/^\d+$/.test(queryId)) return queryId
+    } catch (_) {}
+    return ''
+  }
+  const flattenJsonLd = (node, items = []) => {
+    if (!node || typeof node !== 'object') return items
+    if (Array.isArray(node)) {
+      for (const entry of node) flattenJsonLd(entry, items)
+      return items
+    }
+    if (Array.isArray(node['@graph'])) {
+      for (const entry of node['@graph']) flattenJsonLd(entry, items)
+    }
+    items.push(node)
+    return items
+  }
+  const readVodStartFromJsonLd = vodId => {
+    if (!vodId) return null
+    for (const script of $$('script[type="application/ld+json"]')) {
+      try {
+        const parsed = JSON.parse(script.textContent || '')
+        for (const item of flattenJsonLd(parsed)) {
+          const type = item?.['@type']
+          const isVideoObject = Array.isArray(type) ? type.includes('VideoObject') : type === 'VideoObject'
+          if (!isVideoObject) continue
+          const matched = vodIdFromJsonLdUrl(item.contentUrl) === vodId ||
+            vodIdFromJsonLdUrl(item.embedUrl) === vodId ||
+            vodIdFromJsonLdUrl(item['@id']) === vodId
+          if (!matched) continue
+          const startMs = Date.parse(item.uploadDate || '')
+          if (Number.isFinite(startMs)) return startMs
+        }
+      } catch (_) {}
+    }
+    return null
+  }
+  const setVodStartCache = (vodId, entry) => {
+    vodStartCache.delete(vodId)
+    vodStartCache.set(vodId, entry)
+    if (vodStartCache.size > MAX_VOD_START_CACHE) vodStartCache.delete(vodStartCache.keys().next().value)
+  }
+  const fetchVodStartTime = vodId => {
+    if (!vodId) return Promise.resolve(null)
+    const cached = vodStartCache.get(vodId)
+    if (cached && Date.now() < cached.retryAfter) return Promise.resolve(cached.value)
+    const inflight = vodStartRequests.get(vodId)
+    if (inflight) return inflight
+    const request = (async () => {
+      try {
+        if (typeof fetch !== 'function') throw new Error('fetch is unavailable')
+        const signal = typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
+          ? AbortSignal.timeout(GQL_TIMEOUT_MS)
+          : undefined
+        const response = await fetch(GQL_URL, {
+          method: 'POST',
+          headers: { 'Client-ID': GQL_CLIENT_ID, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            query: 'query($id: ID!) { video(id: $id) { id createdAt publishedAt broadcastType } }',
+            variables: { id: vodId },
+          }),
+          ...(signal ? { signal } : {}),
+        })
+        if (!response?.ok) throw new Error(`HTTP ${response?.status}`)
+        const payload = await response.json()
+        const video = payload?.data?.video
+        if (!video || (video.id && String(video.id) !== String(vodId))) {
+          setVodStartCache(vodId, { value: null, retryAfter: Date.now() + GQL_RETRY_COOLDOWN_MS })
+          return null
+        }
+        const broadcastType = String(video.broadcastType || '').toUpperCase()
+        if (broadcastType && broadcastType !== 'ARCHIVE') {
+          setVodStartCache(vodId, { value: null, retryAfter: Infinity })
+          return null
+        }
+        const startMs = Date.parse(video.createdAt || video.publishedAt || '')
+        if (Number.isFinite(startMs)) {
+          setVodStartCache(vodId, { value: startMs, retryAfter: Infinity })
+          return startMs
+        }
+        setVodStartCache(vodId, { value: null, retryAfter: Date.now() + GQL_RETRY_COOLDOWN_MS })
+        return null
+      } catch (_) {
+        const fallbackMs = readVodStartFromJsonLd(vodId)
+        if (Number.isFinite(fallbackMs)) {
+          setVodStartCache(vodId, { value: fallbackMs, retryAfter: Infinity })
+          return fallbackMs
+        }
+        setVodStartCache(vodId, { value: null, retryAfter: Date.now() + GQL_RETRY_COOLDOWN_MS })
+        return null
+      } finally {
+        vodStartRequests.delete(vodId)
+      }
+    })()
+    vodStartRequests.set(vodId, request)
+    return request
+  }
+  const resolveVodBroadcastTime = (record, history = null) => {
+    if (Number.isFinite(record?.broadcastAt)) return record.broadcastAt
+    if (hasVodOffset(record) && Number.isFinite(history?.vodStartTime)) {
+      return history.vodStartTime + Math.floor(record.vodOffset) * 1000
+    }
+    return null
+  }
+  const getRecordDateKey = (record, history = null) => {
+    if (!record) return ''
+    if (hasVodOffset(record)) {
+      if (history?.settings?.vodTimeMode !== 'broadcast') return ''
+      const broadcastMs = resolveVodBroadcastTime(record, history)
+      return broadcastMs !== null ? formatDateKey(broadcastMs) : ''
+    }
+    return formatDateKey(record.createdAt)
+  }
   const applyVodTime = (time, view, vodOffset) => {
     const offset = Math.floor(vodOffset)
     const label = formatVodTime(offset)
@@ -402,6 +545,40 @@
     time.setAttribute('datetime', `PT${offset}S`)
     time.setAttribute('title', `影片時間 ${label}`)
     if (view) viewDates.delete(view)
+  }
+  const applyBroadcastVodTime = (time, view, broadcastMs, vodOffset = null) => {
+    const date = new Date(broadcastMs)
+    const label = formatClockTime(broadcastMs)
+    const dateKey = formatDateKey(broadcastMs)
+    time.textContent = label
+    time.setAttribute('datetime', date.toISOString())
+    time.setAttribute('title', Number.isFinite(vodOffset) && vodOffset >= 0
+      ? `${dateKey} ${label}（影片時間 ${formatVodTime(vodOffset)}）`
+      : `${dateKey} ${label}`)
+    if (view) viewDates.set(view, dateKey)
+  }
+  const syncRecordTime = (record, history = null) => {
+    const time = viewTime(record?.view)
+    if (!time) return
+    if (hasVodOffset(record)) {
+      if (history?.settings?.vodTimeMode === 'broadcast') {
+        const broadcastMs = resolveVodBroadcastTime(record, history)
+        if (broadcastMs !== null) {
+          applyBroadcastVodTime(time, record.view, broadcastMs, record.vodOffset)
+          return
+        }
+      }
+      applyVodTime(time, record.view, record.vodOffset)
+      return
+    }
+    const date = new Date(record.createdAt)
+    if (!time.getAttribute('datetime')) time.setAttribute('datetime', date.toISOString())
+    if (!time.getAttribute('title')) time.setAttribute('title', `${formatDateKey(record.createdAt)} ${time.textContent}`)
+    viewDates.set(record.view, formatDateKey(record.createdAt))
+  }
+  const syncHistoryTimes = history => {
+    if (!history) return
+    for (const record of history.messages) syncRecordTime(record, history)
   }
   const compareRecords = (a, b) => (hasVodOffset(a) && hasVodOffset(b) && a.vodOffset !== b.vodOffset
     ? a.vodOffset - b.vodOffset
@@ -480,22 +657,16 @@
     }
     return row
   }
-  const restoreRecord = saved => {
+  const restoreRecord = (saved, history = null) => {
     if (saved.tree?.tag !== 'div') return null
     const view = restoreTree(saved.tree)
     const time = viewTime(view)
     if (!view || !time) return null
     const reply = sanitizeReply(saved.reply)
     const vodOffset = hasVodOffset(saved) ? Math.floor(saved.vodOffset) : null
+    const broadcastAt = Number.isFinite(saved.broadcastAt) ? saved.broadcastAt : null
     view.className = reply ? 'ttc-message ttc-has-reply' : 'ttc-message'
     if (reply && !$('.ttc-reply', view)) view.insertBefore(makeReplyView(reply), view.firstChild)
-    if (vodOffset !== null) {
-      applyVodTime(time, view, vodOffset)
-    } else {
-      if (!time.getAttribute('datetime')) time.setAttribute('datetime', new Date(saved.createdAt).toISOString())
-      if (!time.getAttribute('title')) time.setAttribute('title', `${formatDateKey(saved.createdAt)} ${time.textContent}`)
-      viewDates.set(view, formatDateKey(saved.createdAt))
-    }
     const authorNode = [...view.children].find(child => child.tagName?.toLowerCase() === 'strong')
     if (authorNode) authorNode.textContent = formatAuthorLabel(authorNode.textContent, saved.user)
     if (reply) {
@@ -503,12 +674,14 @@
       const replyAuthor = $('.ttc-reply-author', view)
       if (replyAuthor && replyLabel) replyAuthor.textContent = `@${replyLabel}`
     }
-    return { id: saved.id, storageId: saved.storageId, user: saved.user, createdAt: saved.createdAt,
-      vodOffset,
+    const record = { id: saved.id, storageId: saved.storageId, user: saved.user, createdAt: saved.createdAt,
+      vodOffset, broadcastAt,
       order: Number.isSafeInteger(saved.order) ? saved.order : 0,
       moderator: saved.moderator === true, broadcaster: saved.broadcaster === true, vip: saved.vip === true,
       reply,
       fingerprint: saved.fingerprint, view, retained: true }
+    syncRecordTime(record, history)
+    return record
   }
   const updateArchiveStatus = history => {
     if (mounted?.history !== history || !mounted.panel) return
@@ -607,10 +780,11 @@
           current.createdAt = Math.min(current.createdAt, item.createdAt)
           current.order = Number.isSafeInteger(item.order) ? item.order : current.order
           if (!hasVodOffset(current) && hasVodOffset(item)) current.vodOffset = Math.floor(item.vodOffset)
+          if (!Number.isFinite(current.broadcastAt) && Number.isFinite(item.broadcastAt)) current.broadcastAt = item.broadcastAt
           const currentTime = viewTime(current.view)
           const savedTime = viewTime(restoreTree(item.tree))
           if (hasVodOffset(current)) {
-            if (currentTime) applyVodTime(currentTime, current.view, current.vodOffset)
+            if (currentTime) syncRecordTime(current, history)
             else viewDates.delete(current.view)
           } else {
             if (currentTime) {
@@ -623,7 +797,7 @@
           current._searchText = ''
           saveRecord(history, current)
         } else {
-          const record = restoreRecord(item)
+          const record = restoreRecord(item, history)
           if (!record) continue
           record._searchText = ''
           restored.push(record)
@@ -713,17 +887,30 @@
     pruneArchive().catch(() => {})
   }
 
+  const ensureVodStartTime = async history => {
+    if (!history?.channel?.startsWith('vod:')) return null
+    const vodId = history.channel.slice(4)
+    const startMs = await fetchVodStartTime(vodId)
+    if (Number.isFinite(startMs)) {
+      history.vodStartTime = startMs
+      syncHistoryTimes(history)
+      if (mounted?.history === history && history.enabled) renderMessages(mounted, true)
+    }
+    return startMs
+  }
+
   const getHistory = (channel) => {
     let history = histories.get(channel)
     if (!history) {
       history = {
-        channel, settings: loadSettings(channel), messages: [], nodes: new WeakMap(),
+        channel, settings: loadSettings(channel), vodStartTime: null, messages: [], nodes: new WeakMap(),
         scope: channel, ids: new Map(), byStorageId: new Map(), knownRoles: new Map(), displayNames: new Map(),
         saveQueue: new Map(), deleteQueue: new Set(),
         archiveReady: false, archiveError: false,
         enabled: false, follow: true, search: '', dirty: new Set(), removed: new Set(),
       }
       history.restorePromise = restoreHistory(history)
+      if (channel.startsWith('vod:')) history.vodStartPromise = ensureVodStartTime(history)
     }
     histories.delete(channel)
     histories.set(channel, history)
@@ -885,6 +1072,7 @@
   const readVodMeta = (line, expectedUser = '') => {
     let id = ''
     let vodOffset = null
+    let broadcastAt = null
     let mentionRecipient = ''
     try {
       const key = Object.keys(line).find(name => name.startsWith('__reactFiber') || name.startsWith('__reactInternalInstance'))
@@ -904,6 +1092,15 @@
           const rawOffset = [props.timeStampOffset, comment?.contentOffset, comment?.contentOffsetSeconds]
             .find(value => Number.isFinite(value) && value >= 0)
           if (vodOffset === null && Number.isFinite(rawOffset)) vodOffset = Math.floor(rawOffset)
+          const rawBroadcastAt = comment?.createdAt ?? props.createdAt
+          if (broadcastAt === null) {
+            if (typeof rawBroadcastAt === 'string' && rawBroadcastAt) {
+              const parsedAt = Date.parse(rawBroadcastAt)
+              if (Number.isFinite(parsedAt)) broadcastAt = parsedAt
+            } else if (Number.isFinite(rawBroadcastAt) && rawBroadcastAt > 0) {
+              broadcastAt = rawBroadcastAt
+            }
+          }
           if (!mentionRecipient && Array.isArray(comment?.message?.tokens)) {
             mentionRecipient = readVodMentionFromTokens(comment.message.tokens)
           }
@@ -921,7 +1118,7 @@
         if (parsed !== null) { vodOffset = parsed; break }
       }
     }
-    return { id, vodOffset, mentionRecipient }
+    return { id, vodOffset, broadcastAt, mentionRecipient }
   }
 
   const resolveParentRoles = (channel, history, parentUser, parentRecord, existing = null) => {
@@ -1030,7 +1227,9 @@
         }
       }
     }
-    return { user, moderator, broadcaster, vip, reply, author, body, badges, id, vodOffset: vodMeta ? vodMeta.vodOffset : null }
+    return { user, moderator, broadcaster, vip, reply, author, body, badges, id,
+      vodOffset: vodMeta ? vodMeta.vodOffset : null,
+      broadcastAt: vodMeta ? vodMeta.broadcastAt : null }
   }
 
   const matchesTarget = (target, settings) =>
@@ -1116,7 +1315,7 @@
     }
   }
 
-  const makeMessageView = (message, createdAt = Date.now(), vodOffset = message.vodOffset ?? null) => {
+  const makeMessageView = (message, createdAt = Date.now(), vodOffset = message.vodOffset ?? null, history = null, broadcastAt = message.broadcastAt ?? null) => {
     // Copy presentation only. Never keep React-owned message nodes or inactive controls.
     const row = document.createElement('div')
     row.className = message.reply ? 'ttc-message ttc-has-reply' : 'ttc-message'
@@ -1124,7 +1323,11 @@
     const time = document.createElement('time')
     time.className = 'ttc-time'
     if (Number.isFinite(vodOffset) && vodOffset >= 0) {
-      applyVodTime(time, row, vodOffset)
+      const broadcastMs = history?.settings?.vodTimeMode === 'broadcast'
+        ? resolveVodBroadcastTime({ vodOffset, broadcastAt }, history)
+        : null
+      if (broadcastMs !== null) applyBroadcastVodTime(time, row, broadcastMs, vodOffset)
+      else applyVodTime(time, row, vodOffset)
     } else {
       const date = new Date(createdAt)
       time.textContent = date.toLocaleTimeString('zh-TW', { hour12: false })
@@ -1187,7 +1390,10 @@
     const vodOffset = previous && previous.user === message.user && previous.retained && hasVodOffset(previous)
       ? previous.vodOffset
       : (hasVodOffset(message) ? Math.floor(message.vodOffset) : null)
-    const view = makeMessageView(message, createdAt, vodOffset)
+    const broadcastAt = previous && previous.user === message.user && previous.retained && Number.isFinite(previous.broadcastAt)
+      ? previous.broadcastAt
+      : (Number.isFinite(message.broadcastAt) ? message.broadcastAt : null)
+    const view = makeMessageView(message, createdAt, vodOffset, history, broadcastAt)
     let record
     if (previous && previous.user === message.user && previous.retained) {
       // Reflect edits/deletion placeholders while the original line is still present.
@@ -1199,10 +1405,10 @@
         nextTime.setAttribute('title', `${formatDateKey(createdAt)} ${nextTime.textContent}`)
       }
       record = Object.assign(previous, { moderator: message.moderator,
-        broadcaster: message.broadcaster, vip: message.vip, reply: message.reply, vodOffset, _searchText: '', view, fingerprint })
+        broadcaster: message.broadcaster, vip: message.vip, reply: message.reply, vodOffset, broadcastAt, _searchText: '', view, fingerprint })
     } else {
       record = { id: message.id, user: message.user, moderator: message.moderator,
-        broadcaster: message.broadcaster, vip: message.vip, reply: message.reply, vodOffset, _searchText: '', view, fingerprint, retained: true,
+        broadcaster: message.broadcaster, vip: message.vip, reply: message.reply, vodOffset, broadcastAt, _searchText: '', view, fingerprint, retained: true,
         storageId: message.id || `${pageKey}-${++anonymousMessage}`,
         createdAt, order: ++messageOrder }
       const tail = history.messages.at(-1)
@@ -1342,8 +1548,9 @@
         record.renderedView.remove()
       }
       view.hidden = false
-      if (hasVodOffset(record)) viewDates.delete(view)
-      else viewDates.set(view, formatDateKey(record.createdAt))
+      const dateKey = getRecordDateKey(record, history)
+      if (dateKey) viewDates.set(view, dateKey)
+      else viewDates.delete(view)
       syncDateMarker(view, previousView)
       previousView = view
       const existing = list.children[index++]
@@ -1427,7 +1634,7 @@
       }
     }
   }
-  const ensureReplyDrawer = (state, key, parentRecord, sampleReply, createdAt, isVodTimeline = false) => {
+  const ensureReplyDrawer = (state, key, parentRecord, sampleReply, createdAt, dateKey = '') => {
     state.replyDrawers ||= new Map()
     state.openReplyThreads ||= new Set()
     const existing = state.replyDrawers.get(key)
@@ -1451,13 +1658,16 @@
       head.insertBefore(parentRecord.renderedView, toggle)
       parentRecord.renderedView.classList.add('ttc-has-replies')
       parentRecord.renderedView.removeAttribute('data-date')
-      if (!hasVodOffset(parentRecord)) viewDates.set(wrapper, formatDateKey(parentRecord.createdAt))
+      const parentDateKey = getRecordDateKey(parentRecord, state.history)
+      if (parentDateKey) viewDates.set(wrapper, parentDateKey)
+      else viewDates.delete(wrapper)
       syncDateMarker(wrapper, adjacentDatedRow(wrapper, -1))
     } else {
       orphanRow = makeOrphanParentView(sampleReply, state.history)
       head = element('div', { class: 'ttc-thread-head ttc-orphan-head' }, [orphanRow, toggle])
       wrapper = element('div', { class: 'ttc-reply-group' }, [head, panel])
-      if (!isVodTimeline) viewDates.set(wrapper, formatDateKey(createdAt))
+      if (dateKey) viewDates.set(wrapper, dateKey)
+      else viewDates.delete(wrapper)
       state.list.appendChild(wrapper)
       syncDateMarker(wrapper, adjacentDatedRow(wrapper, -1))
     }
@@ -1514,8 +1724,9 @@
       drawer.parentRecord?.view?.classList.remove('ttc-has-replies')
       if (unwrapParent && parentView && parentView.parentElement === drawer.head && drawer.wrapper.parentElement === state.list) {
         drawer.wrapper.replaceWith(parentView)
-        if (hasVodOffset(drawer.parentRecord)) viewDates.delete(parentView)
-        else viewDates.set(parentView, formatDateKey(drawer.parentRecord.createdAt))
+        const parentDateKey = getRecordDateKey(drawer.parentRecord, state.history)
+        if (parentDateKey) viewDates.set(parentView, parentDateKey)
+        else viewDates.delete(parentView)
         syncDateMarker(parentView, adjacentDatedRow(parentView, -1))
         const nextDated = adjacentDatedRow(parentView, 1)
         if (nextDated?.parentElement === state.list) syncDateMarker(nextDated, parentView)
@@ -1751,7 +1962,8 @@
         if (!full && record.orphanParentKey) detachOrphanAnchor(state, record)
         unregisterTargetReplyRef(state, record)
         const existed = state.replyDrawers.has(key)
-        const drawer = ensureReplyDrawer(state, key, parentRecord, record.reply, record.createdAt, hasVodOffset(record))
+        const drawerDateKey = getRecordDateKey(parentRecord || record, history)
+        const drawer = ensureReplyDrawer(state, key, parentRecord, record.reply, record.createdAt, drawerDateKey)
         if (!existed && drawer.group) {
           if (!full && isOutOfOrder(state, record)) needsReorder = true
           noteMountedTail(state, record)
@@ -1794,7 +2006,8 @@
           const anchorKey = parentId ? `id:${parentId}` : `quote:${record.reply.parentUser}\n${record.reply.parentText}`
           if (record.orphanParentKey && record.orphanParentKey !== anchorKey) detachOrphanAnchor(state, record)
           const existed = state.replyDrawers.has(anchorKey)
-          const anchorDrawer = ensureReplyDrawer(state, anchorKey, null, record.reply, record.createdAt, hasVodOffset(record))
+          const anchorDateKey = getRecordDateKey(record, history)
+          const anchorDrawer = ensureReplyDrawer(state, anchorKey, null, record.reply, record.createdAt, anchorDateKey)
           if (!full && !existed && isOutOfOrder(state, record)) {
             needsReorder = true
           }
@@ -1821,8 +2034,9 @@
           existingDrawer.head.insertBefore(record.view, existingDrawer.toggle)
         }
         existingDrawer.parentRecord = record
-        if (hasVodOffset(record)) viewDates.delete(existingDrawer.wrapper)
-        else viewDates.set(existingDrawer.wrapper, formatDateKey(record.createdAt))
+        const drawerDateKey = getRecordDateKey(record, history)
+        if (drawerDateKey) viewDates.set(existingDrawer.wrapper, drawerDateKey)
+        else viewDates.delete(existingDrawer.wrapper)
         syncDateMarker(existingDrawer.wrapper, adjacentDatedRow(existingDrawer.wrapper, -1))
         record.renderedView = record.view
         record.visible = true
@@ -1831,8 +2045,9 @@
         continue
       }
       record.view.hidden = false
-      if (hasVodOffset(record)) viewDates.delete(record.view)
-      else viewDates.set(record.view, formatDateKey(record.createdAt))
+      const dateKey = getRecordDateKey(record, history)
+      if (dateKey) viewDates.set(record.view, dateKey)
+      else viewDates.delete(record.view)
       rowAnchorKeys.set(record.view, `msg:${record.storageId}`)
       if (oldView && oldView !== record.view) {
         state.messageResizeObserver?.unobserve(oldView)
@@ -2218,6 +2433,17 @@
     }, 3000) : 0
   }
 
+  const renderVodTimeMode = (state) => {
+    const { panel, history } = state
+    if (!panel || !history) return
+    const group = $('.ttc-vod-time-modes', panel)
+    if (!group) return
+    group.hidden = !history.channel.startsWith('vod:')
+    const broadcast = normalizeVodTimeMode(history.settings?.vodTimeMode) === 'broadcast'
+    $('.ttc-vod-time-offset', panel)?.setAttribute('aria-pressed', String(!broadcast))
+    $('.ttc-vod-time-broadcast', panel)?.setAttribute('aria-pressed', String(broadcast))
+  }
+
   const createPanel = (state) => {
     const panel = element('section', { class: 'ttc-panel', 'aria-label': '指定用戶聊天室' }, [
       element('div', { class: 'ttc-toolbar' }, [
@@ -2228,6 +2454,15 @@
             'aria-controls': 'ttc-target-settings',
             'aria-expanded': 'false',
           }, ['目標用戶']),
+          element('div', {
+            class: 'ttc-vod-time-modes',
+            role: 'group',
+            'aria-label': 'VOD 時間顯示方式',
+            hidden: !state.history.channel.startsWith('vod:'),
+          }, [
+            element('button', { type: 'button', class: 'ttc-vod-time-offset' }, ['影片時間']),
+            element('button', { type: 'button', class: 'ttc-vod-time-broadcast' }, ['直播時刻']),
+          ]),
           element('span', { class: 'ttc-count' }),
         ]),
         element('search', { class: 'ttc-message-search' }, [
@@ -2337,11 +2572,24 @@
     state.updateSettings = (settings, message = '') => {
       state.history.settings = settings
       const saved = saveSettings(state.history)
+      for (const item of histories.values()) syncHistoryTimes(item)
       showTargetStatus(state, saved ? message : '此瀏覽器無法儲存設定；設定僅保留至本次頁面結束。')
       renderTargets(state)
+      renderVodTimeMode(state)
+      if (normalizeVodTimeMode(settings.vodTimeMode) === 'broadcast' &&
+        state.history.channel.startsWith('vod:') && !Number.isFinite(state.history.vodStartTime)) {
+        ensureVodStartTime(state.history)
+      }
       captureTree(state.scroller, state.history)
       if (state.history.enabled) renderMessages(state, true)
     }
+    const setVodTimeMode = mode => {
+      const nextMode = normalizeVodTimeMode(mode)
+      if (normalizeVodTimeMode(state.history.settings.vodTimeMode) === nextMode) return
+      state.updateSettings({ ...state.history.settings, vodTimeMode: nextMode })
+    }
+    $('.ttc-vod-time-offset', panel).addEventListener('click', () => setVodTimeMode('offset'))
+    $('.ttc-vod-time-broadcast', panel).addEventListener('click', () => setVodTimeMode('broadcast'))
     const applyRoles = () => state.updateSettings({ ...state.history.settings,
       moderators: moderators.checked, broadcaster: broadcaster.checked, vip: vip.checked, replies: replies.checked })
     for (const input of [moderators, broadcaster, vip, replies]) input.addEventListener('change', applyRoles)
@@ -2379,6 +2627,7 @@
     targetButton.addEventListener('click', () => setTargetsOpen(targetSettings.hidden))
     setTargetsOpen(false)
     renderTargets(state)
+    renderVodTimeMode(state)
     state.list.addEventListener('scroll', () => {
       if (!state.history.enabled || state.panel.hidden || state.restoringScroll) return
       if (!state.history.follow && state.locationPinned && !state.readerScrollIntent) return
@@ -2492,7 +2741,10 @@
 
   const syncSettings = () => {
     globalSettings = defaultSettings()
-    for (const history of histories.values()) history.settings = loadSettings(history.channel)
+    for (const history of histories.values()) {
+      history.settings = loadSettings(history.channel)
+      syncHistoryTimes(history)
+    }
     if (!mounted) return
     const { panel, history } = mounted
     $('[name="moderators"]', panel).checked = history.settings.moderators
@@ -2501,6 +2753,11 @@
     const repliesInput = $('[name="replies"]', panel)
     if (repliesInput) repliesInput.checked = history.settings.replies
     renderTargets(mounted)
+    renderVodTimeMode(mounted)
+    if (normalizeVodTimeMode(history.settings.vodTimeMode) === 'broadcast' &&
+      history.channel.startsWith('vod:') && !Number.isFinite(history.vodStartTime)) {
+      ensureVodStartTime(history)
+    }
     captureTree(mounted.scroller, history)
     if (history.enabled) renderMessages(mounted, true)
   }
@@ -2592,6 +2849,9 @@
     .ttc-target-modes { display: flex; gap: 6px; margin-bottom: 8px; }
     .ttc-target-modes button { flex: 1; padding: 4px 8px; color: inherit; background: var(--color-background-button-text-hover, #ffffff22); font-size: 12px; }
     .ttc-target-modes button[aria-pressed="true"] { color: #fff; background: #9147ff; }
+    .ttc-vod-time-modes { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; }
+    .ttc-vod-time-modes button { padding: 2px 6px; color: inherit; background: var(--color-background-button-text-hover, #ffffff22); font-size: 11px; line-height: 1.4; white-space: nowrap; }
+    .ttc-vod-time-modes button[aria-pressed="true"] { color: #fff; background: #9147ff; }
     .ttc-target-search { display: flex; align-items: center; gap: 6px; margin-top: 8px; white-space: nowrap; }
     .ttc-target-search input { display: block; box-sizing: border-box; flex: 1; min-width: 0; width: 100%; padding: 5px 8px; border: 1px solid var(--color-border-base, #ffffff44); border-radius: 4px; color: inherit; background: var(--color-background-input, #ffffff11); font-size: 12px; }
     .ttc-target-list { list-style: none; padding: 0; margin: 6px 0 0; flex: 1; min-height: 40px; overflow-y: auto; }
