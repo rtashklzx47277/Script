@@ -4,7 +4,7 @@ const fs = require('node:fs')
 const vm = require('node:vm')
 const path = require('node:path')
 
-function boot({ saved, blocked = false, trustedTypes = false, withResizeObserver = false, database, now, scheduler, performance, fetch } = {}) {
+function boot({ saved, blocked = false, trustedTypes = false, withResizeObserver = false, database, now, scheduler, performance, fetch, readyState, withBody = true, Response: customResponse, Headers: customHeaders } = {}) {
   class Element {
     constructor(tag = 'div') {
       this.tagName = tag
@@ -155,10 +155,11 @@ function boot({ saved, blocked = false, trustedTypes = false, withResizeObserver
   }
   const document = new Element('document')
   document.head = new Element('head')
-  document.body = new Element('body')
+  document.body = withBody ? new Element('body') : null
   document.hidden = false
+  if (readyState !== undefined) document.readyState = readyState
   document.appendChild(document.head)
-  document.appendChild(document.body)
+  if (document.body) document.appendChild(document.body)
   document.createElementNS = (_, tag) => new Element(tag)
   document.createElement = tag => new Element(tag)
   const observers = []
@@ -168,10 +169,14 @@ function boot({ saved, blocked = false, trustedTypes = false, withResizeObserver
   const timers = new Map()
   const frames = new Map()
   let nextTimer = 0
+  const ResponseCtor = customResponse !== undefined ? customResponse : globalThis.Response
+  const HeadersCtor = customHeaders !== undefined ? customHeaders : globalThis.Headers
   const context = {
     document, location: { pathname: '/sample_channel', href: 'https://www.twitch.tv/sample_channel' }, console, URL,
     indexedDB: database,
     ...(fetch ? { fetch } : {}),
+    ...(typeof ResponseCtor === 'function' ? { Response: ResponseCtor } : {}),
+    ...(typeof HeadersCtor === 'function' ? { Headers: HeadersCtor } : {}),
     ...(scheduler ? { scheduler } : {}),
     ...(performance !== undefined ? { performance } : { performance: { now: () => 0 } }),
     Date: now ? class extends Date { static now() { return now() } } : Date,
@@ -201,6 +206,7 @@ function boot({ saved, blocked = false, trustedTypes = false, withResizeObserver
     scheduleMessageRender, releaseMessageViews, handleMessageVisibility,
     archiveTree, restoreTree, archiveRecord, restoreRecord, flushHistory, pruneHistories, pruneArchive,
     fetchVodStartTime, ensureVodStartTime, syncHistoryTimes,
+    fixVodEmoteOffsets, installVodEmoteFetchFix,
     setPanelLayer, positionFilterPanel, createPanel, setEnabled, refresh, unmount, releaseMessageViews,
     get mounted() { return mounted },
     setMounted: state => { mounted = state }
@@ -3431,4 +3437,225 @@ test('Twitch VOD time mode: toggle relative offset vs broadcast clock across liv
   assert.equal(state2.history.ids.get('m-day2').view.querySelector('.ttc-time').textContent, clockLabel(day2AtMs))
   assert.equal(state2.history.ids.get('m-day2').view.getAttribute('data-date'), dateKey(day2AtMs))
   env2.api.unmount()
+})
+
+test('Twitch VOD emotes: fix UTF-8 byte offsets to Unicode code-point indices in GQL fetch responses and defer DOM init at document-start', async () => {
+  const makeComment = fragments => ({
+    node: {
+      id: 'c-1',
+      commenter: { id: '1', login: 'u1', displayName: 'U1' },
+      contentOffsetSeconds: 100,
+      createdAt: '2026-11-25T13:18:31.135Z',
+      message: { fragments, userBadges: [], userColor: null },
+    },
+  })
+
+  // 1. Direct fixVodEmoteOffsets checks (CJK, multi-emote with UTF-8 mention, 4-byte emoji surrogate pairs, and clean ASCII)
+  const batchPayload = [
+    { data: { sendSpadeEvents: { statusCode: 204 } } },
+    {
+      data: {
+        video: {
+          id: '2940219955',
+          comments: {
+            edges: [
+              // 25 CJK + 1 space = 26 code points (76 UTF-8 bytes)
+              makeComment([
+                { emote: null, text: '試乘為啥要開直播阿這不是白白要被薛哥吞噬掉進化了嗎 ' },
+                { emote: { id: 'emotesv2_893;76;86', emoteID: 'emotesv2_893', from: 76, __typename: 'EmbeddedEmote' }, text: 'roger989898' },
+              ]),
+              // '@機器人183號 shaxy11 shaxy11 shaxy11': 9 chars before first emote, spacing 1 each
+              makeComment([
+                { emote: null, text: '@機器人183號 ' },
+                { emote: { id: '305147277;17;23', emoteID: '305147277', from: 17, __typename: 'EmbeddedEmote' }, text: 'shaxy11' },
+                { emote: null, text: ' ' },
+                { emote: { id: '305147277;25;31', emoteID: '305147277', from: 25, __typename: 'EmbeddedEmote' }, text: 'shaxy11' },
+                { emote: null, text: ' ' },
+                { emote: { id: '305147277;33;39', emoteID: '305147277', from: 33, __typename: 'EmbeddedEmote' }, text: 'shaxy11' },
+              ]),
+              // Two 4-byte emoji (UTF-16 len 4, UTF-8 len 8, code points 2) + two CJK + space = 5 code points
+              makeComment([
+                { emote: null, text: '🔥😂中文 ' },
+                { emote: { id: '25;15;19', emoteID: '25', from: 15, __typename: 'EmbeddedEmote' }, text: 'Kappa' },
+              ]),
+            ],
+          },
+        },
+      },
+    },
+  ]
+
+  const env0 = boot()
+  assert.equal(env0.api.fixVodEmoteOffsets(batchPayload), true)
+  const edges = batchPayload[1].data.video.comments.edges
+  assert.equal(edges[0].node.message.fragments[1].emote.from, 26)
+  assert.equal(edges[0].node.message.fragments[1].emote.id, 'emotesv2_893;26;36')
+  assert.deepEqual(
+    [1, 3, 5].map(i => edges[1].node.message.fragments[i].emote.from),
+    [9, 17, 25],
+  )
+  assert.deepEqual(
+    [1, 3, 5].map(i => edges[1].node.message.fragments[i].emote.id),
+    ['305147277;9;15', '305147277;17;23', '305147277;25;31'],
+  )
+  assert.equal(edges[2].node.message.fragments[1].emote.from, 5)
+  assert.equal(edges[2].node.message.fragments[1].emote.id, '25;5;9')
+  // Already aligned -> returns false
+  assert.equal(env0.api.fixVodEmoteOffsets(batchPayload), false)
+
+  const asciiSingle = {
+    data: {
+      video: {
+        id: '2940219955',
+        comments: {
+          edges: [
+            makeComment([
+              { emote: null, text: 'hi ' },
+              { emote: { id: '25;3;7', emoteID: '25', from: 3, __typename: 'EmbeddedEmote' }, text: 'Kappa' },
+            ]),
+          ],
+        },
+      },
+    },
+  }
+  assert.equal(env0.api.fixVodEmoteOffsets(asciiSingle), false)
+  env0.api.unmount()
+
+  // 2. End-to-end document-start deferral + fetch interception behavior
+  const rawGql = [{
+    data: {
+      video: {
+        id: '2940219955',
+        comments: {
+          edges: [
+            makeComment([
+              { emote: null, text: '中文前綴 ' },
+              { emote: { id: '99;13;18', emoteID: '99', from: 13, __typename: 'EmbeddedEmote' }, text: 'shaxy1' },
+            ]),
+          ],
+        },
+      },
+    },
+  }]
+  const asciiGql = [{
+    data: {
+      video: {
+        id: '2940219955',
+        comments: {
+          edges: [
+            makeComment([
+              { emote: null, text: 'ok ' },
+              { emote: { id: '99;3;8', emoteID: '99', from: 3, __typename: 'EmbeddedEmote' }, text: 'shaxy1' },
+            ]),
+          ],
+        },
+      },
+    },
+  }]
+
+  const passthroughResponses = new Map()
+  const makeResp = (bodyText, { status = 200, headers = { 'content-type': 'application/json', 'content-length': '999', 'content-encoding': 'zstd' }, url = 'https://gql.twitch.tv/gql#origin=twilight' } = {}) => {
+    const res = new Response(bodyText, { status, headers })
+    Object.defineProperty(res, 'url', { value: url, configurable: true })
+    return res
+  }
+
+  let fetchCalls = 0
+  const baseFetch = async (url, init) => {
+    fetchCalls++
+    if (String(url).startsWith('https://other.example/')) {
+      const r = makeResp(JSON.stringify(rawGql), { url })
+      passthroughResponses.set('other', r)
+      return r
+    }
+    if (init?.body?.includes('SendEvents')) {
+      const r = makeResp(JSON.stringify({ data: { sendSpadeEvents: { statusCode: 204 } } }))
+      passthroughResponses.set('sendEvents', r)
+      return r
+    }
+    if (init?.body?.includes('FailStatus')) {
+      const r = makeResp('{"error":true}', { status: 500 })
+      passthroughResponses.set('failStatus', r)
+      return r
+    }
+    if (init?.body?.includes('NoEmote')) {
+      const r = makeResp(JSON.stringify([{ data: { video: { comments: { edges: [] } } } }]))
+      passthroughResponses.set('noEmote', r)
+      return r
+    }
+    if (init?.body?.includes('AlignedAscii')) {
+      const r = makeResp(JSON.stringify(asciiGql))
+      passthroughResponses.set('ascii', r)
+      return r
+    }
+    if (init?.body?.includes('BadJson')) {
+      const r = makeResp('{EmbeddedEmote broken json')
+      passthroughResponses.set('badJson', r)
+      return r
+    }
+    return makeResp(JSON.stringify(rawGql))
+  }
+
+  // Boot with readyState: 'loading' and no document.body yet
+  const envStart = boot({ fetch: baseFetch, readyState: 'loading', withBody: false })
+  // DOM initialization must wait until DOMContentLoaded & document.body exists
+  assert.equal(envStart.document.head.querySelector('style'), null)
+  assert.equal(envStart.api.mounted, null)
+  envStart.api.installVodEmoteFetchFix()
+
+  // Finish document-start lifecycle on envStart -> initializes style & refresh
+  envStart.document.body = envStart.document.appendChild(new envStart.Element('body'))
+  envStart.document.readyState = 'interactive'
+  envStart.document.listeners.get('DOMContentLoaded')()
+  assert.ok(envStart.document.head.querySelector('style'))
+  envStart.api.unmount()
+
+  // Full fetch wrapper verification via exposed globalThis.fetch on a clean VM
+  const fetchEnvSource = fs.readFileSync(path.join(__dirname, '..', 'TwitchLiveChatTweaks.user.js'), 'utf8')
+  const fetchVm = {
+    document: {
+      readyState: 'loading',
+      body: null,
+      head: null,
+      documentElement: null,
+      addEventListener() {},
+      createElement() { return { style: {}, setAttribute() {}, appendChild() {}, addEventListener() {} } },
+    },
+    location: { pathname: '/videos/2940219955', href: 'https://www.twitch.tv/videos/2940219955' },
+    console, URL, Response, Headers, fetch: baseFetch,
+    setTimeout() {}, clearTimeout() {}, setInterval() {},
+    requestAnimationFrame() {}, cancelAnimationFrame() {},
+    MutationObserver: class { observe() {}; disconnect() {} },
+    localStorage: { getItem: () => null, setItem() {} },
+  }
+  fetchVm.window = fetchVm
+  vm.createContext(fetchVm)
+  vm.runInContext(fetchEnvSource.replace(/\}\)\(\)\s*$/, 'globalThis.__testFix = installVodEmoteFetchFix; })()'), fetchVm)
+  const firstWrapper = fetchVm.fetch
+  assert.notEqual(firstWrapper, baseFetch)
+  fetchVm.__testFix()
+  assert.equal(fetchVm.fetch, firstWrapper)
+
+  // Patched GQL VideoCommentsByOffsetOrCursor response
+  const fixedResp = await fetchVm.fetch('https://gql.twitch.tv/gql#origin=twilight', {
+    method: 'POST',
+    body: JSON.stringify([{ operationName: 'VideoCommentsByOffsetOrCursor', variables: { videoID: '2940219955' } }]),
+  })
+  assert.equal(fixedResp.status, 200)
+  assert.equal(fixedResp.url, 'https://gql.twitch.tv/gql#origin=twilight')
+  assert.equal(fixedResp.headers.get('content-length'), null)
+  assert.equal(fixedResp.headers.get('content-encoding'), null)
+  assert.equal(fixedResp.headers.get('content-type'), 'application/json')
+  const fixedJson = await fixedResp.json()
+  assert.equal(fixedJson[0].data.video.comments.edges[0].node.message.fragments[1].emote.from, 5)
+  assert.equal(fixedJson[0].data.video.comments.edges[0].node.message.fragments[1].emote.id, '99;5;10')
+
+  // Bypass / no-op paths return exact original Response object untouched
+  assert.equal(await fetchVm.fetch('https://other.example/api', { method: 'POST', body: 'VideoCommentsByOffsetOrCursor' }), passthroughResponses.get('other'))
+  assert.equal(await fetchVm.fetch('https://gql.twitch.tv/gql', { method: 'POST', body: JSON.stringify([{ operationName: 'SendEvents' }]) }), passthroughResponses.get('sendEvents'))
+  assert.equal(await fetchVm.fetch('https://gql.twitch.tv/gql', { method: 'POST', body: 'VideoCommentsByOffsetOrCursor FailStatus' }), passthroughResponses.get('failStatus'))
+  assert.equal(await fetchVm.fetch('https://gql.twitch.tv/gql', { method: 'POST', body: 'VideoCommentsByOffsetOrCursor NoEmote' }), passthroughResponses.get('noEmote'))
+  assert.equal(await fetchVm.fetch('https://gql.twitch.tv/gql', { method: 'POST', body: 'VideoCommentsByOffsetOrCursor AlignedAscii' }), passthroughResponses.get('ascii'))
+  assert.equal(await fetchVm.fetch('https://gql.twitch.tv/gql', { method: 'POST', body: 'VideoCommentsByOffsetOrCursor BadJson' }), passthroughResponses.get('badJson'))
+  assert.ok(fetchCalls >= 7)
 })

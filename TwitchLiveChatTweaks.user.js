@@ -1,13 +1,13 @@
 // ==UserScript==
 // @name        Twitch Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.11.4
+// @version     0.11.5
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
-// @description 依頻道主、管理員、VIP、回覆篩選目標與全域帳號包含／排除名單篩選 Twitch 直播與 VOD 聊天，保留回覆目標引言與最近 1000 則／7 天紀錄，支援跨日分隔、搜尋、自動跟隨與 VOD 時間切換（影片秒數／直播時刻）；分割螢幕時隱藏聊天室上方橫幅與輸入區底部列。
+// @description 依頻道主、管理員、VIP、回覆篩選目標與全域帳號包含／排除名單篩選 Twitch 直播與 VOD 聊天，保留回覆目標引言與最近 1000 則／7 天紀錄，支援跨日分隔、搜尋、自動跟隨與 VOD 時間切換（影片秒數／直播時刻），並修正 VOD 聊天室多位元組字元後的貼圖位移問題；分割螢幕時隱藏聊天室上方橫幅與輸入區底部列。
 // @author      Derek
 // @match       *://www.twitch.tv/*
-// @run-at      document-idle
+// @run-at      document-start
 // @grant       none
 // @noframes
 // ==/UserScript==
@@ -52,6 +52,101 @@
   let globalSettings = defaultSettings()
   let mounted = null
   let refreshTimer = 0
+
+  const countCodePoints = text => {
+    if (typeof text !== 'string' || !text) return 0
+    let count = 0
+    for (const _ of text) count++
+    return count
+  }
+
+  // Twitch VOD GQL returns UTF-8 byte offsets in emote.from while its client
+  // tokenizes messages by Unicode code point, causing CJK/emoji text to drop emotes.
+  const fixVodEmoteOffsets = payload => {
+    const entries = Array.isArray(payload) ? payload : (payload && typeof payload === 'object' ? [payload] : [])
+    let changed = false
+    for (const entry of entries) {
+      const edges = entry?.data?.video?.comments?.edges
+      if (!Array.isArray(edges)) continue
+      for (const edge of edges) {
+        const fragments = edge?.node?.message?.fragments
+        if (!Array.isArray(fragments)) continue
+        let cpOffset = 0
+        for (const fragment of fragments) {
+          const text = typeof fragment?.text === 'string' ? fragment.text : ''
+          const cpLen = countCodePoints(text)
+          const emote = fragment?.emote
+          if (emote && typeof emote === 'object' && emote.emoteID) {
+            const leadWs = countCodePoints(text.match(/^\s*/)[0])
+            const trimmedLen = countCodePoints(text.trim())
+            const expectedFrom = cpOffset + leadWs
+            const expectedTo = expectedFrom + Math.max(0, trimmedLen - 1)
+            if (emote.from !== expectedFrom) {
+              emote.from = expectedFrom
+              changed = true
+            }
+            if (typeof emote.id === 'string' && emote.id.startsWith(`${emote.emoteID};`)) {
+              const expectedId = `${emote.emoteID};${expectedFrom};${expectedTo}`
+              if (emote.id !== expectedId) {
+                emote.id = expectedId
+                changed = true
+              }
+            }
+          }
+          cpOffset += cpLen
+        }
+      }
+    }
+    return changed
+  }
+
+  const installVodEmoteFetchFix = () => {
+    const fetchHost = typeof window !== 'undefined' && typeof window.fetch === 'function'
+      ? window
+      : (typeof globalThis !== 'undefined' && typeof globalThis.fetch === 'function' ? globalThis : null)
+    if (!fetchHost || fetchHost.fetch.__ttcVodEmoteFix) return
+    const origFetch = fetchHost.fetch
+    const ttcVodEmoteFetch = function (...args) {
+      const input = args[0]
+      const reqUrl = typeof input === 'string' ? input : (input?.href || input?.url || '')
+      if (!/^https:\/\/gql\.twitch\.tv\/gql(?:$|[?#])/i.test(reqUrl)) {
+        return origFetch.apply(this, args)
+      }
+      const reqBody = args[1] && typeof args[1].body === 'string' ? args[1].body : null
+      if (reqBody !== null && !reqBody.includes('VideoCommentsByOffsetOrCursor')) {
+        return origFetch.apply(this, args)
+      }
+      return Promise.resolve(origFetch.apply(this, args)).then(async response => {
+        if (!response || !response.ok || typeof response.clone !== 'function') return response
+        try {
+          const rawText = await response.clone().text()
+          if (!rawText.includes('EmbeddedEmote')) return response
+          const payload = JSON.parse(rawText)
+          if (!fixVodEmoteOffsets(payload) || typeof Response !== 'function') return response
+          const headers = typeof Headers === 'function' ? new Headers(response.headers) : response.headers
+          if (typeof headers?.delete === 'function') {
+            headers.delete('content-length')
+            headers.delete('content-encoding')
+          }
+          const patched = new Response(JSON.stringify(payload), {
+            status: response.status,
+            statusText: response.statusText,
+            headers,
+          })
+          if (response.url) {
+            try { Object.defineProperty(patched, 'url', { value: response.url, configurable: true }) } catch (_) {}
+          }
+          return patched
+        } catch (_) {
+          return response
+        }
+      })
+    }
+    ttcVodEmoteFetch.__ttcVodEmoteFix = true
+    try { fetchHost.fetch = ttcVodEmoteFetch } catch (_) {}
+  }
+
+  installVodEmoteFetchFix()
 
   const $ = (selector, root = document) => root.querySelector(selector)
   const $$ = (selector, root = document) => [...root.querySelectorAll(selector)]
@@ -2762,139 +2857,151 @@
     if (history.enabled) renderMessages(mounted, true)
   }
 
-  const style = document.createElement('style')
-  style.textContent = `
-    .ttc-toggle { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 32px; width: 32px; height: 32px; padding: 0; border: 0; border-radius: 50%; color: inherit; background: transparent; cursor: pointer; }
-    .ttc-vod-header { position: relative; box-sizing: border-box; padding-inline: 48px; }
-    .ttc-vod-header > .ttc-toggle { position: absolute; inset-inline-end: 8px; inset-block-start: 50%; transform: translateY(-50%); }
-    .ttc-toggle:not(:last-child) { margin-right: 8px; }
-    .ttc-toggle:hover { background: var(--color-background-button-text-hover, #ffffff22); }
-    .ttc-toggle:active { background: var(--color-background-button-text-active, #ffffff33); }
-    .ttc-toggle[aria-pressed="true"] { color: var(--color-text-link, #bf94ff); background: var(--color-background-button-text-hover, #ffffff22); }
-    .ttc-toggle:focus-visible, .ttc-panel button:focus-visible, .ttc-panel input:focus-visible { outline: 2px solid #9147ff; outline-offset: -2px; }
-    .ttc-visually-hidden:where(:not(:focus-within, :active)) { position: absolute; clip-path: inset(50%); overflow: hidden; width: 1px; height: 1px; margin: -1px; padding: 0; border: 0; white-space: nowrap; }
-    .ttc-tooltip { position: fixed; inset: auto; z-index: 2147483647; display: none; overflow: visible; box-sizing: border-box; width: max-content; min-height: 27.6px; margin: 0; padding: 4px 8px; border: 0; border-radius: 4px; color: var(--color-text-tooltip, #0e0e10); background: var(--color-background-tooltip, #ffffff); font-family: Inter, "Noto Sans Arabic", Roobert, "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 14px; font-weight: 600; line-height: 19.6px; overflow-wrap: break-word; pointer-events: none; }
-    .ttc-tooltip::after { position: absolute; top: 50%; right: -4px; width: 8px; height: 8px; background: inherit; content: ''; transform: translateY(-50%) rotate(45deg); }
-    .ttc-tooltip[data-placement="bottom"]::after { top: -4px; right: auto; left: 50%; transform: translateX(-50%) rotate(45deg); }
-    .ttc-tooltip[data-visible="true"] { display: inline-block; pointer-events: auto; }
-    .ttc-host { position: relative; }
-    .ttc-active > .ttc-source, .ttc-active.ttc-source { visibility: hidden; pointer-events: none; }
-    .ttc-panel { position: absolute; inset: 0; z-index: 2147483647; visibility: visible; pointer-events: auto; display: flex; flex-direction: column; box-sizing: border-box; min-height: 0; max-width: none; max-height: none; margin: 0; padding: 0; border: 0; color: var(--color-text-base, #efeff1); background: var(--color-background-base, #18181b); font-size: 13px; }
-    .ttc-panel [hidden]:not([hidden="until-found" i]), .ttc-panel[hidden] { display: none !important; }
-    .ttc-toolbar { flex: 0 0 auto; padding: 10px; border-bottom: 1px solid var(--color-border-base, #ffffff22); }
-    .ttc-options { display: flex; align-items: center; gap: 6px; flex-wrap: nowrap; font-size: 12px; }
-    .ttc-message-search { display: block; margin-top: 8px; }
-    .ttc-message-search input[type="search"] { box-sizing: border-box; width: 100%; min-width: 0; height: 30px; padding: 5px 8px; border: 1px solid var(--color-border-base, #ffffff44); border-radius: 4px; color: inherit; background: var(--color-background-input, #ffffff11); font: inherit; }
-    .ttc-managing .ttc-message-search { display: none; }
-    .ttc-roles { display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap; flex-shrink: 0; margin-bottom: 12px; }
-    .ttc-role { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
-    .ttc-role label, .ttc-roles input { cursor: pointer; }
-    .ttc-roles input { width: 13px; height: 13px; margin: 0; accent-color: #9147ff; }
-    .ttc-roles input:focus-visible { outline-offset: 2px; }
-    .ttc-count { margin-left: auto; flex-shrink: 0; white-space: nowrap; color: var(--color-text-alt-2, #adadb8); }
-    .ttc-users { display: flex; align-items: center; gap: 6px; }
-    .ttc-users label { white-space: nowrap; }
-    .ttc-users input { display: block; box-sizing: border-box; flex: 1; min-width: 0; width: 100%; padding: 5px 8px; border: 1px solid var(--color-border-base, #ffffff44); border-radius: 4px; color: inherit; background: var(--color-background-input, #ffffff11); font-size: 12px; }
-    .ttc-toolbar button, .ttc-latest { padding: 6px 10px; border: 0; border-radius: 4px; color: #fff; background: #9147ff; cursor: pointer; }
-    .ttc-users input, .ttc-users button[type="submit"] { box-sizing: border-box; height: 30px; font: inherit; }
-    .ttc-users button[type="submit"] { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; padding: 0 10px; border: 1px solid transparent; border-radius: 4px; font-weight: 600; line-height: 1; }
-    .ttc-empty { padding: 16px 12px; color: var(--color-text-alt-2, #adadb8); }
-    .ttc-history-status { margin: 0; padding: 8px 12px; color: var(--color-text-alt-2, #adadb8); font-size: 12px; }
-    .ttc-list, .ttc-target-list, .ttc-managing > .ttc-toolbar { --ttc-scrollbar-thumb: rgba(255, 255, 255, 0.45); --ttc-scrollbar-track: transparent; scrollbar-color: var(--ttc-scrollbar-thumb) var(--ttc-scrollbar-track); scrollbar-width: auto; overscroll-behavior: contain; }
-    @media (prefers-contrast: more) {
-      .ttc-list, .ttc-target-list, .ttc-managing > .ttc-toolbar { --ttc-scrollbar-thumb: #ffffff; --ttc-scrollbar-track: #000000; }
-      .ttc-toggle:focus-visible, .ttc-panel button:focus-visible, .ttc-panel input:focus-visible, .ttc-replies-toggle:focus-visible { outline: 2px solid currentColor; }
-    }
-    .ttc-list { flex: 1; min-height: 0; overflow: auto; padding: 6px 0; }
-    .ttc-message { padding: 5px 10px; overflow-wrap: anywhere; line-height: 1.6; content-visibility: auto; contain-intrinsic-size: auto none auto 30px; }
-    .ttc-message.ttc-has-reply { contain-intrinsic-size: auto none auto 52px; }
-    .ttc-thread, .ttc-reply-group { padding: 5px 10px; content-visibility: auto; contain-intrinsic-size: auto none auto 30px; }
-    .ttc-thread:hover, .ttc-reply-group:hover { background: var(--color-background-button-text-hover, #ffffff11); }
-    .ttc-thread-head { overflow-wrap: anywhere; line-height: 1.6; }
-    .ttc-thread-head > .ttc-message { display: inline; padding: 0; content-visibility: visible; contain-intrinsic-size: auto; }
-    .ttc-thread-head > .ttc-message:hover { background: transparent; }
-    .ttc-thread-head > .ttc-message > :last-child:not(.ttc-reply) { display: inline; }
-    .ttc-reply { display: flex; align-items: baseline; gap: 4px; margin-bottom: 2px; padding-left: 6px; border-left: 2px solid var(--color-border-base, #ffffff33); color: var(--color-text-alt-2, #adadb8); font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; }
-    .ttc-reply::before { content: '↩'; content: '↩' / ''; flex: 0 0 auto; opacity: 0.85; }
-    .ttc-reply-text { flex: 1; min-inline-size: 0; }
-    .ttc-reply-author { font-weight: 600; }
-    .ttc-reply-deleted { font-style: italic; }
-    .ttc-orphan-tag { display: inline-block; margin-right: 6px; padding: 0 4px; border-radius: 3px; color: var(--color-text-alt-2, #adadb8); background: var(--color-background-button-text-hover, #ffffff18); font-size: 10px; line-height: 1.4; vertical-align: baseline; }
-    .ttc-replies-toggle { display: inline-flex; align-items: center; gap: 3px; margin-left: 6px; padding: 1px 5px; border: 0; border-radius: 4px; color: var(--color-text-link, #bf94ff); background: transparent; font: inherit; font-size: 12px; font-weight: 600; line-height: 1.4; white-space: nowrap; vertical-align: baseline; cursor: pointer; user-select: none; }
-    .ttc-replies-toggle:hover { background: var(--color-background-button-text-hover, #ffffff18); }
-    .ttc-replies-toggle:focus-visible { outline: 2px solid #9147ff; outline-offset: 1px; }
-    .ttc-replies-toggle::before { content: '▸'; content: '▸' / ''; display: inline-block; flex-shrink: 0; font-size: 11px; line-height: 1; }
-    .ttc-replies-toggle[aria-expanded="true"]::before { transform: rotate(90deg); }
-    @media (prefers-reduced-motion: no-preference) {
-      .ttc-replies-toggle::before { transition: transform 0.15s ease; }
-    }
-    .ttc-replies-list { margin: 4px 0 2px 12px; padding-left: 8px; border-left: 2px solid var(--color-border-base, #ffffff33); }
-    .ttc-replies-list > .ttc-message { padding: 3px 6px; }
-    .ttc-replies-list > .ttc-message.ttc-has-reply { contain-intrinsic-size: auto none auto 30px; }
-    .ttc-replies-list > .ttc-message > .ttc-reply { display: none; }
-    .ttc-message[data-date]::before, .ttc-thread[data-date]::before, .ttc-reply-group[data-date]::before { content: attr(data-date); display: block; margin: 2px 0 6px; padding: 2px 0 4px; border-bottom: 1px solid var(--color-border-base, #ffffff22); color: var(--color-text-alt-2, #adadb8); font-size: 11px; font-weight: 600; text-align: center; letter-spacing: 0.04em; }
-    .ttc-message:hover { background: var(--color-background-button-text-hover, #ffffff11); }
-    .ttc-time { margin-right: 6px; color: var(--color-text-alt-2, #adadb8); font-size: 10px; }
-    .ttc-message > img { width: 18px; height: 18px; margin-right: 3px; vertical-align: middle; }
-    .ttc-message .chat-image { max-height: 28px; vertical-align: middle; }
-    .ttc-latest { position: absolute; bottom: 8px; align-self: center; }
-    .ttc-managing > .ttc-toolbar { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow-y: auto; }
-    .ttc-managing > .ttc-empty, .ttc-managing > .ttc-list, .ttc-managing > .ttc-latest { display: none !important; }
-    .ttc-options { flex-shrink: 0; }
-    .ttc-panel .ttc-target-summary { display: inline-flex; align-items: center; gap: 3px; flex-shrink: 0; padding: 0; color: var(--color-text-link, #bf94ff); background: transparent; white-space: nowrap; font: inherit; cursor: pointer; }
-    .ttc-target-summary::before { content: '▸'; content: '▸' / ''; }
-    .ttc-target-summary[aria-expanded="true"]::before { content: '▾'; content: '▾' / ''; }
-    .ttc-targets { margin-top: 12px; flex: 1; min-height: 0; display: flex; flex-direction: column; }
-    .ttc-targets > :not(.ttc-target-list) { flex-shrink: 0; }
-    .ttc-target-modes { display: flex; gap: 6px; margin-bottom: 8px; }
-    .ttc-target-modes button { flex: 1; padding: 4px 8px; color: inherit; background: var(--color-background-button-text-hover, #ffffff22); font-size: 12px; }
-    .ttc-target-modes button[aria-pressed="true"] { color: #fff; background: #9147ff; }
-    .ttc-vod-time-modes { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; }
-    .ttc-vod-time-modes button { padding: 2px 6px; color: inherit; background: var(--color-background-button-text-hover, #ffffff22); font-size: 11px; line-height: 1.4; white-space: nowrap; }
-    .ttc-vod-time-modes button[aria-pressed="true"] { color: #fff; background: #9147ff; }
-    .ttc-target-search { display: flex; align-items: center; gap: 6px; margin-top: 8px; white-space: nowrap; }
-    .ttc-target-search input { display: block; box-sizing: border-box; flex: 1; min-width: 0; width: 100%; padding: 5px 8px; border: 1px solid var(--color-border-base, #ffffff44); border-radius: 4px; color: inherit; background: var(--color-background-input, #ffffff11); font-size: 12px; }
-    .ttc-target-list { list-style: none; padding: 0; margin: 6px 0 0; flex: 1; min-height: 40px; overflow-y: auto; }
-    .ttc-target-list li { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 3px 0; }
-    .ttc-target-list span { overflow-wrap: anywhere; }
-    .ttc-target-list button { flex-shrink: 0; padding: 3px 8px; background: var(--color-background-button-text-hover, #ffffff22); color: inherit; font-size: 11px; }
-    .ttc-target-empty, .ttc-target-status { margin: 6px 0 0; font-size: 11px; color: var(--color-text-alt-2, #adadb8); }
-    .ttc-target-status:empty { display: none; }
-    .right-column--below .chat-room__content > :has(~ [class*="chat-list--"]),
-    .right-column--below .chat-room__notifications,
-    .right-column--below .chat-room__overlay,
-    .right-column--below :is(.chat-input__buttons-container, [data-test-selector="chat-input-buttons-container"]) { display: none !important; }
-    .right-column--below .chat-scrollable-area__message-container { padding-top: 0 !important; }
-  `
-  ;(document.head || document.documentElement).appendChild(style)
-  window.addEventListener('storage', event => {
-    if (event.key === STORAGE_KEY || event.key === null) syncSettings()
-  })
-  window.addEventListener('resize', schedulePanelPosition)
-  window.addEventListener('scroll', schedulePanelPosition, true)
-  document.addEventListener('fullscreenchange', schedulePanelPosition)
-  const observer = new MutationObserver(mutations => {
-    if (mounted?.button.isConnected && mounted.panel.isConnected &&
-      mounted.scroller.isConnected && getChannel() === mounted.history.channel) return
-    if (mutations.some(mutation => {
-      const element = mutation.target.nodeType === 1 ? mutation.target : mutation.target.parentElement
-      return !element?.closest('.ttc-panel, .ttc-toggle, .ttc-tooltip, [data-a-target="chat-scroller"], .video-chat__message-list-wrapper')
-    })) scheduleRefresh()
-  })
-  observer.observe(document.body, { childList: true, subtree: true })
-  window.addEventListener('popstate', scheduleRefresh)
-  document.addEventListener('visibilitychange', () => {
-    handleMessageVisibility()
-    if (!document.hidden) pruneHistories()
-  })
-  window.addEventListener('pagehide', () => { for (const history of histories.values()) flushHistory(history).catch(() => {}) })
-  setInterval(pruneHistories, 60000)
-  // Twitch's SPA can reuse the same chat nodes on pushState without adding DOM.
-  let lastPath = location.pathname
-  setInterval(() => {
-    if (lastPath === location.pathname) return
-    lastPath = location.pathname
-    scheduleRefresh()
-  }, 1000)
-  refresh()
+  let domInitialized = false
+  const initDom = () => {
+    if (domInitialized || !document.body) return
+    domInitialized = true
+    const style = document.createElement('style')
+    style.textContent = `
+      .ttc-toggle { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 32px; width: 32px; height: 32px; padding: 0; border: 0; border-radius: 50%; color: inherit; background: transparent; cursor: pointer; }
+      .ttc-vod-header { position: relative; box-sizing: border-box; padding-inline: 48px; }
+      .ttc-vod-header > .ttc-toggle { position: absolute; inset-inline-end: 8px; inset-block-start: 50%; transform: translateY(-50%); }
+      .ttc-toggle:not(:last-child) { margin-right: 8px; }
+      .ttc-toggle:hover { background: var(--color-background-button-text-hover, #ffffff22); }
+      .ttc-toggle:active { background: var(--color-background-button-text-active, #ffffff33); }
+      .ttc-toggle[aria-pressed="true"] { color: var(--color-text-link, #bf94ff); background: var(--color-background-button-text-hover, #ffffff22); }
+      .ttc-toggle:focus-visible, .ttc-panel button:focus-visible, .ttc-panel input:focus-visible { outline: 2px solid #9147ff; outline-offset: -2px; }
+      .ttc-visually-hidden:where(:not(:focus-within, :active)) { position: absolute; clip-path: inset(50%); overflow: hidden; width: 1px; height: 1px; margin: -1px; padding: 0; border: 0; white-space: nowrap; }
+      .ttc-tooltip { position: fixed; inset: auto; z-index: 2147483647; display: none; overflow: visible; box-sizing: border-box; width: max-content; min-height: 27.6px; margin: 0; padding: 4px 8px; border: 0; border-radius: 4px; color: var(--color-text-tooltip, #0e0e10); background: var(--color-background-tooltip, #ffffff); font-family: Inter, "Noto Sans Arabic", Roobert, "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 14px; font-weight: 600; line-height: 19.6px; overflow-wrap: break-word; pointer-events: none; }
+      .ttc-tooltip::after { position: absolute; top: 50%; right: -4px; width: 8px; height: 8px; background: inherit; content: ''; transform: translateY(-50%) rotate(45deg); }
+      .ttc-tooltip[data-placement="bottom"]::after { top: -4px; right: auto; left: 50%; transform: translateX(-50%) rotate(45deg); }
+      .ttc-tooltip[data-visible="true"] { display: inline-block; pointer-events: auto; }
+      .ttc-host { position: relative; }
+      .ttc-active > .ttc-source, .ttc-active.ttc-source { visibility: hidden; pointer-events: none; }
+      .ttc-panel { position: absolute; inset: 0; z-index: 2147483647; visibility: visible; pointer-events: auto; display: flex; flex-direction: column; box-sizing: border-box; min-height: 0; max-width: none; max-height: none; margin: 0; padding: 0; border: 0; color: var(--color-text-base, #efeff1); background: var(--color-background-base, #18181b); font-size: 13px; }
+      .ttc-panel [hidden]:not([hidden="until-found" i]), .ttc-panel[hidden] { display: none !important; }
+      .ttc-toolbar { flex: 0 0 auto; padding: 10px; border-bottom: 1px solid var(--color-border-base, #ffffff22); }
+      .ttc-options { display: flex; align-items: center; gap: 6px; flex-wrap: nowrap; font-size: 12px; }
+      .ttc-message-search { display: block; margin-top: 8px; }
+      .ttc-message-search input[type="search"] { box-sizing: border-box; width: 100%; min-width: 0; height: 30px; padding: 5px 8px; border: 1px solid var(--color-border-base, #ffffff44); border-radius: 4px; color: inherit; background: var(--color-background-input, #ffffff11); font: inherit; }
+      .ttc-managing .ttc-message-search { display: none; }
+      .ttc-roles { display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap; flex-shrink: 0; margin-bottom: 12px; }
+      .ttc-role { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+      .ttc-role label, .ttc-roles input { cursor: pointer; }
+      .ttc-roles input { width: 13px; height: 13px; margin: 0; accent-color: #9147ff; }
+      .ttc-roles input:focus-visible { outline-offset: 2px; }
+      .ttc-count { margin-left: auto; flex-shrink: 0; white-space: nowrap; color: var(--color-text-alt-2, #adadb8); }
+      .ttc-users { display: flex; align-items: center; gap: 6px; }
+      .ttc-users label { white-space: nowrap; }
+      .ttc-users input { display: block; box-sizing: border-box; flex: 1; min-width: 0; width: 100%; padding: 5px 8px; border: 1px solid var(--color-border-base, #ffffff44); border-radius: 4px; color: inherit; background: var(--color-background-input, #ffffff11); font-size: 12px; }
+      .ttc-toolbar button, .ttc-latest { padding: 6px 10px; border: 0; border-radius: 4px; color: #fff; background: #9147ff; cursor: pointer; }
+      .ttc-users input, .ttc-users button[type="submit"] { box-sizing: border-box; height: 30px; font: inherit; }
+      .ttc-users button[type="submit"] { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; padding: 0 10px; border: 1px solid transparent; border-radius: 4px; font-weight: 600; line-height: 1; }
+      .ttc-empty { padding: 16px 12px; color: var(--color-text-alt-2, #adadb8); }
+      .ttc-history-status { margin: 0; padding: 8px 12px; color: var(--color-text-alt-2, #adadb8); font-size: 12px; }
+      .ttc-list, .ttc-target-list, .ttc-managing > .ttc-toolbar { --ttc-scrollbar-thumb: rgba(255, 255, 255, 0.45); --ttc-scrollbar-track: transparent; scrollbar-color: var(--ttc-scrollbar-thumb) var(--ttc-scrollbar-track); scrollbar-width: auto; overscroll-behavior: contain; }
+      @media (prefers-contrast: more) {
+        .ttc-list, .ttc-target-list, .ttc-managing > .ttc-toolbar { --ttc-scrollbar-thumb: #ffffff; --ttc-scrollbar-track: #000000; }
+        .ttc-toggle:focus-visible, .ttc-panel button:focus-visible, .ttc-panel input:focus-visible, .ttc-replies-toggle:focus-visible { outline: 2px solid currentColor; }
+      }
+      .ttc-list { flex: 1; min-height: 0; overflow: auto; padding: 6px 0; }
+      .ttc-message { padding: 5px 10px; overflow-wrap: anywhere; line-height: 1.6; content-visibility: auto; contain-intrinsic-size: auto none auto 30px; }
+      .ttc-message.ttc-has-reply { contain-intrinsic-size: auto none auto 52px; }
+      .ttc-thread, .ttc-reply-group { padding: 5px 10px; content-visibility: auto; contain-intrinsic-size: auto none auto 30px; }
+      .ttc-thread:hover, .ttc-reply-group:hover { background: var(--color-background-button-text-hover, #ffffff11); }
+      .ttc-thread-head { overflow-wrap: anywhere; line-height: 1.6; }
+      .ttc-thread-head > .ttc-message { display: inline; padding: 0; content-visibility: visible; contain-intrinsic-size: auto; }
+      .ttc-thread-head > .ttc-message:hover { background: transparent; }
+      .ttc-thread-head > .ttc-message > :last-child:not(.ttc-reply) { display: inline; }
+      .ttc-reply { display: flex; align-items: baseline; gap: 4px; margin-bottom: 2px; padding-left: 6px; border-left: 2px solid var(--color-border-base, #ffffff33); color: var(--color-text-alt-2, #adadb8); font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; }
+      .ttc-reply::before { content: '↩'; content: '↩' / ''; flex: 0 0 auto; opacity: 0.85; }
+      .ttc-reply-text { flex: 1; min-inline-size: 0; }
+      .ttc-reply-author { font-weight: 600; }
+      .ttc-reply-deleted { font-style: italic; }
+      .ttc-orphan-tag { display: inline-block; margin-right: 6px; padding: 0 4px; border-radius: 3px; color: var(--color-text-alt-2, #adadb8); background: var(--color-background-button-text-hover, #ffffff18); font-size: 10px; line-height: 1.4; vertical-align: baseline; }
+      .ttc-replies-toggle { display: inline-flex; align-items: center; gap: 3px; margin-left: 6px; padding: 1px 5px; border: 0; border-radius: 4px; color: var(--color-text-link, #bf94ff); background: transparent; font: inherit; font-size: 12px; font-weight: 600; line-height: 1.4; white-space: nowrap; vertical-align: baseline; cursor: pointer; user-select: none; }
+      .ttc-replies-toggle:hover { background: var(--color-background-button-text-hover, #ffffff18); }
+      .ttc-replies-toggle:focus-visible { outline: 2px solid #9147ff; outline-offset: 1px; }
+      .ttc-replies-toggle::before { content: '▸'; content: '▸' / ''; display: inline-block; flex-shrink: 0; font-size: 11px; line-height: 1; }
+      .ttc-replies-toggle[aria-expanded="true"]::before { transform: rotate(90deg); }
+      @media (prefers-reduced-motion: no-preference) {
+        .ttc-replies-toggle::before { transition: transform 0.15s ease; }
+      }
+      .ttc-replies-list { margin: 4px 0 2px 12px; padding-left: 8px; border-left: 2px solid var(--color-border-base, #ffffff33); }
+      .ttc-replies-list > .ttc-message { padding: 3px 6px; }
+      .ttc-replies-list > .ttc-message.ttc-has-reply { contain-intrinsic-size: auto none auto 30px; }
+      .ttc-replies-list > .ttc-message > .ttc-reply { display: none; }
+      .ttc-message[data-date]::before, .ttc-thread[data-date]::before, .ttc-reply-group[data-date]::before { content: attr(data-date); display: block; margin: 2px 0 6px; padding: 2px 0 4px; border-bottom: 1px solid var(--color-border-base, #ffffff22); color: var(--color-text-alt-2, #adadb8); font-size: 11px; font-weight: 600; text-align: center; letter-spacing: 0.04em; }
+      .ttc-message:hover { background: var(--color-background-button-text-hover, #ffffff11); }
+      .ttc-time { margin-right: 6px; color: var(--color-text-alt-2, #adadb8); font-size: 10px; }
+      .ttc-message > img { width: 18px; height: 18px; margin-right: 3px; vertical-align: middle; }
+      .ttc-message .chat-image { max-height: 28px; vertical-align: middle; }
+      .ttc-latest { position: absolute; bottom: 8px; align-self: center; }
+      .ttc-managing > .ttc-toolbar { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow-y: auto; }
+      .ttc-managing > .ttc-empty, .ttc-managing > .ttc-list, .ttc-managing > .ttc-latest { display: none !important; }
+      .ttc-options { flex-shrink: 0; }
+      .ttc-panel .ttc-target-summary { display: inline-flex; align-items: center; gap: 3px; flex-shrink: 0; padding: 0; color: var(--color-text-link, #bf94ff); background: transparent; white-space: nowrap; font: inherit; cursor: pointer; }
+      .ttc-target-summary::before { content: '▸'; content: '▸' / ''; }
+      .ttc-target-summary[aria-expanded="true"]::before { content: '▾'; content: '▾' / ''; }
+      .ttc-targets { margin-top: 12px; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+      .ttc-targets > :not(.ttc-target-list) { flex-shrink: 0; }
+      .ttc-target-modes { display: flex; gap: 6px; margin-bottom: 8px; }
+      .ttc-target-modes button { flex: 1; padding: 4px 8px; color: inherit; background: var(--color-background-button-text-hover, #ffffff22); font-size: 12px; }
+      .ttc-target-modes button[aria-pressed="true"] { color: #fff; background: #9147ff; }
+      .ttc-vod-time-modes { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; }
+      .ttc-vod-time-modes button { padding: 2px 6px; color: inherit; background: var(--color-background-button-text-hover, #ffffff22); font-size: 11px; line-height: 1.4; white-space: nowrap; }
+      .ttc-vod-time-modes button[aria-pressed="true"] { color: #fff; background: #9147ff; }
+      .ttc-target-search { display: flex; align-items: center; gap: 6px; margin-top: 8px; white-space: nowrap; }
+      .ttc-target-search input { display: block; box-sizing: border-box; flex: 1; min-width: 0; width: 100%; padding: 5px 8px; border: 1px solid var(--color-border-base, #ffffff44); border-radius: 4px; color: inherit; background: var(--color-background-input, #ffffff11); font-size: 12px; }
+      .ttc-target-list { list-style: none; padding: 0; margin: 6px 0 0; flex: 1; min-height: 40px; overflow-y: auto; }
+      .ttc-target-list li { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 3px 0; }
+      .ttc-target-list span { overflow-wrap: anywhere; }
+      .ttc-target-list button { flex-shrink: 0; padding: 3px 8px; background: var(--color-background-button-text-hover, #ffffff22); color: inherit; font-size: 11px; }
+      .ttc-target-empty, .ttc-target-status { margin: 6px 0 0; font-size: 11px; color: var(--color-text-alt-2, #adadb8); }
+      .ttc-target-status:empty { display: none; }
+      .right-column--below .chat-room__content > :has(~ [class*="chat-list--"]),
+      .right-column--below .chat-room__notifications,
+      .right-column--below .chat-room__overlay,
+      .right-column--below :is(.chat-input__buttons-container, [data-test-selector="chat-input-buttons-container"]) { display: none !important; }
+      .right-column--below .chat-scrollable-area__message-container { padding-top: 0 !important; }
+    `
+    ;(document.head || document.documentElement).appendChild(style)
+    window.addEventListener('storage', event => {
+      if (event.key === STORAGE_KEY || event.key === null) syncSettings()
+    })
+    window.addEventListener('resize', schedulePanelPosition)
+    window.addEventListener('scroll', schedulePanelPosition, true)
+    document.addEventListener('fullscreenchange', schedulePanelPosition)
+    const observer = new MutationObserver(mutations => {
+      if (mounted?.button.isConnected && mounted.panel.isConnected &&
+        mounted.scroller.isConnected && getChannel() === mounted.history.channel) return
+      if (mutations.some(mutation => {
+        const element = mutation.target.nodeType === 1 ? mutation.target : mutation.target.parentElement
+        return !element?.closest('.ttc-panel, .ttc-toggle, .ttc-tooltip, [data-a-target="chat-scroller"], .video-chat__message-list-wrapper')
+      })) scheduleRefresh()
+    })
+    observer.observe(document.body, { childList: true, subtree: true })
+    window.addEventListener('popstate', scheduleRefresh)
+    document.addEventListener('visibilitychange', () => {
+      handleMessageVisibility()
+      if (!document.hidden) pruneHistories()
+    })
+    window.addEventListener('pagehide', () => { for (const history of histories.values()) flushHistory(history).catch(() => {}) })
+    setInterval(pruneHistories, 60000)
+    // Twitch's SPA can reuse the same chat nodes on pushState without adding DOM.
+    let lastPath = location.pathname
+    setInterval(() => {
+      if (lastPath === location.pathname) return
+      lastPath = location.pathname
+      scheduleRefresh()
+    }, 1000)
+    refresh()
+  }
+
+  if (document.readyState === 'loading' || !document.body) {
+    document.addEventListener?.('DOMContentLoaded', initDom, { once: true })
+    window.addEventListener?.('load', initDom, { once: true })
+  } else {
+    initDom()
+  }
 })()
