@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name        Twitch Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.11.5
+// @version     0.11.6
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
-// @description 依頻道主、管理員、VIP、回覆篩選目標與全域帳號包含／排除名單篩選 Twitch 直播與 VOD 聊天，保留回覆目標引言與最近 1000 則／7 天紀錄，支援跨日分隔、搜尋、自動跟隨與 VOD 時間切換（影片秒數／直播時刻），並修正 VOD 聊天室多位元組字元後的貼圖位移問題；分割螢幕時隱藏聊天室上方橫幅與輸入區底部列。
+// @description 依頻道主、管理員、VIP、回覆篩選目標與全域帳號包含／排除名單篩選 Twitch 直播與 VOD 聊天，保留回覆目標引言與最近 1000 則／7 天紀錄，支援跨日分隔、搜尋、自動跟隨與 VOD 時間切換（影片秒數／直播時刻），修正 VOD 聊天室多位元組字元後的貼圖位移問題，並在原生 VOD 聊天室高亮 @提及篩選目標的留言；分割螢幕時隱藏聊天室上方橫幅與輸入區底部列。
 // @author      Derek
 // @match       *://www.twitch.tv/*
 // @run-at      document-start
@@ -439,18 +439,25 @@
   }
   const rememberUser = (history, user, displayName, { moderator = false, broadcaster = false, vip = false, color = '' } = {}) => {
     const login = normalizeLogin(user)
-    if (!history || !login) return
+    if (!history || !login) return false
+    let changed = false
     if (history.knownRoles) {
       const prev = history.knownRoles.get(login)
       const nextColor = color || prev?.color || ''
-      if (moderator || broadcaster || vip || nextColor) {
+      const nextRole = {
+        moderator: Boolean(moderator),
+        broadcaster: Boolean(broadcaster),
+        vip: Boolean(vip),
+        color: nextColor,
+      }
+      if (nextRole.moderator || nextRole.broadcaster || nextRole.vip || nextColor) {
+        if (Boolean(prev?.moderator) !== nextRole.moderator ||
+          Boolean(prev?.broadcaster) !== nextRole.broadcaster ||
+          Boolean(prev?.vip) !== nextRole.vip) {
+          changed = true
+        }
         history.knownRoles.delete(login)
-        history.knownRoles.set(login, {
-          moderator: Boolean(moderator),
-          broadcaster: Boolean(broadcaster),
-          vip: Boolean(vip),
-          color: nextColor,
-        })
+        history.knownRoles.set(login, nextRole)
         if (history.knownRoles.size > MAX_DISPLAY_NAMES) {
           for (const [key, entry] of history.knownRoles) {
             if (!entry.moderator && !entry.broadcaster && !entry.vip) {
@@ -460,6 +467,7 @@
           }
         }
       } else {
+        if (prev && (prev.moderator || prev.broadcaster || prev.vip)) changed = true
         history.knownRoles.delete(login)
       }
     }
@@ -467,6 +475,7 @@
       const cleanName = stripLoginSuffix(displayName, login)
       const lower = cleanName.toLowerCase()
       if (cleanName && lower !== login) {
+        if (history.displayNames.get(lower) !== login) changed = true
         history.displayNames.delete(lower)
         history.displayNames.set(lower, login)
         if (history.displayNames.size > MAX_DISPLAY_NAMES) {
@@ -474,6 +483,7 @@
         }
       }
     }
+    return changed
   }
   const archiveRecord = (history, record) => ({
     scope: history.scope, storageId: record.storageId, id: record.id, user: record.user,
@@ -1133,6 +1143,14 @@
     return extractNodeText(body).replace(/\s+/g, ' ').trim()
   }
 
+  const pushVodMention = (list, seen, raw) => {
+    const clean = String(raw || '').replace(/^@/, '').trim()
+    const key = clean.toLowerCase()
+    if (!clean || seen.has(key)) return
+    seen.add(key)
+    list.push(clean)
+  }
+
   const readVodMentionFromTokens = tokens => {
     if (!Array.isArray(tokens)) return ''
     for (const token of tokens) {
@@ -1146,6 +1164,18 @@
       return ''
     }
     return ''
+  }
+
+  const readVodMentionsFromTokens = tokens => {
+    const mentions = []
+    if (!Array.isArray(tokens)) return mentions
+    const seen = new Set()
+    for (const token of tokens) {
+      if (token?.type === 4 && typeof token.content?.recipient === 'string') {
+        pushVodMention(mentions, seen, token.content.recipient)
+      }
+    }
+    return mentions
   }
 
   const readVodMentionFromDom = body => {
@@ -1164,11 +1194,22 @@
     return ''
   }
 
+  const readVodMentionsFromDom = body => {
+    const mentions = []
+    if (!body) return mentions
+    const seen = new Set()
+    for (const node of $$('[data-a-target="chat-message-mention"], .mention-fragment', body)) {
+      pushVodMention(mentions, seen, node.textContent)
+    }
+    return mentions
+  }
+
   const readVodMeta = (line, expectedUser = '') => {
     let id = ''
     let vodOffset = null
     let broadcastAt = null
     let mentionRecipient = ''
+    let mentions = []
     try {
       const key = Object.keys(line).find(name => name.startsWith('__reactFiber') || name.startsWith('__reactInternalInstance'))
       let current = key ? line[key] : null
@@ -1196,10 +1237,11 @@
               broadcastAt = rawBroadcastAt
             }
           }
-          if (!mentionRecipient && Array.isArray(comment?.message?.tokens)) {
-            mentionRecipient = readVodMentionFromTokens(comment.message.tokens)
+          if (Array.isArray(comment?.message?.tokens)) {
+            if (!mentionRecipient) mentionRecipient = readVodMentionFromTokens(comment.message.tokens)
+            if (!mentions.length) mentions = readVodMentionsFromTokens(comment.message.tokens)
           }
-          if (id && vodOffset !== null && (mentionRecipient || Array.isArray(comment?.message?.tokens))) break
+          if (id && vodOffset !== null && (mentionRecipient || mentions.length || Array.isArray(comment?.message?.tokens))) break
         }
       }
     } catch (_) {}
@@ -1213,7 +1255,7 @@
         if (parsed !== null) { vodOffset = parsed; break }
       }
     }
-    return { id, vodOffset, broadcastAt, mentionRecipient }
+    return { id, vodOffset, broadcastAt, mentionRecipient, mentions }
   }
 
   const resolveParentRoles = (channel, history, parentUser, parentRecord, existing = null) => {
@@ -1322,9 +1364,68 @@
         }
       }
     }
+    const vodMentions = []
+    if (vodLine) {
+      const seenVodMentions = new Set()
+      for (const raw of vodMeta?.mentions || []) pushVodMention(vodMentions, seenVodMentions, raw)
+      for (const raw of readVodMentionsFromDom(body)) pushVodMention(vodMentions, seenVodMentions, raw)
+    }
     return { user, moderator, broadcaster, vip, reply, author, body, badges, id,
       vodOffset: vodMeta ? vodMeta.vodOffset : null,
-      broadcastAt: vodMeta ? vodMeta.broadcastAt : null }
+      broadcastAt: vodMeta ? vodMeta.broadcastAt : null,
+      mentions: vodMentions }
+  }
+
+  const resolveMentionUser = (mentionText, history) => {
+    const clean = String(mentionText || '').replace(/^@/, '').trim()
+    if (!clean) return ''
+    return history?.displayNames?.get(clean.toLowerCase()) || normalizeLogin(clean) || ''
+  }
+
+  const isVodNativeLine = (line, history) =>
+    Boolean(history?.channel?.startsWith('vod:') && line && (line.matches?.('.vod-message') || line.closest?.('.video-chat')))
+
+  const matchesVodMentionTarget = (mentionText, senderUser, owner, history) => {
+    const mentionUser = resolveMentionUser(mentionText, history)
+    if (!mentionUser || mentionUser === senderUser) return false
+    const roles = resolveParentRoles(owner, history, mentionUser, null)
+    return matchesTarget({
+      user: mentionUser,
+      moderator: roles.parentModerator,
+      broadcaster: roles.parentBroadcaster,
+      vip: roles.parentVip,
+    }, history.settings)
+  }
+
+  const applyVodMentionHighlight = (line, message, owner, history) => {
+    if (!line?.classList) return false
+    const active = Boolean(
+      isVodNativeLine(line, history) &&
+      message?.mentions?.length &&
+      history?.settings &&
+      !(history.settings.excludedUsers || []).includes(message.user) &&
+      message.mentions.some(mentionText => matchesVodMentionTarget(mentionText, message.user, owner, history))
+    )
+    line.classList.toggle('ttc-vod-mention-line', active)
+    return active
+  }
+
+  const syncVodMentionHighlights = (root, history) => {
+    if (!root || !history?.channel?.startsWith('vod:')) return
+    const owner = getVodOwner()
+    const lines = new Set()
+    collectMessageLines(root, lines)
+    for (const line of lines) {
+      const message = readMessage(line, owner, history, true)
+      if (message) applyVodMentionHighlight(line, message, owner, history)
+      else line.classList?.remove('ttc-vod-mention-line')
+    }
+  }
+
+  const clearVodMentionHighlights = root => {
+    if (!root) return
+    if (root.classList?.contains('ttc-vod-mention-line')) root.classList.remove('ttc-vod-mention-line')
+    for (const line of $$('.ttc-vod-mention-line', root)) line.classList.remove('ttc-vod-mention-line')
   }
 
   const matchesTarget = (target, settings) =>
@@ -1457,17 +1558,24 @@
     return row
   }
 
-  const captureLine = (line, history) => {
+  const captureLine = (line, history, deferResync = false) => {
     const isVod = history.channel.startsWith('vod:')
     const owner = isVod ? getVodOwner() : history.channel
     const message = readMessage(line, owner, history, isVod)
     if (!message) return false
-    rememberUser(history, message.user, message.author.textContent, {
+    const learned = rememberUser(history, message.user, message.author.textContent, {
       moderator: message.moderator,
       broadcaster: message.broadcaster,
       vip: message.vip,
       color: message.author.style?.color || '',
     })
+    if (isVod) {
+      applyVodMentionHighlight(line, message, owner, history)
+      if (learned) {
+        if (deferResync) history.mentionResyncNeeded = true
+        else syncVodMentionHighlights(mounted?.history === history ? mounted.scroller : null, history)
+      }
+    }
     const previous = message.id ? history.ids.get(message.id) : history.nodes.get(line)
     // Only retain messages matching the active filter so unchecked roles and
     // excluded accounts cannot evict matching history from the 1000-message cap.
@@ -1553,8 +1661,13 @@
   const captureTree = (node, history) => {
     const lines = new Set()
     collectMessageLines(node, lines)
+    history.mentionResyncNeeded = false
     let changed = false
-    for (const line of lines) changed = captureLine(line, history) || changed
+    for (const line of lines) changed = captureLine(line, history, true) || changed
+    if (history.mentionResyncNeeded) {
+      history.mentionResyncNeeded = false
+      syncVodMentionHighlights(mounted?.history === history ? mounted.scroller : node, history)
+    }
     return changed
   }
 
@@ -1569,8 +1682,13 @@
     }
     // Snapshot data now, even in background tabs: native renderers may be
     // pruned/reused before the browser delivers another animation frame.
+    history.mentionResyncNeeded = false
     let changed = false
-    for (const line of lines) changed = captureLine(line, history) || changed
+    for (const line of lines) changed = captureLine(line, history, true) || changed
+    if (history.mentionResyncNeeded) {
+      history.mentionResyncNeeded = false
+      syncVodMentionHighlights(mounted?.history === history ? mounted.scroller : null, history)
+    }
     return changed
   }
 
@@ -2773,6 +2891,7 @@
     mounted.header.classList.remove('ttc-vod-header')
     mounted.host.classList.remove('ttc-host', 'ttc-active')
     mounted.scroller.classList.remove('ttc-source')
+    clearVodMentionHighlights(mounted.scroller)
     mounted = null
   }
 
@@ -2900,9 +3019,13 @@
       .ttc-empty { padding: 16px 12px; color: var(--color-text-alt-2, #adadb8); }
       .ttc-history-status { margin: 0; padding: 8px 12px; color: var(--color-text-alt-2, #adadb8); font-size: 12px; }
       .ttc-list, .ttc-target-list, .ttc-managing > .ttc-toolbar { --ttc-scrollbar-thumb: rgba(255, 255, 255, 0.45); --ttc-scrollbar-track: transparent; scrollbar-color: var(--ttc-scrollbar-thumb) var(--ttc-scrollbar-track); scrollbar-width: auto; overscroll-behavior: contain; }
+      .video-chat .vod-message.ttc-vod-mention-line { background: var(--color-background-button-text-hover, rgba(145, 71, 255, 0.14)); background: color-mix(in srgb, var(--color-text-link, #9147ff) 14%, transparent); box-shadow: inset 3px 0 0 var(--color-text-link, #9147ff); border-radius: 4px; }
+      .video-chat .vod-message.ttc-vod-mention-line:hover { background: var(--color-background-button-text-active, rgba(145, 71, 255, 0.22)); background: color-mix(in srgb, var(--color-text-link, #9147ff) 22%, transparent); }
+      .video-chat .vod-message.ttc-vod-mention-line .mention-fragment { color: var(--color-text-link, #bf94ff); font-weight: 600; }
       @media (prefers-contrast: more) {
         .ttc-list, .ttc-target-list, .ttc-managing > .ttc-toolbar { --ttc-scrollbar-thumb: #ffffff; --ttc-scrollbar-track: #000000; }
         .ttc-toggle:focus-visible, .ttc-panel button:focus-visible, .ttc-panel input:focus-visible, .ttc-replies-toggle:focus-visible { outline: 2px solid currentColor; }
+        .video-chat .vod-message.ttc-vod-mention-line { outline: 1px solid currentColor; outline-offset: -1px; box-shadow: inset 4px 0 0 currentColor; }
       }
       .ttc-list { flex: 1; min-height: 0; overflow: auto; padding: 6px 0; }
       .ttc-message { padding: 5px 10px; overflow-wrap: anywhere; line-height: 1.6; content-visibility: auto; contain-intrinsic-size: auto none auto 30px; }

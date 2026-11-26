@@ -3659,3 +3659,243 @@ test('Twitch VOD emotes: fix UTF-8 byte offsets to Unicode code-point indices in
   assert.equal(await fetchVm.fetch('https://gql.twitch.tv/gql', { method: 'POST', body: 'VideoCommentsByOffsetOrCursor BadJson' }), passthroughResponses.get('badJson'))
   assert.ok(fetchCalls >= 7)
 })
+
+test('Twitch native VOD mention highlight: highlight leading and mid-message @mentions for active filtered targets, backfill late roles/names, respect exclusions/replies, keep panel unchanged, and clean up on unmount', async () => {
+  const database = fakeIndexedDB()
+  const setupVodPage = (env, pathname = '/vod_owner/video/2940219955') => {
+    env.location.pathname = pathname
+    const vodChat = env.document.body.appendChild(new env.Element('div'))
+    vodChat.className = 'video-chat'
+    const vodHeader = vodChat.appendChild(new env.Element('div'))
+    vodHeader.className = 'video-chat__header'
+    const wrapper = vodChat.appendChild(new env.Element('div'))
+    wrapper.className = 'video-chat__message-list-wrapper'
+    return wrapper.appendChild(new env.Element('ul'))
+  }
+
+  const makeVodLine = (env, scroller, {
+    user, displayName = user, id, offset,
+    badgeAlt = '',
+    prefixText = '', mentionText = '', suffixText = '',
+    tokens = null, withFiber = true,
+  }) => {
+    const line = scroller.appendChild(new env.Element('div'))
+    line.className = 'vod-message'
+    const hdr = line.appendChild(new env.Element('div'))
+    hdr.className = 'vod-message__header'
+    const p = hdr.appendChild(new env.Element('p'))
+    p.textContent = `${Math.floor(offset / 60)}:${String(offset % 60).padStart(2, '0')}`
+
+    const content = line.appendChild(new env.Element('div'))
+    if (badgeAlt) {
+      const badge = content.appendChild(new env.Element('img'))
+      badge.className = 'chat-badge'
+      badge.setAttribute('alt', badgeAlt)
+    }
+    const authorLink = content.appendChild(new env.Element('a'))
+    authorLink.className = 'video-chat__message-author'
+    authorLink.setAttribute('href', `/${user}`)
+    const author = authorLink.appendChild(new env.Element('span'))
+    author.setAttribute('data-a-target', 'chat-message-username')
+    author.setAttribute('data-a-user', user)
+    author.textContent = displayName
+
+    const msgBox = content.appendChild(new env.Element('div'))
+    msgBox.className = 'video-chat__message'
+    const colon = msgBox.appendChild(new env.Element('span'))
+    colon.textContent = ':'
+    const body = msgBox.appendChild(new env.Element('span'))
+    if (prefixText) {
+      const frag = body.appendChild(new env.Element('span'))
+      frag.className = 'text-fragment'
+      frag.setAttribute('data-a-target', 'chat-message-text')
+      frag.textContent = prefixText
+    }
+    if (mentionText) {
+      const mention = body.appendChild(new env.Element('span'))
+      mention.className = 'mention-fragment'
+      mention.setAttribute('data-a-target', 'chat-message-mention')
+      mention.textContent = mentionText.startsWith('@') ? mentionText : `@${mentionText}`
+    }
+    if (suffixText) {
+      const frag = body.appendChild(new env.Element('span'))
+      frag.className = 'text-fragment'
+      frag.setAttribute('data-a-target', 'chat-message-text')
+      frag.textContent = suffixText
+    }
+
+    if (withFiber) {
+      line.__reactFiber$1 = {
+        return: {
+          memoizedProps: {
+            timeStampOffset: offset,
+            messageContext: {
+              author: { id: `${user}-uid`, name: user, displayName },
+              comment: {
+                id,
+                contentOffset: offset,
+                commenter: '123456',
+                message: {
+                  tokens: tokens || [
+                    ...(prefixText ? [{ type: 0, content: prefixText }] : []),
+                    ...(mentionText ? [{ type: 4, content: { recipient: mentionText.replace(/^@/, '') } }] : []),
+                    ...(suffixText ? [{ type: 0, content: suffixText }] : []),
+                  ],
+                },
+              },
+            },
+          },
+        },
+      }
+    }
+    return { line, body }
+  }
+
+  const saved = JSON.stringify({
+    broadcaster: true, moderators: true, vip: true, replies: true,
+    users: ['star_user'], excludedUsers: ['excluded_sender', 'excluded_mod'],
+  })
+  const env = boot({ saved, database })
+  const scroller = setupVodPage(env)
+  env.api.refresh()
+  const state = env.api.mounted
+  await state.history.restorePromise
+  env.api.setEnabled(state, true)
+
+  // Known VIP and Mod so their roles/names are known before being mentioned
+  const { line: vipSelf } = makeVodLine(env, scroller, {
+    user: 'vip_alice', displayName: 'AliceVIP', id: 'm-vip', offset: 10,
+    badgeAlt: 'VIP', prefixText: '大家好',
+  })
+  const { line: exModSelf } = makeVodLine(env, scroller, {
+    user: 'excluded_mod', displayName: 'ExcludedMod', id: 'm-exmod', offset: 11,
+    badgeAlt: 'Moderator', prefixText: '安安',
+  })
+  // Self-mention by star_user -> NOT highlighted
+  const { line: selfMention } = makeVodLine(env, scroller, {
+    user: 'star_user', displayName: 'star_user', id: 'm-self', offset: 12,
+    mentionText: 'star_user', suffixText: ' 自己提自己',
+  })
+  // Viewer leading @mention -> Broadcaster (vod_owner), fiber + DOM
+  const { line: leadBroadcaster, body: leadBroadcasterBody } = makeVodLine(env, scroller, {
+    user: 'viewer1', id: 'm-lead-owner', offset: 13,
+    mentionText: 'vod_owner', suffixText: ' 早安',
+  })
+  const bodyChildrenBefore = leadBroadcasterBody.childNodes.length
+  // Viewer mid-message @mention -> star_user via DOM-only fallback (withFiber: false)
+  const { line: midStar } = makeVodLine(env, scroller, {
+    user: 'viewer2', id: 'm-mid-star', offset: 14,
+    prefixText: '笑死 ', mentionText: 'star_user', suffixText: ' 好強',
+    withFiber: false,
+  })
+  // Viewer mid-message @mention -> VIP displayName
+  const { line: midVip } = makeVodLine(env, scroller, {
+    user: 'viewer3', id: 'm-mid-vip', offset: 15,
+    prefixText: '樓上 ', mentionText: 'AliceVIP', suffixText: ' 說得對',
+  })
+  // Excluded sender mentioning Broadcaster -> NOT highlighted
+  const { line: excludedSenderLine } = makeVodLine(env, scroller, {
+    user: 'excluded_sender', id: 'm-ex-sender', offset: 16,
+    prefixText: 'hi ', mentionText: 'vod_owner',
+  })
+  // Viewer mentioning excluded Moderator -> NOT highlighted
+  const { line: mentionExcludedMod } = makeVodLine(env, scroller, {
+    user: 'viewer4', id: 'm-to-exmod', offset: 17,
+    prefixText: '問一下 ', mentionText: 'ExcludedMod',
+  })
+  // Viewer mentioning non-target viewer -> NOT highlighted
+  const { line: mentionPlainViewer } = makeVodLine(env, scroller, {
+    user: 'viewer5', id: 'm-to-viewer', offset: 18,
+    prefixText: '欸 ', mentionText: 'viewer1',
+  })
+  // Early viewer mid-message mentioning a localized Mod whose identity isn't seen yet
+  const { line: earlyToMysteryMod } = makeVodLine(env, scroller, {
+    user: 'viewer6', id: 'm-early-mod', offset: 19,
+    prefixText: '等等 ', mentionText: '神秘管理員', suffixText: ' 會來',
+  })
+
+  env.api.captureTree(scroller, state.history)
+
+  // Body DOM nodes are untouched (highlight only toggles .ttc-vod-mention-line on root .vod-message)
+  assert.equal(leadBroadcasterBody.childNodes.length, bodyChildrenBefore)
+  assert.equal(leadBroadcaster.classList.contains('ttc-vod-mention-line'), true)
+  assert.equal(midStar.classList.contains('ttc-vod-mention-line'), true)
+  assert.equal(midVip.classList.contains('ttc-vod-mention-line'), true)
+  assert.equal(vipSelf.classList.contains('ttc-vod-mention-line'), false)
+  assert.equal(exModSelf.classList.contains('ttc-vod-mention-line'), false)
+  assert.equal(selfMention.classList.contains('ttc-vod-mention-line'), false)
+  assert.equal(excludedSenderLine.classList.contains('ttc-vod-mention-line'), false)
+  assert.equal(mentionExcludedMod.classList.contains('ttc-vod-mention-line'), false)
+  assert.equal(mentionPlainViewer.classList.contains('ttc-vod-mention-line'), false)
+  assert.equal(earlyToMysteryMod.classList.contains('ttc-vod-mention-line'), false)
+
+  // Mid-message viewer mention is NOT pulled into filtered panel history (reply folding unchanged)
+  assert.equal(state.history.ids.has('m-mid-star'), false)
+  assert.equal(state.history.ids.has('m-lead-owner'), true)
+
+  // Late Moderator appears via MutationObserver batch -> backfills earlier native VOD message
+  const { line: mysteryModLine } = makeVodLine(env, scroller, {
+    user: 'mystery_mod', displayName: '神秘管理員', id: 'm-mystery-mod', offset: 25,
+    badgeAlt: 'Moderator', prefixText: '來了',
+  })
+  env.api.captureMutations([{ target: scroller, addedNodes: [mysteryModLine] }], state.history)
+  assert.equal(earlyToMysteryMod.classList.contains('ttc-vod-mention-line'), true)
+
+  // Toggling replies=false preserves native VOD mention highlighting
+  const repliesCheckbox = state.panel.querySelector('[name="replies"]')
+  repliesCheckbox.checked = false
+  repliesCheckbox.listeners.get('change')()
+  assert.equal(leadBroadcaster.classList.contains('ttc-vod-mention-line'), true)
+  assert.equal(midStar.classList.contains('ttc-vod-mention-line'), true)
+  assert.equal(earlyToMysteryMod.classList.contains('ttc-vod-mention-line'), true)
+
+  // Disabling VIP removes VIP mention highlight; adding viewer6 or star_user to excludedUsers updates dynamically
+  const vipCheckbox = state.panel.querySelector('[name="vip"]')
+  vipCheckbox.checked = false
+  vipCheckbox.listeners.get('change')()
+  assert.equal(midVip.classList.contains('ttc-vod-mention-line'), false)
+  assert.equal(midStar.classList.contains('ttc-vod-mention-line'), true)
+
+  state.updateSettings({
+    ...state.history.settings,
+    excludedUsers: [...state.history.settings.excludedUsers, 'star_user'],
+  })
+  assert.equal(midStar.classList.contains('ttc-vod-mention-line'), false)
+  assert.equal(leadBroadcaster.classList.contains('ttc-vod-mention-line'), true)
+  assert.equal(earlyToMysteryMod.classList.contains('ttc-vod-mention-line'), true)
+
+  // Unmount cleans up all highlight classes on native VOD chat lines
+  env.api.unmount()
+  assert.equal(leadBroadcaster.classList.contains('ttc-vod-mention-line'), false)
+  assert.equal(earlyToMysteryMod.classList.contains('ttc-vod-mention-line'), false)
+
+  // Live stream chat control: .chat-line__message mentioning an active target is never highlighted
+  const liveEnv = boot({
+    saved: JSON.stringify({ broadcaster: true, moderators: true, vip: true, replies: true, users: ['star_user'], excludedUsers: [] }),
+  })
+  liveEnv.location.pathname = '/vod_owner'
+  const liveStream = liveEnv.document.body.appendChild(new liveEnv.Element('div'))
+  liveStream.className = 'stream-chat'
+  const liveHeader = liveStream.appendChild(new liveEnv.Element('div'))
+  liveHeader.className = 'stream-chat-header'
+  const liveScroller = liveStream.appendChild(new liveEnv.Element('div'))
+  liveScroller.setAttribute('data-a-target', 'chat-scroller')
+  liveEnv.api.refresh()
+  const liveState = liveEnv.api.mounted
+  await liveState.history.restorePromise
+  const liveLine = liveScroller.appendChild(new liveEnv.Element('div'))
+  liveLine.className = 'chat-line__message'
+  const liveAuthor = liveLine.appendChild(new liveEnv.Element('span'))
+  liveAuthor.setAttribute('data-a-target', 'chat-message-username')
+  liveAuthor.setAttribute('data-a-user', 'viewer_live')
+  liveAuthor.textContent = 'viewer_live'
+  const liveBody = liveLine.appendChild(new liveEnv.Element('span'))
+  liveBody.setAttribute('data-a-target', 'chat-message-text')
+  const liveMention = liveBody.appendChild(new liveEnv.Element('span'))
+  liveMention.className = 'mention-fragment'
+  liveMention.setAttribute('data-a-target', 'chat-message-mention')
+  liveMention.textContent = '@star_user'
+  liveEnv.api.captureTree(liveScroller, liveState.history)
+  assert.equal(liveLine.classList.contains('ttc-vod-mention-line'), false)
+  liveEnv.api.unmount()
+})
