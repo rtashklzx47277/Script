@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name        Twitch Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.11.6
+// @version     0.11.7
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
-// @description 依頻道主、管理員、VIP、回覆篩選目標與全域帳號包含／排除名單篩選 Twitch 直播與 VOD 聊天，保留回覆目標引言與最近 1000 則／7 天紀錄，支援跨日分隔、搜尋、自動跟隨與 VOD 時間切換（影片秒數／直播時刻），修正 VOD 聊天室多位元組字元後的貼圖位移問題，並在原生 VOD 聊天室高亮 @提及篩選目標的留言；分割螢幕時隱藏聊天室上方橫幅與輸入區底部列。
+// @description 依頻道主、管理員、VIP、回覆篩選目標與全域帳號包含／排除名單篩選 Twitch 直播與 VOD 聊天，保留回覆目標引言與最近 1000 則／7 天紀錄，支援跨日分隔、搜尋、自動跟隨與 VOD 時間切換（影片秒數／直播時刻），修正 VOD 聊天室多位元組字元後的貼圖位移問題，並在原生 VOD 聊天室以不同色高亮篩選目標發言與 @提及篩選目標的留言；分割螢幕時隱藏聊天室上方橫幅與輸入區底部列。
 // @author      Derek
 // @match       *://www.twitch.tv/*
 // @run-at      document-start
@@ -1397,17 +1397,22 @@
     }, history.settings)
   }
 
+  const VOD_HIGHLIGHT_CLASSES = ['ttc-vod-target-line', 'ttc-vod-mention-line']
+
   const applyVodMentionHighlight = (line, message, owner, history) => {
     if (!line?.classList) return false
-    const active = Boolean(
-      isVodNativeLine(line, history) &&
+    const vodNative = isVodNativeLine(line, history) && Boolean(history?.settings)
+    const isTarget = Boolean(vodNative && message && matchesTarget(message, history.settings))
+    const isMention = Boolean(
+      vodNative &&
+      !isTarget &&
       message?.mentions?.length &&
-      history?.settings &&
       !(history.settings.excludedUsers || []).includes(message.user) &&
       message.mentions.some(mentionText => matchesVodMentionTarget(mentionText, message.user, owner, history))
     )
-    line.classList.toggle('ttc-vod-mention-line', active)
-    return active
+    line.classList.toggle('ttc-vod-target-line', isTarget)
+    line.classList.toggle('ttc-vod-mention-line', isMention)
+    return isTarget || isMention
   }
 
   const syncVodMentionHighlights = (root, history) => {
@@ -1418,14 +1423,16 @@
     for (const line of lines) {
       const message = readMessage(line, owner, history, true)
       if (message) applyVodMentionHighlight(line, message, owner, history)
-      else line.classList?.remove('ttc-vod-mention-line')
+      else for (const cls of VOD_HIGHLIGHT_CLASSES) line.classList?.remove(cls)
     }
   }
 
   const clearVodMentionHighlights = root => {
     if (!root) return
-    if (root.classList?.contains('ttc-vod-mention-line')) root.classList.remove('ttc-vod-mention-line')
-    for (const line of $$('.ttc-vod-mention-line', root)) line.classList.remove('ttc-vod-mention-line')
+    for (const cls of VOD_HIGHLIGHT_CLASSES) {
+      root.classList?.remove(cls)
+      for (const line of $$(`.${cls}`, root)) line.classList?.remove(cls)
+    }
   }
 
   const matchesTarget = (target, settings) =>
@@ -3019,12 +3026,15 @@
       .ttc-empty { padding: 16px 12px; color: var(--color-text-alt-2, #adadb8); }
       .ttc-history-status { margin: 0; padding: 8px 12px; color: var(--color-text-alt-2, #adadb8); font-size: 12px; }
       .ttc-list, .ttc-target-list, .ttc-managing > .ttc-toolbar { --ttc-scrollbar-thumb: rgba(255, 255, 255, 0.45); --ttc-scrollbar-track: transparent; scrollbar-color: var(--ttc-scrollbar-thumb) var(--ttc-scrollbar-track); scrollbar-width: auto; overscroll-behavior: contain; }
+      .video-chat .vod-message.ttc-vod-target-line { background: rgba(245, 158, 11, 0.16); background: color-mix(in srgb, #f59e0b 16%, transparent); box-shadow: inset 3px 0 0 #f59e0b; border-radius: 4px; }
+      .video-chat .vod-message.ttc-vod-target-line:hover { background: rgba(245, 158, 11, 0.24); background: color-mix(in srgb, #f59e0b 24%, transparent); }
       .video-chat .vod-message.ttc-vod-mention-line { background: var(--color-background-button-text-hover, rgba(145, 71, 255, 0.14)); background: color-mix(in srgb, var(--color-text-link, #9147ff) 14%, transparent); box-shadow: inset 3px 0 0 var(--color-text-link, #9147ff); border-radius: 4px; }
       .video-chat .vod-message.ttc-vod-mention-line:hover { background: var(--color-background-button-text-active, rgba(145, 71, 255, 0.22)); background: color-mix(in srgb, var(--color-text-link, #9147ff) 22%, transparent); }
       .video-chat .vod-message.ttc-vod-mention-line .mention-fragment { color: var(--color-text-link, #bf94ff); font-weight: 600; }
       @media (prefers-contrast: more) {
         .ttc-list, .ttc-target-list, .ttc-managing > .ttc-toolbar { --ttc-scrollbar-thumb: #ffffff; --ttc-scrollbar-track: #000000; }
         .ttc-toggle:focus-visible, .ttc-panel button:focus-visible, .ttc-panel input:focus-visible, .ttc-replies-toggle:focus-visible { outline: 2px solid currentColor; }
+        .video-chat .vod-message.ttc-vod-target-line { outline: 2px solid currentColor; outline-offset: -2px; box-shadow: inset 4px 0 0 #f59e0b; }
         .video-chat .vod-message.ttc-vod-mention-line { outline: 1px solid currentColor; outline-offset: -1px; box-shadow: inset 4px 0 0 currentColor; }
       }
       .ttc-list { flex: 1; min-height: 0; overflow: auto; padding: 6px 0; }

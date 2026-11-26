@@ -3762,19 +3762,28 @@ test('Twitch native VOD mention highlight: highlight leading and mid-message @me
   await state.history.restorePromise
   env.api.setEnabled(state, true)
 
-  // Known VIP and Mod so their roles/names are known before being mentioned
+  // Known VIP, Broadcaster, and Mod
   const { line: vipSelf } = makeVodLine(env, scroller, {
     user: 'vip_alice', displayName: 'AliceVIP', id: 'm-vip', offset: 10,
     badgeAlt: 'VIP', prefixText: '大家好',
+  })
+  const { line: ownerSelf } = makeVodLine(env, scroller, {
+    user: 'vod_owner', displayName: 'vod_owner', id: 'm-owner', offset: 10,
+    prefixText: '開台啦',
   })
   const { line: exModSelf } = makeVodLine(env, scroller, {
     user: 'excluded_mod', displayName: 'ExcludedMod', id: 'm-exmod', offset: 11,
     badgeAlt: 'Moderator', prefixText: '安安',
   })
-  // Self-mention by star_user -> NOT highlighted
+  // Self-mention by star_user -> target highlight only (NOT mention highlight)
   const { line: selfMention } = makeVodLine(env, scroller, {
     user: 'star_user', displayName: 'star_user', id: 'm-self', offset: 12,
     mentionText: 'star_user', suffixText: ' 自己提自己',
+  })
+  // Target star_user mentioning another target vod_owner -> target highlight takes precedence over mention highlight
+  const { line: targetMentionTarget } = makeVodLine(env, scroller, {
+    user: 'star_user', displayName: 'star_user', id: 'm-target-to-target', offset: 12,
+    prefixText: '哈囉 ', mentionText: 'vod_owner',
   })
   // Viewer leading @mention -> Broadcaster (vod_owner), fiber + DOM
   const { line: leadBroadcaster, body: leadBroadcasterBody } = makeVodLine(env, scroller, {
@@ -3816,43 +3825,62 @@ test('Twitch native VOD mention highlight: highlight leading and mid-message @me
 
   env.api.captureTree(scroller, state.history)
 
-  // Body DOM nodes are untouched (highlight only toggles .ttc-vod-mention-line on root .vod-message)
+  // Body DOM nodes are untouched; filtered targets get ttc-vod-target-line and @mentions get ttc-vod-mention-line exclusively
   assert.equal(leadBroadcasterBody.childNodes.length, bodyChildrenBefore)
-  assert.equal(leadBroadcaster.classList.contains('ttc-vod-mention-line'), true)
-  assert.equal(midStar.classList.contains('ttc-vod-mention-line'), true)
-  assert.equal(midVip.classList.contains('ttc-vod-mention-line'), true)
+  assert.equal(vipSelf.classList.contains('ttc-vod-target-line'), true)
   assert.equal(vipSelf.classList.contains('ttc-vod-mention-line'), false)
-  assert.equal(exModSelf.classList.contains('ttc-vod-mention-line'), false)
+  assert.equal(ownerSelf.classList.contains('ttc-vod-target-line'), true)
+  assert.equal(ownerSelf.classList.contains('ttc-vod-mention-line'), false)
+  assert.equal(selfMention.classList.contains('ttc-vod-target-line'), true)
   assert.equal(selfMention.classList.contains('ttc-vod-mention-line'), false)
+  assert.equal(targetMentionTarget.classList.contains('ttc-vod-target-line'), true)
+  assert.equal(targetMentionTarget.classList.contains('ttc-vod-mention-line'), false)
+  assert.equal(leadBroadcaster.classList.contains('ttc-vod-mention-line'), true)
+  assert.equal(leadBroadcaster.classList.contains('ttc-vod-target-line'), false)
+  assert.equal(midStar.classList.contains('ttc-vod-mention-line'), true)
+  assert.equal(midStar.classList.contains('ttc-vod-target-line'), false)
+  assert.equal(midVip.classList.contains('ttc-vod-mention-line'), true)
+  assert.equal(midVip.classList.contains('ttc-vod-target-line'), false)
+  assert.equal(exModSelf.classList.contains('ttc-vod-target-line'), false)
+  assert.equal(exModSelf.classList.contains('ttc-vod-mention-line'), false)
+  assert.equal(excludedSenderLine.classList.contains('ttc-vod-target-line'), false)
   assert.equal(excludedSenderLine.classList.contains('ttc-vod-mention-line'), false)
+  assert.equal(mentionExcludedMod.classList.contains('ttc-vod-target-line'), false)
   assert.equal(mentionExcludedMod.classList.contains('ttc-vod-mention-line'), false)
+  assert.equal(mentionPlainViewer.classList.contains('ttc-vod-target-line'), false)
   assert.equal(mentionPlainViewer.classList.contains('ttc-vod-mention-line'), false)
+  assert.equal(earlyToMysteryMod.classList.contains('ttc-vod-target-line'), false)
   assert.equal(earlyToMysteryMod.classList.contains('ttc-vod-mention-line'), false)
 
   // Mid-message viewer mention is NOT pulled into filtered panel history (reply folding unchanged)
   assert.equal(state.history.ids.has('m-mid-star'), false)
   assert.equal(state.history.ids.has('m-lead-owner'), true)
 
-  // Late Moderator appears via MutationObserver batch -> backfills earlier native VOD message
+  // Late Moderator appears via MutationObserver batch -> highlights mod line as target & backfills earlier viewer mention
   const { line: mysteryModLine } = makeVodLine(env, scroller, {
     user: 'mystery_mod', displayName: '神秘管理員', id: 'm-mystery-mod', offset: 25,
     badgeAlt: 'Moderator', prefixText: '來了',
   })
   env.api.captureMutations([{ target: scroller, addedNodes: [mysteryModLine] }], state.history)
+  assert.equal(mysteryModLine.classList.contains('ttc-vod-target-line'), true)
+  assert.equal(mysteryModLine.classList.contains('ttc-vod-mention-line'), false)
   assert.equal(earlyToMysteryMod.classList.contains('ttc-vod-mention-line'), true)
+  assert.equal(earlyToMysteryMod.classList.contains('ttc-vod-target-line'), false)
 
-  // Toggling replies=false preserves native VOD mention highlighting
+  // Toggling replies=false preserves both native VOD target & mention highlights
   const repliesCheckbox = state.panel.querySelector('[name="replies"]')
   repliesCheckbox.checked = false
   repliesCheckbox.listeners.get('change')()
+  assert.equal(vipSelf.classList.contains('ttc-vod-target-line'), true)
   assert.equal(leadBroadcaster.classList.contains('ttc-vod-mention-line'), true)
   assert.equal(midStar.classList.contains('ttc-vod-mention-line'), true)
   assert.equal(earlyToMysteryMod.classList.contains('ttc-vod-mention-line'), true)
 
-  // Disabling VIP removes VIP mention highlight; adding viewer6 or star_user to excludedUsers updates dynamically
+  // Disabling VIP removes VIP target & mention highlights; excluding star_user clears target & mention highlights cleanly
   const vipCheckbox = state.panel.querySelector('[name="vip"]')
   vipCheckbox.checked = false
   vipCheckbox.listeners.get('change')()
+  assert.equal(vipSelf.classList.contains('ttc-vod-target-line'), false)
   assert.equal(midVip.classList.contains('ttc-vod-mention-line'), false)
   assert.equal(midStar.classList.contains('ttc-vod-mention-line'), true)
 
@@ -3860,16 +3888,23 @@ test('Twitch native VOD mention highlight: highlight leading and mid-message @me
     ...state.history.settings,
     excludedUsers: [...state.history.settings.excludedUsers, 'star_user'],
   })
+  assert.equal(selfMention.classList.contains('ttc-vod-target-line'), false)
+  assert.equal(selfMention.classList.contains('ttc-vod-mention-line'), false)
+  assert.equal(targetMentionTarget.classList.contains('ttc-vod-target-line'), false)
+  assert.equal(targetMentionTarget.classList.contains('ttc-vod-mention-line'), false)
   assert.equal(midStar.classList.contains('ttc-vod-mention-line'), false)
   assert.equal(leadBroadcaster.classList.contains('ttc-vod-mention-line'), true)
   assert.equal(earlyToMysteryMod.classList.contains('ttc-vod-mention-line'), true)
+  assert.equal(ownerSelf.classList.contains('ttc-vod-target-line'), true)
 
   // Unmount cleans up all highlight classes on native VOD chat lines
   env.api.unmount()
+  assert.equal(ownerSelf.classList.contains('ttc-vod-target-line'), false)
+  assert.equal(mysteryModLine.classList.contains('ttc-vod-target-line'), false)
   assert.equal(leadBroadcaster.classList.contains('ttc-vod-mention-line'), false)
   assert.equal(earlyToMysteryMod.classList.contains('ttc-vod-mention-line'), false)
 
-  // Live stream chat control: .chat-line__message mentioning an active target is never highlighted
+  // Live stream chat control: .chat-line__message (both target self and viewer mention) is never highlighted
   const liveEnv = boot({
     saved: JSON.stringify({ broadcaster: true, moderators: true, vip: true, replies: true, users: ['star_user'], excludedUsers: [] }),
   })
@@ -3895,7 +3930,19 @@ test('Twitch native VOD mention highlight: highlight leading and mid-message @me
   liveMention.className = 'mention-fragment'
   liveMention.setAttribute('data-a-target', 'chat-message-mention')
   liveMention.textContent = '@star_user'
+  const liveTargetLine = liveScroller.appendChild(new liveEnv.Element('div'))
+  liveTargetLine.className = 'chat-line__message'
+  const liveTargetAuthor = liveTargetLine.appendChild(new liveEnv.Element('span'))
+  liveTargetAuthor.setAttribute('data-a-target', 'chat-message-username')
+  liveTargetAuthor.setAttribute('data-a-user', 'star_user')
+  liveTargetAuthor.textContent = 'star_user'
+  const liveTargetBody = liveTargetLine.appendChild(new liveEnv.Element('span'))
+  liveTargetBody.setAttribute('data-a-target', 'chat-message-text')
+  liveTargetBody.textContent = 'hello'
   liveEnv.api.captureTree(liveScroller, liveState.history)
   assert.equal(liveLine.classList.contains('ttc-vod-mention-line'), false)
+  assert.equal(liveLine.classList.contains('ttc-vod-target-line'), false)
+  assert.equal(liveTargetLine.classList.contains('ttc-vod-target-line'), false)
+  assert.equal(liveTargetLine.classList.contains('ttc-vod-mention-line'), false)
   liveEnv.api.unmount()
 })
