@@ -2926,7 +2926,7 @@ test('Twitch VOD timeline: display and sort by video offset from fiber/DOM, dedu
   env2.api.unmount()
 })
 
-test('Twitch VOD replies: reconstruct threads from leading fiber/DOM mentions, handle seeking/relinking, respect window/roles/exclusions, and persist across reload', async () => {
+test('Twitch VOD flat filtering: do not create VOD reply threads, reject mismatched fiber author, and clean up legacy inferred VOD replies on reload', async () => {
   const database = fakeIndexedDB()
   let now = new Date(2026, 10, 23, 6, 15, 0).getTime()
 
@@ -3048,7 +3048,7 @@ test('Twitch VOD replies: reconstruct threads from leading fiber/DOM mentions, h
   await state1.history.restorePromise
   env1.api.setEnabled(state1, true)
 
-  // 1. Localized target sends two messages (5:06:17 & 5:06:52); fiber type:4 reply + DOM mention reply attach to closest parent
+  // 1. Target messages render flat; viewer @mentions (both leading and mid-message) are NOT captured into panel or folded
   makeVodMsg(env1, scroller1, {
     user: 'mea_07311', displayName: '小碗泡咪', color: '#C9E1FF',
     id: 'vod-p1', offset: 18377, bodyText: '外套好看',
@@ -3059,23 +3059,15 @@ test('Twitch VOD replies: reconstruct threads from leading fiber/DOM mentions, h
     tokens: [{ type: 4, content: { recipient: '小碗泡咪', currentUserMentionRelation: 0 } }, { type: 6, content: { alt: 'gunoSiu' } }],
   })
   makeVodMsg(env1, scroller1, {
-    user: 'mea_07311', displayName: '小碗泡咪', color: '#C9E1FF',
-    id: 'vod-p2', offset: 18412, emoteAlt: 'shaxy101',
-    tokens: [{ type: 6, content: { alt: 'shaxy101' } }],
-  })
-  // DOM-only mention fallback (no fiber tokens)
-  makeVodMsg(env1, scroller1, {
     user: 'hayger123', displayName: '西歐榔',
     id: 'vod-r2', offset: 18423, mentionPrefix: '小碗泡咪', bodyText: ' 7',
     withFiber: false,
   })
-  // Target B replying to Target A's recent VOD message -> top-level with quote including emote alt text
   makeVodMsg(env1, scroller1, {
     user: 'never_loses', displayName: 'NeVeR_LosEs',
     id: 'vod-tb', offset: 18428, mentionPrefix: '小碗泡咪', bodyText: ' 好害羞',
     tokens: [{ type: 4, content: { recipient: '小碗泡咪', currentUserMentionRelation: 0 } }, { type: 0, content: ' 好害羞' }],
   })
-  // Mid-message mention, self-mention, viewer->non-target, and target->non-target
   makeVodMsg(env1, scroller1, {
     user: 'mid_user', id: 'vod-mid', offset: 18430, bodyText: '哈哈 ', midMention: '小碗泡咪',
     tokens: [{ type: 0, content: '哈哈 ' }, { type: 4, content: { recipient: '小碗泡咪' } }, { type: 0, content: ' 好強' }],
@@ -3098,141 +3090,113 @@ test('Twitch VOD replies: reconstruct threads from leading fiber/DOM mentions, h
   env1.api.captureTree(scroller1, state1.history)
   env1.api.renderMessages(state1)
 
-  // Captured: p1, r1, p2, r2, tb, self, tnon (7 retained; mid_user & v_non ignored)
-  assert.equal(state1.history.messages.length, 7)
-  assert.equal(state1.count.textContent, '7 則')
+  assert.equal(state1.history.messages.length, 4)
+  assert.equal(state1.count.textContent, '4 則')
+  assert.equal(state1.history.ids.has('vod-r1'), false)
+  assert.equal(state1.history.messages.some(m => m.user === 'hayger123'), false)
   assert.equal(state1.history.ids.has('vod-mid'), false)
   assert.equal(state1.history.ids.has('vod-vnon'), false)
+  assert.equal(state1.history.ids.get('vod-tb').reply, null)
   assert.equal(state1.history.ids.get('vod-self').reply, null)
   assert.equal(state1.history.ids.get('vod-tnon').reply, null)
-
-  // Verify two .ttc-thread drawers (p1 -> [r1], p2 -> [r2]) and Target B top-level quote
-  const p1Thread = state1.history.ids.get('vod-p1').view.closest('.ttc-thread')
-  assert.ok(p1Thread)
-  assert.equal(p1Thread.querySelector('.ttc-replies-toggle').textContent, '1 則回覆')
-  assert.equal(p1Thread.querySelector('.ttc-replies-list').children.length, 1)
-  assert.equal(p1Thread.querySelector('.ttc-replies-list').querySelector('.ttc-time').textContent, '5:06:23')
-
-  const p2Thread = state1.history.ids.get('vod-p2').view.closest('.ttc-thread')
-  assert.ok(p2Thread)
-  assert.equal(p2Thread.querySelector('.ttc-replies-toggle').textContent, '1 則回覆')
-  const r2Record = state1.history.messages.find(m => m.user === 'hayger123')
-  assert.equal(r2Record.vodOffset, 18423)
-  assert.equal(r2Record.reply.parentId, 'vod-p2')
-  assert.equal(r2Record.reply.parentText, 'shaxy101')
-  assert.equal(r2Record.view.parentElement, p2Thread.querySelector('.ttc-replies-list'))
-
-  const tbView = state1.history.ids.get('vod-tb').view
-  assert.equal(tbView.parentElement, state1.list)
-  assert.equal(tbView.querySelector('.ttc-reply-author').textContent, '@小碗泡咪 (mea_07311)')
-  assert.equal(tbView.querySelector('.ttc-reply-body').textContent, 'shaxy101')
-
-  // 2. Window limit (>300s) + out-of-order seeking + drawer timeline reorder + relink from orphan -> p3 -> closer p4
-  now += 10000
-  const lateR2 = makeVodMsg(env1, scroller1, {
-    user: 'late_v2', id: 'vod-r3-later', offset: 18765, mentionPrefix: '小碗泡咪', bodyText: ' +1',
-    tokens: [{ type: 4, content: { recipient: '小碗泡咪' } }, { type: 0, content: ' +1' }],
-  })
-  env1.api.captureLine(lateR2, state1.history)
-  env1.api.renderMessages(state1)
-
-  const lateR1 = makeVodMsg(env1, scroller1, {
-    user: 'late_v1', id: 'vod-r3-late', offset: 18760, mentionPrefix: '小碗泡咪', bodyText: ' 真的嗎',
-    tokens: [{ type: 4, content: { recipient: '小碗泡咪' } }, { type: 0, content: ' 真的嗎' }],
-  })
-  env1.api.captureLine(lateR1, state1.history)
-  env1.api.renderMessages(state1)
-
-  // Both >300s after p2 (18412s): grouped into one orphan [原留言] drawer sorted 5:12:40, 5:12:45
-  assert.equal(state1.history.ids.get('vod-r3-late').reply.parentId, '')
-  const orphanGroup = state1.list.querySelector('.ttc-reply-group')
-  assert.ok(orphanGroup)
-  assert.equal(orphanGroup.querySelector('.ttc-orphan-author').textContent, '小碗泡咪 (mea_07311)')
-  assert.equal(orphanGroup.querySelector('.ttc-replies-toggle').textContent, '2 則回覆')
-  assert.deepEqual(
-    orphanGroup.querySelector('.ttc-replies-list').querySelectorAll('.ttc-time').map(t => t.textContent),
-    ['5:12:40', '5:12:45'],
-  )
-
-  // Rewind to 18750s (p3) -> relinks orphan replies onto p3 thread
-  const vodP3 = makeVodMsg(env1, scroller1, {
-    user: 'mea_07311', displayName: '小碗泡咪', color: '#C9E1FF',
-    id: 'vod-p3', offset: 18750, bodyText: '吃飽了',
-  })
-  env1.api.captureLine(vodP3, state1.history)
-  env1.api.renderMessages(state1)
-
+  assert.equal(state1.list.querySelectorAll('.ttc-thread').length, 0)
   assert.equal(state1.list.querySelectorAll('.ttc-reply-group').length, 0)
-  const p3Thread = state1.history.ids.get('vod-p3').view.closest('.ttc-thread')
-  assert.ok(p3Thread)
-  assert.equal(p3Thread.querySelector('.ttc-replies-toggle').textContent, '2 則回覆')
-  assert.equal(state1.history.ids.get('vod-r3-late').reply.parentText, '吃飽了')
-  assert.deepEqual(
-    p3Thread.querySelector('.ttc-replies-list').querySelectorAll('.ttc-time').map(t => t.textContent),
-    ['5:12:40', '5:12:45'],
-  )
-
-  // Rewind closer to 18755s (p4) -> provisionally linked replies upgrade from p3 to closer p4
-  const vodP4 = makeVodMsg(env1, scroller1, {
-    user: 'mea_07311', displayName: '小碗泡咪', color: '#C9E1FF',
-    id: 'vod-p4', offset: 18755, bodyText: '甜點也吃了',
-  })
-  env1.api.captureLine(vodP4, state1.history)
-  env1.api.renderMessages(state1)
-
-  assert.equal(state1.history.ids.get('vod-p3').view.parentElement, state1.list)
-  assert.equal(state1.history.ids.get('vod-p3').view.classList.contains('ttc-has-replies'), false)
-  const p4Thread = state1.history.ids.get('vod-p4').view.closest('.ttc-thread')
-  assert.ok(p4Thread)
-  assert.equal(p4Thread.querySelector('.ttc-replies-toggle').textContent, '2 則回覆')
-  assert.equal(state1.history.ids.get('vod-r3-late').reply.parentId, 'vod-p4')
-  assert.equal(state1.history.ids.get('vod-r3-late').reply.parentText, '甜點也吃了')
-  assert.equal(state1.history.ids.get('vod-r3-late').view.querySelector('.ttc-reply-body').textContent, '甜點也吃了')
-
-  // 3. Respects replies toggle off/on
-  const repliesCheckbox = state1.panel.querySelector('[name="replies"]')
-  repliesCheckbox.checked = false
-  repliesCheckbox.listeners.get('change')()
-  assert.equal(state1.list.querySelectorAll('.ttc-thread').length, 0)
-  assert.equal(state1.count.textContent, '7 則')
-
-  repliesCheckbox.checked = true
-  repliesCheckbox.listeners.get('change')()
-  assert.equal(state1.list.querySelectorAll('.ttc-thread').length, 3)
-  assert.equal(state1.count.textContent, '11 則')
-
-  // 4. Respects excludedUsers (excluded replier and excluded target)
-  const updateTargets = (excludedUsers) => {
-    state1.updateSettings({ ...state1.history.settings, excludedUsers }, '')
-  }
-  updateTargets(['sss316070'])
-  assert.equal(state1.history.ids.get('vod-p1').view.parentElement, state1.list)
-  assert.equal(state1.count.textContent, '10 則')
-
-  updateTargets(['mea_07311'])
+  assert.equal(state1.list.querySelectorAll('.ttc-reply').length, 0)
   assert.equal(state1.history.ids.get('vod-tb').view.parentElement, state1.list)
-  assert.equal(state1.list.querySelectorAll('.ttc-thread').length, 0)
-  assert.equal(state1.count.textContent, '2 則')
 
-  updateTargets([])
-  assert.equal(state1.list.querySelectorAll('.ttc-thread').length, 3)
-  assert.equal(state1.count.textContent, '11 則')
-
-  // 5. Rejects mismatched mc.author.name in VOD React fiber
+  // 2. Rejects mismatched mc.author.name in VOD React fiber
   const badFiberLine = makeVodMsg(env1, scroller1, {
     user: 'vod_owner', id: 'vod-bad', offset: 18800, bodyText: 'mismatch',
     fiberAuthorName: 'someone_else',
   })
-  // Override header timestamp to verify fiber rejection only affects mismatched fiber
   badFiberLine.querySelector('.vod-message__header').querySelector('p').textContent = 'bad:ts'
   const parsedBad = env1.api.readMessage(badFiberLine, 'vod_owner', state1.history, true)
   assert.equal(parsedBad.id, '')
   assert.equal(parsedBad.vodOffset, null)
   badFiberLine.remove()
 
-  // 6. Persists vodOffset, inferred reply metadata, and drawer structure across reload with no date dividers
   await env1.api.flushHistory(state1.history)
   env1.api.unmount()
+
+  // 3. Legacy saved VOD inferred reply records in IndexedDB are cleaned up on reload
+  const scope = 'vod:2937944840'
+  const expiresAt = now + 7 * 24 * 60 * 60 * 1000
+  database.records.set(JSON.stringify([scope, 'vod-legacy-viewer']), {
+    scope,
+    storageId: 'vod-legacy-viewer',
+    id: 'vod-legacy-viewer',
+    user: 'sss316070',
+    createdAt: now,
+    order: 99,
+    expiresAt,
+    vodOffset: 18385,
+    broadcastAt: null,
+    moderator: false,
+    broadcaster: false,
+    vip: false,
+    reply: {
+      parentId: 'vod-p1',
+      parentUser: 'mea_07311',
+      parentDisplayName: '小碗泡咪',
+      parentText: '外套好看',
+      parentDeleted: false,
+      parentModerator: false,
+      parentBroadcaster: false,
+      parentVip: false,
+      inferred: true,
+    },
+    fingerprint: 'legacy-viewer',
+    tree: {
+      tag: 'div',
+      attributes: [['class', 'ttc-message ttc-has-reply']],
+      styles: [],
+      children: [
+        { tag: 'div', attributes: [['class', 'ttc-reply']], styles: [], children: [{ text: '回覆 @小碗泡咪 (mea_07311): 外套好看' }] },
+        { tag: 'time', attributes: [['class', 'ttc-time']], styles: [], children: [{ text: '5:06:25' }] },
+        { tag: 'strong', attributes: [], styles: [], children: [{ text: '阿任 (sss316070)' }] },
+        { text: ': ' },
+        { tag: 'span', attributes: [], styles: [], children: [{ text: '@小碗泡咪 真的' }] },
+      ],
+    },
+  })
+  database.records.set(JSON.stringify([scope, 'vod-legacy-tb']), {
+    scope,
+    storageId: 'vod-legacy-tb',
+    id: 'vod-legacy-tb',
+    user: 'never_loses',
+    createdAt: now,
+    order: 100,
+    expiresAt,
+    vodOffset: 18440,
+    broadcastAt: null,
+    moderator: false,
+    broadcaster: false,
+    vip: false,
+    reply: {
+      parentId: 'vod-p1',
+      parentUser: 'mea_07311',
+      parentDisplayName: '小碗泡咪',
+      parentText: '外套好看',
+      parentDeleted: false,
+      parentModerator: false,
+      parentBroadcaster: false,
+      parentVip: false,
+      inferred: true,
+    },
+    fingerprint: 'legacy-tb',
+    tree: {
+      tag: 'div',
+      attributes: [['class', 'ttc-message ttc-has-reply']],
+      styles: [],
+      children: [
+        { tag: 'div', attributes: [['class', 'ttc-reply']], styles: [], children: [{ text: '回覆 @小碗泡咪 (mea_07311): 外套好看' }] },
+        { tag: 'time', attributes: [['class', 'ttc-time']], styles: [], children: [{ text: '5:07:20' }] },
+        { tag: 'strong', attributes: [], styles: [], children: [{ text: 'NeVeR_LosEs (never_loses)' }] },
+        { text: ': ' },
+        { tag: 'span', attributes: [], styles: [], children: [{ text: '@小碗泡咪 對啊' }] },
+      ],
+    },
+  })
 
   const env2 = boot({ saved, database, now: () => now })
   setupVodPage(env2)
@@ -3241,18 +3205,20 @@ test('Twitch VOD replies: reconstruct threads from leading fiber/DOM mentions, h
   await state2.history.restorePromise
   env2.api.setEnabled(state2, true)
 
-  assert.equal(state2.count.textContent, '11 則')
-  assert.equal(state2.list.querySelectorAll('.ttc-thread').length, 3)
+  assert.equal(state2.count.textContent, '5 則')
+  assert.equal(state2.history.ids.has('vod-legacy-viewer'), false)
+  assert.equal(database.records.has(JSON.stringify([scope, 'vod-legacy-viewer'])), false)
+  const cleanedTarget = state2.history.ids.get('vod-legacy-tb')
+  assert.ok(cleanedTarget)
+  assert.equal(cleanedTarget.reply, null)
+  assert.equal(cleanedTarget.view.className, 'ttc-message')
+  assert.equal(cleanedTarget.view.querySelector('.ttc-reply'), null)
+  const persistedTarget = database.records.get(JSON.stringify([scope, 'vod-legacy-tb']))
+  assert.equal(persistedTarget.reply, null)
+  assert.equal(persistedTarget.tree.children.some(c => c.attributes?.some(([k, v]) => k === 'class' && v.includes('ttc-reply'))), false)
+  assert.equal(state2.list.querySelectorAll('.ttc-thread').length, 0)
   assert.equal(state2.list.querySelectorAll('.ttc-reply-group').length, 0)
-  const restoredP4Thread = state2.history.ids.get('vod-p4').view.closest('.ttc-thread')
-  assert.ok(restoredP4Thread)
-  assert.equal(restoredP4Thread.querySelector('.ttc-replies-toggle').textContent, '2 則回覆')
-  assert.deepEqual(
-    restoredP4Thread.querySelector('.ttc-replies-list').querySelectorAll('.ttc-time').map(t => t.textContent),
-    ['5:12:40', '5:12:45'],
-  )
-  assert.equal(state2.history.ids.get('vod-r3-late').reply.inferred, true)
-  assert.equal(state2.history.ids.get('vod-tb').view.querySelector('.ttc-reply-body').textContent, 'shaxy101')
+  assert.equal(state2.list.querySelectorAll('.ttc-reply').length, 0)
   for (const row of state2.list.children) assert.equal(row.getAttribute('data-date'), null)
   env2.api.unmount()
 })
@@ -3367,9 +3333,9 @@ test('Twitch VOD time mode: toggle relative offset vs broadcast clock across liv
   assert.equal(offsetBtn.getAttribute('aria-pressed'), 'true')
   assert.equal(broadcastBtn.getAttribute('aria-pressed'), 'false')
 
-  // Capture message before midnight (offset 5s -> 23:59:55), reply after midnight (offset 20s -> 00:00:10), and message with fiber createdAt
+  // Capture message before midnight (offset 5s -> 23:59:55), message after midnight (offset 15s -> 00:00:05), and message with fiber createdAt
   addVodMsg(env1, scroller1, { user: 'vod_owner', id: 'm-day1', offset: 5, text: 'before midnight' })
-  addVodMsg(env1, scroller1, { user: 'viewer_1', id: 'm-reply', offset: 15, mention: 'vod_owner', text: ' reply' })
+  addVodMsg(env1, scroller1, { user: 'vod_owner', id: 'm-mid', offset: 15, text: 'after midnight one' })
   const day2AtMs = vodStartMs + 25 * 1000
   addVodMsg(env1, scroller1, { user: 'vod_owner', id: 'm-day2', offset: 25, text: 'after midnight', createdAtIso: new Date(day2AtMs).toISOString() })
 
@@ -3385,11 +3351,11 @@ test('Twitch VOD time mode: toggle relative offset vs broadcast clock across liv
   assert.equal(JSON.parse(env1.storage.get('twitch-live-chat-tweaks-settings-v1')).vodTimeMode, 'broadcast')
 
   const day1Time = state1.history.ids.get('m-day1').view.querySelector('.ttc-time')
-  const replyTime = state1.history.ids.get('m-reply').view.querySelector('.ttc-time')
+  const midTime = state1.history.ids.get('m-mid').view.querySelector('.ttc-time')
   const day2Time = state1.history.ids.get('m-day2').view.querySelector('.ttc-time')
   assert.equal(day1Time.textContent, clockLabel(vodStartMs + 5000))
   assert.equal(day1Time.getAttribute('title'), `${dateKey(vodStartMs + 5000)} ${clockLabel(vodStartMs + 5000)}（影片時間 0:05）`)
-  assert.equal(replyTime.textContent, clockLabel(vodStartMs + 15000))
+  assert.equal(midTime.textContent, clockLabel(vodStartMs + 15000))
   assert.equal(day2Time.textContent, clockLabel(day2AtMs))
   assert.equal(state1.list.children[0].getAttribute('data-date'), dateKey(vodStartMs + 5000))
   assert.equal(state1.list.children[1].getAttribute('data-date'), dateKey(day2AtMs))
@@ -3406,7 +3372,7 @@ test('Twitch VOD time mode: toggle relative offset vs broadcast clock across liv
   // Switch back to offset mode -> restores relative time and clears date dividers
   offsetBtn.listeners.get('click')()
   assert.equal(day1Time.textContent, '0:05')
-  assert.equal(replyTime.textContent, '0:15')
+  assert.equal(midTime.textContent, '0:15')
   assert.equal(day2Time.textContent, '0:25')
   assert.equal(state1.list.children[0].getAttribute('data-date'), null)
   assert.equal(state1.list.children[1].getAttribute('data-date'), null)
@@ -3852,9 +3818,10 @@ test('Twitch native VOD mention highlight: highlight leading and mid-message @me
   assert.equal(earlyToMysteryMod.classList.contains('ttc-vod-target-line'), false)
   assert.equal(earlyToMysteryMod.classList.contains('ttc-vod-mention-line'), false)
 
-  // Mid-message viewer mention is NOT pulled into filtered panel history (reply folding unchanged)
+  // Neither leading nor mid-message viewer @mentions are pulled into the VOD filtered panel (no VOD reply threads)
   assert.equal(state.history.ids.has('m-mid-star'), false)
-  assert.equal(state.history.ids.has('m-lead-owner'), true)
+  assert.equal(state.history.ids.has('m-lead-owner'), false)
+  assert.equal(state.list.querySelectorAll('.ttc-thread').length, 0)
 
   // Late Moderator appears via MutationObserver batch -> highlights mod line as target & backfills earlier viewer mention
   const { line: mysteryModLine } = makeVodLine(env, scroller, {
