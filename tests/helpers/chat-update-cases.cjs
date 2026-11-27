@@ -95,15 +95,14 @@ module.exports = ({ test, assert, boot, site }) => {
 
   test(`${site} updates: incremental updates keep counts correct and settings changes restore excluded history`, () => {
     const env = setup()
-    const cap = site === 'Twitch' ? 1000 : null
-    const initial = cap || 2005
+    const initial = 2005
     for (let i = 0; i < initial; i++) env.api.captureLine(env.make(`old-${i}`).line, env.history)
     env.api.renderMessages(env.state)
     const oldest = env.history.messages[0]
     for (let i = 0; i < 3; i++) env.api.captureLine(env.make(`new-${i}`).line, env.history)
-    const expected = cap || initial + 3
-    assert.equal(oldest.retained, !cap)
-    assert.equal(env.state.list.children.length, cap || initial)
+    const expected = initial + 3
+    assert.equal(oldest.retained, true)
+    assert.equal(env.state.list.children.length, initial)
     env.api.renderMessages(env.state)
     assert.equal(env.state.list.children.length, expected)
     assert.equal(env.state.count.textContent, `${expected} 則`)
@@ -122,39 +121,37 @@ module.exports = ({ test, assert, boot, site }) => {
 
   test(`${site} updates: queues retain history while disabled or hidden`, () => {
     const env = setup()
-    const cap = site === 'Twitch' ? 1000 : null
-    const total = (cap || 2000) + 5
+    const total = 2005
     env.history.enabled = false
     for (let i = 0; i < total; i++) {
       env.api.captureLine(env.make(String(i)).line, env.history)
       env.api.scheduleMessageRender(env.state)
     }
-    const kept = cap || total
     assert.equal(env.frames.size, 0)
-    assert.equal(env.history.messages.length, kept)
-    assert.equal(env.history.dirty.size, kept)
+    assert.equal(env.history.messages.length, total)
+    assert.equal(env.history.dirty.size, total)
     assert.equal(env.history.removed.size, 0)
     assert.equal(env.state.list.children.length, 0)
     env.history.enabled = true
     env.api.renderMessages(env.state, true)
-    assert.equal(env.state.list.firstChild.children.at(-1).textContent, cap ? '5' : '0')
-    assert.equal(env.state.count.textContent, `${kept} 則`)
+    assert.equal(env.state.list.firstChild.children.at(-1).textContent, '0')
+    assert.equal(env.state.count.textContent, `${total} 則`)
     env.document.hidden = true
-    const batch = cap ? total : 50
+    const batch = 50
     for (let i = 0; i < batch; i++) {
       env.api.captureLine(env.make(`background-${i}`).line, env.history)
       env.api.scheduleMessageRender(env.state)
     }
     assert.equal(env.frames.size, 0)
-    assert.equal(env.history.dirty.size, cap ? cap : batch)
-    assert.equal(env.history.removed.size, cap ? cap : 0)
+    assert.equal(env.history.dirty.size, batch)
+    assert.equal(env.history.removed.size, 0)
     env.document.hidden = false
     env.api.handleMessageVisibility()
     env.flushFrames()
     assert.equal(env.history.removed.size, 0)
-    const afterTotal = cap ? cap : kept + batch
+    const afterTotal = total + batch
     assert.equal(env.state.list.children.length, afterTotal)
-    assert.equal(env.state.list.firstChild.children.at(-1).textContent, cap ? 'background-5' : '0')
+    assert.equal(env.state.list.firstChild.children.at(-1).textContent, '0')
     assert.equal(env.state.list.children.at(-1).children.at(-1).textContent, `background-${batch - 1}`)
     assert.equal(env.state.count.textContent, `${afterTotal} 則`)
   })

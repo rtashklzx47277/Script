@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name        Twitch Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.11.9
+// @version     0.11.10
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
-// @description 依頻道主、管理員、VIP、回覆篩選目標與全域帳號包含／排除名單篩選 Twitch 直播與 VOD 聊天，保留回覆目標引言與最近 1000 則／7 天紀錄，支援跨日分隔、搜尋、自動跟隨與 VOD 時間切換（影片秒數／直播時刻），修正 VOD 聊天室多位元組字元後的貼圖位移問題，並在原生 VOD 聊天室以不同色高亮篩選目標發言與 @提及篩選目標的留言；分割螢幕時隱藏聊天室上方橫幅與輸入區底部列。
+// @description 依頻道主、管理員、VIP、回覆篩選目標與全域帳號包含／排除名單篩選 Twitch 直播與 VOD 聊天，保留回覆目標引言與 7 天紀錄（不設則數上限），支援跨日分隔、搜尋、自動跟隨與 VOD 時間切換（影片秒數／直播時刻），修正 VOD 聊天室多位元組字元後的貼圖位移問題，並在原生 VOD 聊天室以不同色高亮篩選目標發言與 @提及篩選目標的留言；分割螢幕時隱藏聊天室上方橫幅與輸入區底部列。
 // @author      Derek
 // @match       *://www.twitch.tv/*
 // @run-at      document-start
@@ -19,7 +19,6 @@
   const USER_SELECTOR = '[data-a-target="chat-message-username"], .chat-author__display-name, [data-test-selector="message-author"], [data-test-selector="message-username"]'
   const BODY_SELECTOR = '[data-a-target="chat-line-message-body"], [data-test-selector="message-text"]'
   const STORAGE_KEY = 'twitch-live-chat-tweaks-settings-v1'
-  const MAX_MESSAGES = 1000
   const MAX_CHANNELS = 5
   const MAX_DISPLAY_NAMES = 500
   const RETENTION_MS = 7 * 24 * 60 * 60 * 1000
@@ -851,14 +850,6 @@
     history.saveScheduled = true
     Promise.resolve().then(() => { history.saveScheduled = false; return flushHistory(history) })
   }
-  const trimHistory = history => {
-    while (history.messages.length > MAX_MESSAGES) {
-      const oldest = history.messages.shift()
-      history.saveQueue.delete(oldest.storageId)
-      history.deleteQueue.add(oldest.storageId)
-      forgetRecord(history, oldest)
-    }
-  }
   const restoreHistory = async history => {
     if (typeof indexedDB === 'undefined') {
       history.archiveReady = true
@@ -969,7 +960,6 @@
         }
       }
       if (mounted?.history === history && mounted.scroller) captureTree(mounted.scroller, history)
-      trimHistory(history)
       history.archiveReady = true
       await flushHistory(history)
       if (mounted?.history === history && history.enabled) renderMessages(mounted, true)
@@ -1438,7 +1428,7 @@
     }
     const previous = message.id ? history.ids.get(message.id) : history.nodes.get(line)
     // Only retain messages matching the active filter so unchecked roles and
-    // excluded accounts cannot evict matching history from the 1000-message cap.
+    // excluded accounts do not bloat retained history.
     if (!(previous?.retained && previous.user === message.user) && !matchesFilter(message, history.settings)) return false
     const replyKey = message.reply
       ? `${message.reply.parentId}\n${message.reply.parentUser}\n${message.reply.parentDisplayName}\n${message.reply.parentText}\n${message.reply.parentDeleted}\n${message.reply.parentModerator}\n${message.reply.parentBroadcaster}\n${message.reply.parentVip}`
@@ -1473,7 +1463,6 @@
       const tail = history.messages.at(-1)
       history.messages.push(record)
       if (hasVodOffset(record) && tail && compareRecords(record, tail) < 0) history.messages.sort(compareRecords)
-      trimHistory(history)
     }
     history.nodes.set(line, record)
     if (message.id) history.ids.set(message.id, record)

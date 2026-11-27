@@ -321,7 +321,7 @@ test('Twitch archive: edits and DOM rebuilds do not renew expiry, and records ex
   assert.equal(database.records.size, 0)
 })
 
-test('Twitch archive: isolate channels, merge concurrent writers, restore directly and cap at 1000 in memory and IndexedDB', async () => {
+test('Twitch archive: isolate channels, merge concurrent writers, and restore all messages directly without a count cap', async () => {
   const database = fakeIndexedDB()
   const a = boot({ database })
   const b = boot({ database })
@@ -332,25 +332,25 @@ test('Twitch archive: isolate channels, merge concurrent writers, restore direct
   for (let i = 0; i < 1002; i++) a.api.captureLine(a.message('mod', `old ${i}`, 'moderator', `msg-${i}`).line, h1)
   b.api.captureLine(b.message('mod', 'another tab', 'moderator', 'another-tab').line, h2)
   a.api.captureLine(a.message('mod', 'another channel', 'moderator', 'another-channel').line, other)
-  assert.equal(h1.messages.length, 1000)
-  assert.equal(h1.ids.has('msg-0'), false)
-  assert.equal(h1.ids.has('msg-1'), false)
-  assert.equal(h1.ids.has('msg-2'), true)
+  assert.equal(h1.messages.length, 1002)
+  assert.equal(h1.ids.has('msg-0'), true)
+  assert.equal(h1.ids.has('msg-1'), true)
+  assert.equal(h1.ids.has('msg-1001'), true)
   await Promise.all([a.api.flushHistory(h1), b.api.flushHistory(h2), a.api.flushHistory(other)])
-  assert.equal(database.records.has(JSON.stringify(['sample_channel', 'msg-0'])), false)
-  assert.equal(database.records.has(JSON.stringify(['sample_channel', 'msg-1'])), false)
+  assert.equal(database.records.has(JSON.stringify(['sample_channel', 'msg-0'])), true)
+  assert.equal(database.records.has(JSON.stringify(['sample_channel', 'msg-1'])), true)
   assert.equal(database.records.has(JSON.stringify(['sample_channel', 'another-tab'])), true)
   assert.equal(database.records.has(JSON.stringify(['another_channel', 'another-channel'])), true)
   const fresh = boot({ database })
   const restored = fresh.api.getHistory('sample_channel')
   await restored.restorePromise
-  assert.equal(restored.messages.length, 1000)
+  assert.equal(restored.messages.length, 1003)
   assert.equal(restored.older, undefined)
-  assert.equal(database.records.has(JSON.stringify(['sample_channel', 'msg-2'])), false)
+  assert.equal(database.records.has(JSON.stringify(['sample_channel', 'msg-0'])), true)
   const state = { history: restored, list: new fresh.Element(), empty: {}, count: {}, latest: {} }
   fresh.api.renderMessages(state)
-  assert.equal(state.count.textContent, '1000 則')
-  assert.equal(state.list.children[0].children.at(-1).textContent, 'old 3')
+  assert.equal(state.count.textContent, '1003 則')
+  assert.equal(state.list.children[0].children.at(-1).textContent, 'old 0')
   assert.equal(restored.ids.has('another-channel'), false)
 })
 
@@ -599,29 +599,28 @@ test('Twitch chat: global settings survive reload across channels when archive s
   assert.equal(env.api.getChannel(), '')
 })
 
-test('Twitch chat: cap history at 1000 in memory and IndexedDB without forcing a reader to the bottom', async () => {
+test('Twitch chat: retain >2000 messages without count cap and keep paused reader position', async () => {
   const database = fakeIndexedDB()
   const env = boot({ database })
   const history = env.api.getHistory('sample_channel')
   await history.restorePromise
-  for (let i = 0; i < 1005; i++) {
+  for (let i = 0; i < 2005; i++) {
     env.api.captureLine(env.message('mod', String(i), 'Moderator', `id-${i}`).line, history)
     if (i === 1000) await env.api.flushHistory(history)
   }
   await env.api.flushHistory(history)
-  assert.equal(history.messages.length, 1000)
-  assert.equal(history.messages[0].view.children.at(-1).innerHTML, '5')
-  assert.equal(database.records.size, 1000)
-  assert.equal(database.records.has(JSON.stringify(['sample_channel', 'id-0'])), false)
-  assert.equal(database.records.has(JSON.stringify(['sample_channel', 'id-4'])), false)
-  assert.equal(database.records.has(JSON.stringify(['sample_channel', 'id-5'])), true)
+  assert.equal(history.messages.length, 2005)
+  assert.equal(history.messages[0].view.children.at(-1).innerHTML, '0')
+  assert.equal(database.records.size, 2005)
+  assert.equal(database.records.has(JSON.stringify(['sample_channel', 'id-0'])), true)
+  assert.equal(database.records.has(JSON.stringify(['sample_channel', 'id-2004'])), true)
   const state = { history, list: new env.Element(), empty: {}, count: {}, latest: {} }
   state.list.scrollTop = 123
   state.list.scrollHeight = 9999
   history.follow = false
   env.api.renderMessages(state)
   assert.equal(state.list.scrollTop, 123)
-  assert.equal(state.count.textContent, '1000 則')
+  assert.equal(state.count.textContent, '2005 則')
   assert.equal(state.latest.hidden, false)
   history.follow = true
   env.api.renderMessages(state)
@@ -2094,7 +2093,7 @@ test('Twitch reply drawers: preserve cross-day date dividers across threads, han
   env.api.renderMessages(state, true)
   assert.equal(mod1View.classList.contains('ttc-has-replies'), true)
 
-  // Evicting d1-mod1 from 1000-cap while d1-rep1 remains converts d1-rep1's thread into an orphan .ttc-reply-group
+  // Removing expired d1-mod1 while d1-rep1 remains converts d1-rep1's thread into an orphan .ttc-reply-group
   const rep1Record = history.ids.get('d1-rep1')
   const mod1Record = history.ids.get('d1-mod1')
   history.messages = history.messages.filter(r => r !== mod1Record)
@@ -2640,26 +2639,31 @@ test('Twitch scroll stability: avoid overflow-anchor: none, keep toggles anchore
   state.list.listeners.get('keydown')({ key: 'Control' })
   assert.equal(state.readerScrollIntent, false)
 
-  // Pause reading at m-500 after growing to 1000-message cap
+  // Pause reading at m-500 after growing to 1000 messages (m-9 has a 90px open drawer)
   for (let i = 10; i < 1000; i++) {
     env.api.captureLine(env.message('mod_a', `msg ${i}`, 'Moderator', `m-${i}`).line, history)
   }
   state.latest.listeners.get('click')()
   state.list.listeners.get('wheel')({})
-  state.list.scrollTop = 500 * 30
+  state.list.scrollTop = 500 * 30 + 90
   state.list.listeners.get('scroll')()
   assert.equal(history.follow, false)
   const row500 = history.ids.get('m-500').view
   assert.equal(row500.getBoundingClientRect().top, LIST_TOP)
 
-  // Evict 5 oldest retained records (150px) with no full scan -> m-500 stays pinned at LIST_TOP
+  // Remove 5 oldest retained records (150px) with no full scan -> m-500 stays pinned at LIST_TOP
+  for (const rec of history.messages.splice(0, 5)) {
+    rec.retained = false
+    history.ids.delete(rec.id)
+    history.removed.add(rec)
+  }
   history.messages[Symbol.iterator] = () => { throw Error('unexpected full history scan') }
   for (let i = 1000; i < 1005; i++) {
     env.api.captureLine(env.message('mod_a', `msg ${i}`, 'Moderator', `m-${i}`).line, history)
   }
   env.api.renderMessages(state)
   delete history.messages[Symbol.iterator]
-  assert.equal(state.list.scrollTop, 495 * 30)
+  assert.equal(state.list.scrollTop, 495 * 30 + 90)
   assert.equal(row500.getBoundingClientRect().top, LIST_TOP)
   assert.equal(state.locationPinned, true)
 
@@ -2673,7 +2677,7 @@ test('Twitch scroll stability: avoid overflow-anchor: none, keep toggles anchore
   state.list.scrollTop = 0
   env.api.setEnabled(state, true)
   assert.equal(history.follow, false)
-  assert.equal(state.list.scrollTop, 492 * 30)
+  assert.equal(state.list.scrollTop, 495 * 30)
   assert.equal(row500.getBoundingClientRect().top, LIST_TOP)
 
   env.api.unmount()
