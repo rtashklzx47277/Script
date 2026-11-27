@@ -13,7 +13,7 @@
 | [YouTubePlayerTweaks](https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubePlayerTweaks.user.js) | YouTube / YouTube Music | 播放器加截圖鍵(`S`)、滾輪調音量(含 Shorts 與 YouTube Music 喇叭圖示)/播放速度、直播追平(1.5x 追到最低延遲);解鎖無 DVR 直播的回看,並將回看視窗放寬到 7 天;Shorts 隱藏影片內資訊並預設於右側開啟可切換影片資訊／留言的頁籤面板 |
 | [YouTubeLiveClock](https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveClock.user.js) | YouTube | 直播顯示經過時間,直播存檔顯示當下時間點的絕對時刻 |
 | [YouTubeLiveLayout](https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveLayout.user.js) | YouTube | 一般模式不改動版面;無聊天室時將劇院模式滿版;有聊天室時使用響應式劇院版面,窄視窗將聊天室排在影片下方 |
-| [YouTubeLiveChatTweaks](https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js) | YouTube 聊天室 | 用戶資訊卡、獨立 SC／會員紀錄（含類型與七色篩選）、隱藏聊天模式選單、Broadcaster／Moderator／Verified 與全域帳號包含／排除篩選、7 天完整紀錄與重開接續、表情複製、重新載入、斷線自動恢復與前景自動跟隨 |
+| [YouTubeLiveChatTweaks](https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js) | YouTube 聊天室 | 用戶資訊卡、獨立 SC／會員／禮物紀錄（含類型與七色篩選）、隱藏聊天模式選單、Broadcaster／Moderator／Verified 與全域帳號包含／排除篩選、7 天完整紀錄與重開接續、表情複製、重新載入、斷線自動恢復與前景自動跟隨 |
 | [YouTubeAutoDisableSubtitles](https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeAutoDisableSubtitles.user.js) | YouTube | 進入影片自動關閉字幕 |
 | [YouTubeDefaultMaxQuality](https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeDefaultMaxQuality.user.js) | YouTube | 自動切到最高畫質 |
 | [YouTubeChannelAutoPause](https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeChannelAutoPause.user.js) | YouTube | 頻道頁自動暫停自動播放的預告影片 |
@@ -81,13 +81,13 @@ YouTube 篩選聊天室有 `tests/fixtures/youtube-chat.html` 測試頁，將該
 
 SC／會員按鈕沿用 YouTube 原生支援按鈕的鈔票圖示；原生按鈕尚未載入或回放沒有購買按鈕時，使用已從實際聊天室確認的相同 SVG。紀錄保留原訊息的背景、金額底色與文字配色，不以金額或幣別推算顏色；測試頁的「新增七色 SC」可檢查各色級距。
 
-「SC／會員紀錄」也會自動收集會員加入（`membership`）、會員里程碑（`milestone`）與會員贈禮（`membershipGift`），不記錄獲贈會員公告。里程碑保留累積月份、會員等級和完整留言；贈禮保留送禮者、數量與公告文字。不論是否開啟紀錄列表都會收集，與 SC／Super Sticker 一起保存 7 天，重開接續並依訊息 ID 去重；一般會員的普通聊天仍依原本的用戶篩選條件處理。測試頁提供三種會員事件按鈕與獲贈會員的忽略測試按鈕。
+「SC／會員紀錄」也會自動收集會員加入（`membership`）、會員里程碑（`milestone`）、會員贈禮（`membershipGift`）與直播禮物（`gift`，`yt-gift-message-view-model`），不記錄獲贈會員公告。里程碑保留累積月份、會員等級和完整留言；贈禮保留送禮者、數量與公告文字；直播禮物於原生聊天室會將版面、字體大小、頭像尺寸與行內換行樣式調整為與一般留言一致（點發送者名稱同樣可開啟用戶資訊卡並依 `@帳號` 查詢頻道名稱與 UCID），於「SC／會員紀錄」則保留禮物文字與禮物圖片，在原生未提供色票時採用紫底白字呈現並保存 7 天，重開接續並依訊息 ID 去重；一般會員的普通聊天仍依原本的用戶篩選條件處理。測試頁提供三種會員事件按鈕、「新增禮物」按鈕與獲贈會員的忽略測試按鈕。
 
 用戶篩選的「目標用戶」內提供預設開啟的 Verified 選項，與 Broadcaster、Moderator 並列，為全域設定與跨分頁同步。已驗證用戶已載入的發言會持續收集，取消勾選後再開啟仍可查看 7 天保存期限內已收集的訊息；全域排除名單一律優先。只依 YouTube 原生驗證徽章與驗證圖示資料辨識，不依帳號名稱或會員徽章判斷，也不將一般已驗證用戶發言加入 SC／會員紀錄。測試頁的「新增已驗證用戶訊息」可驗證。
 
-SC／會員紀錄的發送者顯示為「真正的頻道名稱 @帳號」。依 UC 頻道 ID 查詢列表中可見的發送者，同一頻道共用查詢與本次頁面快取，最多同時查詢 4 個頻道；載入中或失敗時保留原本名稱與 @帳號，不阻擋紀錄收集。取得的名稱會隨 7 天紀錄一起保存，重開可立即顯示，查看時再更新。一般用戶篩選的普通訊息維持原顯示方式，帳號篩選仍使用原本身分與 UC ID。
+SC／會員紀錄的發送者顯示為「真正的頻道名稱 @帳號」。依 UC 頻道 ID（直播禮物若無 UCID 則依 `@帳號`）查詢列表中可見的發送者，同一頻道共用查詢與本次頁面快取，最多同時查詢 4 個頻道；載入中或失敗時保留原本名稱與 @帳號，不阻擋紀錄收集。取得的名稱會隨 7 天紀錄一起保存，重開可立即顯示，查看時再更新。一般用戶篩選的普通訊息維持原顯示方式，帳號篩選仍使用原本身分與 UC ID。
 
-SC／會員紀錄上方提供搜尋欄與類型／色彩篩選勾選列，可搜尋頻道名稱、@帳號、留言、金額與會員事件文字，不分英文大小寫並支援全形字元；多個關鍵字以空白分隔時須全部符合。篩選列包含「會員加入」、「會員里程碑」、「會員贈禮」與「超級留言」搭配對應七種顏色方塊（Super Sticker 依色票級距併入「超級留言」篩選），預設全部勾選，勾選或取消「超級留言」可連動切換七個顏色，部分勾選時顯示不定狀態（indeterminate）；勾選狀態會儲存在瀏覽器並跨分頁同步，重新整理或重開影片會保留先前勾選條件（若瀏覽器封鎖寫入則僅保留至本次頁面結束），不影響目標用戶篩選設定。搜尋與類型／色彩篩選可同時疊加並直接涵蓋目前影片 7 天保存期限內的所有完整紀錄（無分頁或「載入較早結果」限制）；新增訊息與內容更新會同步反映，清空搜尋或恢復勾選即還原列表；切換一般用戶篩選不套用 SC 搜尋與類型篩選條件。
+SC／會員紀錄上方提供搜尋欄與類型／色彩篩選勾選列，可搜尋頻道名稱、@帳號、留言、金額與會員／禮物事件文字（包含「禮物」與圖片無障礙說明），不分英文大小寫並支援全形字元；多個關鍵字以空白分隔時須全部符合。篩選列包含「會員加入」、「會員里程碑」、「會員贈禮」、「禮物」與「超級留言」搭配對應七種顏色方塊（Super Sticker 依色票級距併入「超級留言」篩選），預設全部勾選，勾選或取消「超級留言」可連動切換七個顏色，部分勾選時顯示不定狀態（indeterminate）；勾選狀態會儲存在瀏覽器並跨分頁同步，重新整理或重開影片會保留先前勾選條件（若瀏覽器封鎖寫入則僅保留至本次頁面結束），不影響目標用戶篩選設定。搜尋與類型／色彩篩選可同時疊加並直接涵蓋目前影片 7 天保存期限內的所有完整紀錄（無分頁或「載入較早結果」限制）；新增訊息與內容更新會同步反映，清空搜尋或恢復勾選即還原列表；切換一般用戶篩選不套用 SC 搜尋與類型篩選條件。
 
 搜尋結果旁的「定位」可清空搜尋並回到完整 7 天 SC／會員紀錄，將選中的訊息捲到列表中央並標示 3 秒，同時維持其前後完整 SC／會員事件上下文，保存期限維持不變。定位後暫停自動跟隨，手動捲到最下方或按「回到最新訊息」可恢復。
 

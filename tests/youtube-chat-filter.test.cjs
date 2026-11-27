@@ -268,6 +268,47 @@ function superStickerMessage(env, { id = 'sticker-1', imageInDOM = true } = {}) 
   return { ...result, image }
 }
 
+function liveGiftMessage(env, { user = '@매리도 ', text = 'よしよし を送信しました',
+  imageUrl = '//www.gstatic.com/youtube/img/pdg/gift/assets/yoshiyoshi.png=w480-h480',
+  a11yLabel = '@매리도 さんから よしよし のギフトが送られました',
+  avatarUrl = 'https://yt4.ggpht.com/avatar=s64-c-k-c0x00ffffff-no-rj',
+  id = 'gift-msg-1', imageInDOM = true, v1 = false } = {}) {
+  const line = new env.Element('yt-gift-message-view-model')
+  line.data = {
+    id,
+    authorName: { content: user },
+    text: { content: text },
+    authorAvatar: avatarUrl ? { avatarViewModel: { image: { sources: [{ url: avatarUrl, width: 64, height: 64 }] } } } : undefined,
+    giftImage: imageUrl ? { sources: [{ url: imageUrl, width: 480, height: 480 }] } : undefined,
+    giftImageA11yLabel: a11yLabel,
+  }
+  const container = line.appendChild(new env.Element('div'))
+  container.id = v1 ? 'gift-message-content' : 'gift-message-v2'
+  const photo = container.appendChild(new env.Element('yt-img-shadow'))
+  photo.id = 'author-photo'
+  if (avatarUrl) {
+    const avatar = photo.appendChild(new env.Element('img'))
+    avatar.setAttribute('src', avatarUrl)
+  }
+  const content = v1 ? container : container.appendChild(new env.Element('div'))
+  if (!v1) content.id = 'content'
+  const author = content.appendChild(new env.Element(v1 ? 'span' : 'yt-attributed-string'))
+  author.id = v1 ? 'author-name' : 'author-name-v2'
+  author.textContent = user
+  const body = content.appendChild(new env.Element(v1 ? 'span' : 'yt-attributed-string'))
+  body.id = v1 ? 'message' : 'message-v2'
+  body.textContent = text
+  let giftImg = null
+  if (imageInDOM && imageUrl) {
+    const giftHost = content.appendChild(new env.Element('yt-image'))
+    giftHost.id = 'gift-image'
+    giftImg = giftHost.appendChild(new env.Element('img'))
+    giftImg.setAttribute('src', imageUrl)
+    giftImg.setAttribute('alt', '')
+  }
+  return { line, author, body, giftImg, container }
+}
+
 const fakeIndexedDB = require('./helpers/indexeddb.cjs')
 
 test('YouTube SC author names: share channel lookups, keep handles and persist resolved names without changing filters or expiry', async () => {
@@ -2551,6 +2592,8 @@ test('YouTube SC type & color filters: default checked state, Chinese labels wit
   assert.equal(labelFor(typeBox('membership')).textContent, '會員加入')
   assert.equal(labelFor(typeBox('milestone')).textContent, '會員里程碑')
   assert.equal(labelFor(typeBox('membershipGift')).textContent, '會員贈禮')
+  assert.equal(labelFor(typeBox('gift')).textContent, '禮物')
+  assert.equal(typeBox('gift').checked, true)
   assert.equal(labelFor(typeBox('superchat')).textContent, '超級留言')
   for (const [key, , , colorLabel] of tiers) {
     const input = colorBox(key)
@@ -2710,6 +2753,7 @@ test('YouTube SC type & color filters: persist selections across reloads, sync t
   assert.equal(typeBox('membership').checked, false)
   assert.equal(typeBox('milestone').checked, false)
   assert.equal(typeBox('membershipGift').checked, true)
+  assert.equal(typeBox('gift').checked, true)
   assert.equal(typeBox('superchat').checked, false)
   assert.equal(typeBox('superchat').indeterminate, true)
   assert.equal(colorBox('blue').checked, false)
@@ -2757,6 +2801,7 @@ test('YouTube SC type & color filters: persist selections across reloads, sync t
     membership: true,
     milestone: true,
     membershipGift: true,
+    gift: true,
     colors: { blue: true, cyan: true, green: true, yellow: true, orange: true, magenta: true, red: true },
   })
 
@@ -2771,4 +2816,173 @@ test('YouTube SC type & color filters: persist selections across reloads, sync t
   const secondHistory = blockedEnv.api.getHistory(blockedEnv.api.getChannel())
   await secondHistory.restorePromise
   assert.equal(secondHistory.supportFilter.membershipGift, false)
+})
+
+test('YouTube live gifts: capture v2/v1 gift events, normalize protocol-relative images, deduplicate late loads, persist, search, and filter', async () => {
+  const database = fakeIndexedDB()
+  const sharedStorage = new Map()
+  // Legacy saved supportFilter missing `gift` must default `gift` to true.
+  sharedStorage.set('youtube-live-chat-tweaks-support-filter-v1', JSON.stringify({
+    membership: true, milestone: true, membershipGift: true,
+    colors: { blue: true, cyan: true, green: true, yellow: true, orange: true, magenta: true, red: true },
+  }))
+  const env = boot({ database, storage: sharedStorage, trustedTypes: true })
+  const header = env.document.body.appendChild(new env.Element('yt-live-chat-header-renderer'))
+  header.appendChild(new env.Element('button')).id = 'live-chat-header-context-menu'
+  const scroller = env.document.body.appendChild(new env.Element('div')).appendChild(new env.Element('div'))
+  scroller.id = 'item-scroller'
+  scroller.appendChild(new env.Element('div')).id = 'items'
+  env.location.href = 'https://www.youtube.com/live_chat?v=live-gift-vid'
+  env.api.refresh()
+  const state = env.api.mounted
+  const { history, panel } = state
+  await history.restorePromise
+
+  // Capture v2 gift with trailing space in authorName, protocol-relative image, and empty DOM img initially.
+  const gift = liveGiftMessage(env, { id: 'gift-v2-1', imageInDOM: false })
+  gift.line.data.giftImage = undefined
+  assert.equal(env.api.captureLine(gift.line, history), true)
+  assert.equal(history.messages.length, 1)
+  const record = history.messages[0]
+  assert.equal(record.supportEvent, 'gift')
+  assert.equal(record.user, '@매리도')
+  assert.equal(record.authorName, '@매리도')
+  assert.equal(record.view.querySelector('.ytcf-amount').textContent, '禮物')
+  assert.equal(record.view.style.backgroundColor, '#7406ac')
+  assert.equal(record.view.querySelector('.ytcf-amount').style.backgroundColor, '#52077a')
+  assert.equal(record.view.querySelector('.ytcf-gift-image'), null)
+
+  // Late giftImage DOM load updates existing record without duplicating it.
+  const giftHost = gift.line.querySelector('#content').appendChild(new env.Element('yt-image'))
+  giftHost.id = 'gift-image'
+  const giftImg = giftHost.appendChild(new env.Element('img'))
+  giftImg.setAttribute('src', '//www.gstatic.com/youtube/img/pdg/gift/assets/yoshiyoshi.png=w480-h480')
+  assert.equal(env.api.captureMutations([{ target: giftImg, addedNodes: [giftImg] }], history), true)
+  assert.equal(history.messages.length, 1)
+  const renderedGiftImg = record.view.querySelector('.ytcf-gift-image')
+  assert.ok(renderedGiftImg)
+  assert.equal(renderedGiftImg.getAttribute('src'), 'https://www.gstatic.com/youtube/img/pdg/gift/assets/yoshiyoshi.png=w480-h480')
+  assert.equal(renderedGiftImg.getAttribute('alt'), '@매리도 さんから よしよし のギフトが送られました')
+
+  // Capture legacy v1 gift layout and verify ordinary target filter ignores it.
+  const giftV1 = liveGiftMessage(env, { id: 'gift-v1-1', user: '@v1sender', text: 'ハート を送信しました',
+    a11yLabel: '@v1sender さんから ハート のギフトが送られました', v1: true })
+  assert.equal(env.api.captureLine(giftV1.line, history), true)
+  env.api.setEnabled(state, true, false)
+  assert.equal(state.count.textContent, '0 則')
+
+  // Switch to SC／會員紀錄, check filter toggle, search, and locate.
+  env.api.setEnabled(state, true, true)
+  const giftCheckbox = panel.querySelector('[data-sc-type="gift"]')
+  assert.equal(giftCheckbox.checked, true)
+  assert.equal(state.count.textContent, '2 則')
+
+  // Search by label ('禮物'), gift text, and giftImageA11yLabel.
+  state.supportSearch.value = '禮物'
+  state.supportSearch.listeners.get('input')()
+  assert.equal(state.count.textContent, '2 則符合')
+  state.supportSearch.value = 'よしよし のギフト'
+  state.supportSearch.listeners.get('input')()
+  assert.equal(state.count.textContent, '1 則符合')
+  state.supportSearch.value = ''
+  state.supportSearch.listeners.get('input')()
+
+  // Uncheck 禮物 filter -> hides gifts, persists, and locateSupportRecord re-enables it.
+  giftCheckbox.checked = false
+  giftCheckbox.listeners.get('change')()
+  assert.equal(state.count.textContent, '0 則')
+  assert.equal(JSON.parse(sharedStorage.get(env.api.SUPPORT_FILTER_KEY)).gift, false)
+  state.list.clientHeight = 200
+  state.list.scrollTop = 0
+  assert.equal(env.api.locateSupportRecord(state, 'gift-v2-1'), true)
+  assert.equal(giftCheckbox.checked, true)
+  assert.equal(state.count.textContent, '2 則')
+
+  // Persist to IndexedDB and restore cleanly on reload.
+  await env.api.flushHistory(history)
+  const fresh = boot({ database, storage: sharedStorage, trustedTypes: true })
+  fresh.location.href = 'https://www.youtube.com/live_chat?v=live-gift-vid'
+  const restored = fresh.api.getHistory(fresh.api.getChannel())
+  await restored.restorePromise
+  assert.equal(restored.messages.length, 2)
+  assert.equal(restored.messages[0].supportEvent, 'gift')
+  assert.equal(restored.messages[0].view.querySelector('.ytcf-amount').textContent, '禮物')
+  assert.equal(restored.messages[0].view.querySelector('.ytcf-gift-image').getAttribute('src'),
+    'https://www.gstatic.com/youtube/img/pdg/gift/assets/yoshiyoshi.png=w480-h480')
+})
+
+test('YouTube live gifts: resolve handle to channel name and UCID in SC records and native author cards, and align native chat CSS', async () => {
+  const database = fakeIndexedDB()
+  const fetchByEndpoint = (url, options) => {
+    const endpoint = String(url)
+    const body = JSON.parse(options.body)
+    if (endpoint.includes('navigation/resolve_url')) {
+      if (body.url === 'https://www.youtube.com/@%EB%A7%A4%EB%A6%AC%EB%8F%84') {
+        return Promise.resolve({ ok: true, json: async () => ({
+          endpoint: { browseEndpoint: { browseId: 'UC4444444444444444444444', canonicalBaseUrl: '/@매리도' } },
+        }) })
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) })
+    }
+    if (endpoint.includes('browse') && body.browseId === 'UC4444444444444444444444') {
+      return Promise.resolve({ ok: true, json: async () => ({
+        metadata: { channelMetadataRenderer: {
+          externalId: 'UC4444444444444444444444', title: '매리도真實名稱', vanityChannelUrl: 'https://www.youtube.com/@매리도',
+        } },
+      }) })
+    }
+    return Promise.resolve({ ok: false })
+  }
+  const env = boot({ database, fetchProfile: fetchByEndpoint })
+  const app = env.document.body.appendChild(new env.Element('yt-live-chat-app'))
+  const history = env.api.getHistory('channel:@host')
+  await history.restorePromise
+
+  // Verify injected CSS aligns yt-gift-message-view-model with regular messages.
+  const stylesText = env.document.head.querySelectorAll('style').map(s => s.textContent).join('\n')
+  assert.match(stylesText, /#items > yt-gift-message-view-model[\s\S]*padding:\s*var\(--chat-message-padding-block\)\s+var\(--chat-inline-padding\)/)
+  assert.match(stylesText, /#item-scroller #items > yt-gift-message-view-model[\s\S]*font-size:\s*14px\s*!important/)
+  assert.match(stylesText, /#item-scroller #items > yt-gift-message-view-model #author-photo[\s\S]*width:\s*1\.4em\s*!important/)
+  assert.match(stylesText, /:is\([^)]*yt-gift-message-view-model[^)]*\)\s*:is\(#author-name,\s*#author-name-v2\)/)
+
+  // Capture gift -> resolveSupportAuthor resolves UCID and channel name via resolveHandle.
+  const gift = liveGiftMessage(env, { id: 'gift-resolve-1' })
+  app.appendChild(gift.line)
+  assert.equal(env.api.captureLine(gift.line, history), true)
+  const record = history.messages[0]
+  assert.equal(record.channelId, '')
+  await env.api.resolveSupportAuthor(history, record)
+  assert.equal(record.channelId, 'UC4444444444444444444444')
+  assert.equal(record.view.querySelector('strong').textContent, '매리도真實名稱 @매리도')
+
+  // Clicking #author-name-v2 on native gift element opens author card and stops propagation.
+  let propagated = false
+  env.api.guardMessageMenu({
+    target: gift.author,
+    preventDefault() {},
+    stopPropagation() { propagated = true },
+  })
+  assert.equal(propagated, true)
+  const card = env.api.getAuthorCard()
+  assert.ok(card)
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.equal(card.querySelector('.ytuc-name').textContent, '매리도真實名稱')
+  assert.equal(card.querySelector('.ytuc-id').textContent, 'UC4444444444444444444444')
+  assert.equal(card.querySelector('.ytuc-name').href, 'https://www.youtube.com/channel/UC4444444444444444444444')
+  env.api.dismissCard()
+
+  // Pressing Enter on #author-name-v2 also opens the author card.
+  env.document.listeners.get('keydown')({
+    key: 'Enter', target: gift.author,
+    preventDefault() {}, stopPropagation() {}, stopImmediatePropagation() {},
+  })
+  assert.ok(env.api.getAuthorCard())
+  env.api.dismissCard()
+
+  // Clicking non-gift author without channelId must NOT invoke resolveHandle.
+  const callsBeforePlain = env.profileCalls.length
+  const plain = env.message('@no_id_plain', 'hi')
+  app.appendChild(plain.line)
+  env.api.guardMessageMenu({ target: plain.author, preventDefault() {}, stopPropagation() {} })
+  assert.equal(env.profileCalls.length, callsBeforePlain)
 })

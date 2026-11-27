@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.8.16
+// @version     0.8.17
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @description 提供 YouTube 聊天室用戶資訊卡、獨立 SC／會員事件紀錄與類型顏色篩選、全域角色與帳號包含／排除篩選、表情複製、重新載入、斷線自動恢復與自動跟隨。
@@ -112,20 +112,36 @@
     }
 
     #items > yt-live-chat-text-message-renderer, /* 一般訊息 */
+    #items > yt-gift-message-view-model, /* 禮物訊息 */
     #items > ytd-sponsorships-live-chat-gift-redemption-announcement-renderer /* 贈禮公告 */ {
       padding: var(--chat-message-padding-block) var(--chat-inline-padding) !important;
     }
 
     /* Use one inline flow so wrapped text can also use the avatar's column. */
-    #item-scroller #items > yt-live-chat-text-message-renderer {
+    #item-scroller #items > yt-live-chat-text-message-renderer,
+    #item-scroller #items > yt-gift-message-view-model {
       display: block !important;
     }
 
-    #item-scroller #items > yt-live-chat-text-message-renderer > #content {
-      display: inline !important;
+    #item-scroller #items > yt-gift-message-view-model {
+      font-size: 14px !important;
+      line-height: 1.5 !important;
+      cursor: auto !important;
     }
 
-    #item-scroller #items > yt-live-chat-text-message-renderer > #author-photo {
+    #item-scroller #items > yt-gift-message-view-model > #gift-message-v2 {
+      display: block !important;
+    }
+
+    #item-scroller #items > yt-live-chat-text-message-renderer > #content,
+    #item-scroller #items > yt-gift-message-view-model #content {
+      display: inline !important;
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+
+    #item-scroller #items > yt-live-chat-text-message-renderer > #author-photo,
+    #item-scroller #items > yt-gift-message-view-model #author-photo {
       display: inline-block !important;
       float: none !important;
       width: 1.4em !important;
@@ -136,12 +152,18 @@
 
     /* YouTube gives the inner image fixed width/height attributes (24px).
        Resize it with the host to avoid an off-center crop inside the circle. */
-    #item-scroller #items > yt-live-chat-text-message-renderer > #author-photo > img {
+    #item-scroller #items > yt-live-chat-text-message-renderer > #author-photo > img,
+    #item-scroller #items > yt-gift-message-view-model #author-photo > img {
       display: block !important;
       width: 100% !important;
       height: 100% !important;
       object-fit: cover !important;
       object-position: center !important;
+    }
+
+    #item-scroller #items > yt-gift-message-view-model :is(#author-name-v2, #message-v2, #author-name, #message) {
+      font-size: inherit !important;
+      line-height: inherit !important;
     }
 
     #items > ytd-sponsorships-live-chat-gift-redemption-announcement-renderer > #author-photo {
@@ -192,13 +214,15 @@
     }
   `)
 
+  const GIFT_MESSAGE_SELECTOR = 'yt-gift-message-view-model'
+  const AUTHOR_NAME_SELECTOR = '#author-name, #author-name-v2'
   const MEMBERSHIP_EVENT_SELECTORS = {
     membership: 'yt-live-chat-membership-item-renderer',
     membershipGift: 'ytd-sponsorships-live-chat-gift-purchase-announcement-renderer, yt-live-chat-sponsorships-gift-purchase-announcement-renderer',
   }
   const NATIVE_MESSAGE_SELECTOR = [
     'yt-live-chat-text-message-renderer', 'yt-live-chat-paid-message-renderer',
-    'yt-live-chat-paid-sticker-renderer', ...Object.values(MEMBERSHIP_EVENT_SELECTORS),
+    'yt-live-chat-paid-sticker-renderer', GIFT_MESSAGE_SELECTOR, ...Object.values(MEMBERSHIP_EVENT_SELECTORS),
   ].join(', ')
 
   const rendererData = line => line.polymerController?.data || line.data || {}
@@ -211,7 +235,7 @@
     const target = event.target?.nodeType === 1 ? event.target : event.target?.parentElement
     const line = target?.closest(NATIVE_MESSAGE_SELECTOR)
     if (!line || line.querySelector('#menu')?.contains(target)) return
-    const author = target.closest('#author-name')
+    const author = target.closest(AUTHOR_NAME_SELECTOR)
     if (author) {
       event.preventDefault()
       openAuthorCard(line, author)
@@ -270,9 +294,9 @@
     #item-scroller #items > :is(${NATIVE_MESSAGE_SELECTOR}) #menu {
       display: none !important;
     }
-    :is(${NATIVE_MESSAGE_SELECTOR}) #author-name { cursor: pointer; }
-    :is(${NATIVE_MESSAGE_SELECTOR}) #author-name:hover { text-decoration: underline; }
-    :is(${NATIVE_MESSAGE_SELECTOR}) #author-name:focus-visible { outline: 2px solid var(--yt-live-chat-link-text-color, #3ea6ff); outline-offset: 2px; }
+    :is(${NATIVE_MESSAGE_SELECTOR}) :is(#author-name, #author-name-v2) { cursor: pointer; }
+    :is(${NATIVE_MESSAGE_SELECTOR}) :is(#author-name, #author-name-v2):hover { text-decoration: underline; }
+    :is(${NATIVE_MESSAGE_SELECTOR}) :is(#author-name, #author-name-v2):focus-visible { outline: 2px solid var(--yt-live-chat-link-text-color, #3ea6ff); outline-offset: 2px; }
   `)
 
   const debounce = (func, delay) => {
@@ -970,7 +994,7 @@
     const RETENTION_MS = 7 * 24 * 60 * 60 * 1000
     const STREAMS_KEY = 'youtube-live-chat-tweaks-streams-v1'
     const DEFAULT_SETTINGS = { moderators: true, broadcaster: true, verified: true, users: [], excludedUsers: [] }
-    const SUPPORT_EVENTS = ['superChat', 'superSticker', 'membership', 'milestone', 'membershipGift']
+    const SUPPORT_EVENTS = ['superChat', 'superSticker', 'gift', 'membership', 'milestone', 'membershipGift']
     const SC_COLOR_TIERS = [
       { key: 'blue', label: '藍色', color: '#2962ff' },
       { key: 'cyan', label: '淺藍', color: '#00e5ff' },
@@ -994,12 +1018,14 @@
       membership: true,
       milestone: true,
       membershipGift: true,
+      gift: true,
       colors: Object.fromEntries(SC_COLOR_TIERS.map(tier => [tier.key, true])),
     })
     const cloneSupportFilter = filter => ({
       membership: filter?.membership !== false,
       milestone: filter?.milestone !== false,
       membershipGift: filter?.membershipGift !== false,
+      gift: filter?.gift !== false,
       colors: Object.fromEntries(SC_COLOR_TIERS.map(tier => [tier.key, filter?.colors?.[tier.key] !== false])),
     })
     const normalizeSupportFilter = raw => {
@@ -1008,6 +1034,7 @@
       filter.membership = raw.membership !== false
       filter.milestone = raw.milestone !== false
       filter.membershipGift = raw.membershipGift !== false
+      filter.gift = raw.gift !== false
       const colors = raw.colors
       if (colors && typeof colors === 'object' && !Array.isArray(colors)) {
         for (const tier of SC_COLOR_TIERS) filter.colors[tier.key] = colors[tier.key] !== false
@@ -1599,6 +1626,9 @@
           if (current) {
             current.createdAt = Math.min(current.createdAt, item.createdAt)
             current.order = Number.isSafeInteger(item.order) ? item.order : current.order
+            if (!current.channelId && typeof item.channelId === 'string' && /^UC[\w-]{22}$/.test(item.channelId)) {
+              current.channelId = item.channelId
+            }
             if (!current.profileName && typeof item.profileName === 'string') {
               current.profileName = item.profileName
               current.profileHandle = typeof item.profileHandle === 'string' ? item.profileHandle : ''
@@ -1827,7 +1857,15 @@
       const hex = (value >>> 0).toString(16).padStart(8, '0')
       return `#${hex.slice(2)}${hex.slice(0, 2)}`
     }
-    const readEventColors = (line, data) => {
+    const GIFT_FALLBACK_COLORS = {
+      headerBackground: '#52077a',
+      bodyBackground: '#7406ac',
+      headerText: '#ffffff',
+      bodyText: '#ffffff',
+      author: '#ffffff',
+      timestamp: '#ffffff',
+    }
+    const readEventColors = (line, data, isGift = false) => {
       const header = $('#header', line) || line
       const content = $('#content', line) || line
       const paint = (node, property) => node ? getComputedStyle(node)[property] || '' : ''
@@ -1836,33 +1874,37 @@
         return value === 'transparent' || /^rgba\(\s*0,\s*0,\s*0,\s*0\s*\)$/.test(value) ? '' : value
       }
       const headerBackground = argbColor(data.headerBackgroundColor) || argbColor(data.moneyChipBackgroundColor) || background(header)
+      const bodyBackground = argbColor(data.bodyBackgroundColor) || argbColor(data.backgroundColor) || background(content) || headerBackground
+      if (isGift && !headerBackground && !bodyBackground) return { ...GIFT_FALLBACK_COLORS }
       return {
         headerBackground,
-        bodyBackground: argbColor(data.bodyBackgroundColor) || argbColor(data.backgroundColor) || background(content) || headerBackground,
+        bodyBackground,
         headerText: argbColor(data.headerTextColor) || argbColor(data.moneyChipTextColor) || paint($('#purchase-amount', line) || header, 'color'),
         bodyText: argbColor(data.bodyTextColor) || paint($('#message', line) || content, 'color'),
-        author: argbColor(data.authorNameTextColor) || paint($('#author-name', line), 'color'),
+        author: argbColor(data.authorNameTextColor) || paint($(AUTHOR_NAME_SELECTOR, line), 'color'),
         timestamp: argbColor(data.timestampColor) || argbColor(data.bodyTextColor) || paint(content, 'color'),
       }
     }
 
-    const textValue = value => value?.simpleText || value?.runs?.map(run => run.text || '').join('') || ''
+    const textValue = value => value?.simpleText || value?.content || value?.runs?.map(run => run.text || '').join('') || ''
     const EVENT_LABELS = {
       superSticker: '超級貼圖',
+      gift: '禮物',
       membership: '會員加入',
       milestone: '會員里程碑',
       membershipGift: '會員贈禮',
     }
 
     const readMessage = (line, shouldKeep = null) => {
-      let author = $('#author-name', line)
+      let author = $(AUTHOR_NAME_SELECTOR, line)
       const data = rendererData(line)
       const identity = data.header?.sponsorshipsLiveChatHeaderRenderer || data
       const superChat = line.matches('yt-live-chat-paid-message-renderer')
       const superSticker = line.matches('yt-live-chat-paid-sticker-renderer')
+      const isGift = line.matches(GIFT_MESSAGE_SELECTOR)
       const paid = superChat || superSticker
-      let supportEvent = superSticker ? 'superSticker' : superChat ? 'superChat' : Object.entries(MEMBERSHIP_EVENT_SELECTORS)
-        .find(([, selector]) => line.matches(selector))?.[0] || ''
+      let supportEvent = superSticker ? 'superSticker' : superChat ? 'superChat' : isGift ? 'gift'
+        : Object.entries(MEMBERSHIP_EVENT_SELECTORS).find(([, selector]) => line.matches(selector))?.[0] || ''
       // Other name-restoring scripts may change the DOM. Keep identity based
       // on YouTube's original author handle and stable channel ID.
       const originalName = textValue(identity.authorName) || textValue(data.authorName)
@@ -1871,7 +1913,10 @@
       if (!author || !user) return null
       // The renderer retains the sender's stable ID even when its DOM shows a handle.
       const rawId = identity.authorExternalChannelId || data.authorExternalChannelId || line.getAttribute('author-external-channel-id')
-      const channelId = typeof rawId === 'string' && /^UC[\w-]{22}$/.test(rawId) ? rawId : ''
+      let channelId = typeof rawId === 'string' && /^UC[\w-]{22}$/.test(rawId) ? rawId : ''
+      if (!channelId && isGift && user.startsWith('@')) {
+        channelId = handleCache.get(user)?.result?.channelId || getTargetMetadata(user).channelId || ''
+      }
       const id = line.id || data.id || ''
       const chip = author.closest('yt-live-chat-author-chip') || line
       const badges = $$('yt-live-chat-author-badge-renderer', chip)
@@ -1890,7 +1935,7 @@
         textValue(data.purchaseAmountText)) : ''
       // Membership headers and the optional milestone comment are separate
       // fields. Preserve both instead of taking the first node in DOM order.
-      let message = $('#message', line) || $('#sticker', line)
+      let message = isGift ? null : ($('#message', line) || $('#sticker', line))
       let sticker = null
       if (superSticker) {
         const source = $('#sticker', line)
@@ -1902,9 +1947,24 @@
         sticker = { url, alt: typeof alt === 'string' ? alt : '超級貼圖' }
         message = element('span', { class: 'ytcf-sticker' }, [url
           ? element('img', { src: url, alt: sticker.alt }) : sticker.alt])
+      } else if (isGift) {
+        const giftText = $('#message-v2, #message', line)?.textContent?.trim() || textValue(data.text).trim()
+        const giftImgSource = $('#gift-image', line)
+        const giftImgEl = giftImgSource?.matches('img') ? giftImgSource : giftImgSource && $('img', giftImgSource)
+        const giftSources = Array.isArray(data.giftImage?.sources) ? data.giftImage.sources : []
+        const giftImgUrl = safeArchiveUrl(giftImgEl?.getAttribute('src') || giftSources.at(-1)?.url || giftSources[0]?.url || '')
+        const giftImgAlt = giftImgEl?.getAttribute('alt') || giftImgSource?.getAttribute('aria-label') || data.giftImageA11yLabel || ''
+        if (giftImgUrl || giftImgAlt) {
+          sticker = { url: giftImgUrl, alt: typeof giftImgAlt === 'string' ? giftImgAlt : '' }
+        }
+        message = document.createElement('span')
+        if (giftText) message.appendChild(document.createTextNode(giftText))
+        if (giftImgUrl) {
+          message.appendChild(element('img', { class: 'ytcf-gift-image', src: giftImgUrl, alt: sticker.alt }))
+        }
       }
       let details = []
-      if (supportEvent && !paid) {
+      if (supportEvent && !paid && !isGift) {
         const headers = $$('#header-primary-text, #header-subtext, #primary-text', line)
         details = headers.filter(node => node !== message && !node.contains(message) &&
           !headers.some(other => other !== node && other.contains(node)))
@@ -1922,11 +1982,14 @@
         message = document.createElement('span')
         message.textContent = $('#deleted-state', line)?.textContent?.trim() || '訊息已刪除'
       }
+      const avatarSources = Array.isArray(data.authorAvatar?.avatarViewModel?.image?.sources)
+        ? data.authorAvatar.avatarViewModel.image.sources : []
       return { user, channelId, moderator, broadcaster, verified, superChat, supportEvent, amount, sticker, author, body: message, details, badges, deleted,
         authorHandle: [originalName, author.textContent].find(name => typeof name === 'string' && name.trim().startsWith('@') && normalizeAccount(name))?.trim() || '',
-        colors: supportEvent ? readEventColors(line, data) : null,
+        colors: supportEvent ? readEventColors(line, data, isGift) : null,
         id, time: $('#timestamp', line)?.textContent?.trim() || textValue(data.timestampText),
-        avatar: safeArchiveUrl($('#author-photo img', line)?.getAttribute('src') || identity.authorPhoto?.thumbnails?.[0]?.url || ''),
+        avatar: safeArchiveUrl($('#author-photo img', line)?.getAttribute('src') || identity.authorPhoto?.thumbnails?.[0]?.url ||
+          avatarSources.at(-1)?.url || avatarSources[0]?.url || ''),
         contextMenuEndpoint: data.contextMenuEndpoint || identity.contextMenuEndpoint }
     }
 
@@ -1967,7 +2030,8 @@
       const role = message.broadcaster ? 'owner' : message.moderator ? 'moderator'
         : message.badges.some(badge => badge.getAttribute('type') === 'member') ? 'member' : ''
       return {
-        user: message.user, channelId: message.channelId, name: message.author.textContent,
+        user: message.user, channelId: message.channelId, name: message.author.textContent.trim(),
+        resolveByHandle: message.supportEvent === 'gift',
         // Highlighted native chips use dark ink on a light background. The card
         // has its own background, so use role colors and its own neutral ink.
         color: highlighted ? CARD_ROLE_COLORS[role] || '' : authorNameColor(message),
@@ -2105,23 +2169,46 @@
       } else author.textContent = label
     }
     const resolveSupportAuthor = (history, record) => {
-      if (!record.supportEvent || !record.retained || !/^UC[\w-]{22}$/.test(record.channelId) ||
-        record.profileResolved || record.profileRetryAt > Date.now()) return Promise.resolve(null)
+      if (!record.supportEvent || !record.retained || record.profileResolved || record.profileRetryAt > Date.now()) {
+        return Promise.resolve(null)
+      }
+      const hasChannelId = /^UC[\w-]{22}$/.test(record.channelId)
+      const giftHandle = record.supportEvent === 'gift'
+        ? (displayHandle(record.authorHandle) || displayHandle(record.user)) : ''
+      if (!hasChannelId && !giftHandle) return Promise.resolve(null)
       if (record.profileRequest) return record.profileRequest
       record.profileRequest = (async () => {
         const channelId = record.channelId
         try {
-          const profile = await getProfile(channelId)
-          if (!record.retained || record.channelId !== channelId) return null
-          if (!profile) { record.profileRetryAt = Date.now() + 30000; return null }
-          record.profileName = profile.title
-          record.profileHandle = displayHandle(profile.handle)
-          record.profileResolved = true
+          if (hasChannelId) {
+            const profile = await getProfile(channelId)
+            if (!record.retained || record.channelId !== channelId) return null
+            if (!profile) { record.profileRetryAt = Date.now() + 30000; return null }
+            record.profileName = profile.title
+            record.profileHandle = displayHandle(profile.handle)
+            record.profileResolved = true
+            applySupportAuthor(record)
+            noteTargetRecord(record, history.settings, true)
+            saveRecord(history, record)
+            if (mounted?.history === history && history.supportOnly && history.supportSearch) scheduleMessageRender(mounted)
+            return profile
+          }
+          const resolved = await resolveHandle(giftHandle)
+          if (!record.retained) return null
+          if (!resolved || (!resolved.name && !resolved.channelId)) {
+            record.profileRetryAt = Date.now() + 30000
+            return null
+          }
+          if (resolved.channelId && !record.channelId) record.channelId = resolved.channelId
+          record.profileName = resolved.name || ''
+          record.profileHandle = displayHandle(resolved.handle) || ''
+          if (resolved.name) record.profileResolved = true
+          else record.profileRetryAt = Date.now() + 30000
           applySupportAuthor(record)
           noteTargetRecord(record, history.settings, true)
           saveRecord(history, record)
           if (mounted?.history === history && history.supportOnly && history.supportSearch) scheduleMessageRender(mounted)
-          return profile
+          return resolved
         } catch (_) { record.profileRetryAt = Date.now() + 30000; return null }
         finally { record.profileRequest = null }
       })()
@@ -2137,8 +2224,10 @@
       }
     }
     const queueSupportAuthor = (history, record) => {
+      const hasChannelId = /^UC[\w-]{22}$/.test(record.channelId)
+      const hasGiftHandle = record.supportEvent === 'gift' && Boolean(displayHandle(record.authorHandle) || displayHandle(record.user))
       if (record.profileQueued || record.profileRequest || record.profileResolved || record.profileRetryAt > Date.now() ||
-        !/^UC[\w-]{22}$/.test(record.channelId)) return
+        (!hasChannelId && !hasGiftHandle)) return
       record.profileQueued = true
       supportAuthorQueue.push({ history, record })
       drainSupportAuthors()
@@ -2271,10 +2360,13 @@
       title.href = author.channelId
         ? `https://www.youtube.com/channel/${encodeURIComponent(author.channelId)}`
         : `https://www.youtube.com/${safeHandle}`
+      const canResolveHandle = !author.channelId && author.resolveByHandle && author.user?.startsWith('@')
       const close = element('button', { class: 'ytuc-close', type: 'button', 'aria-label': '關閉用戶資訊' }, ['×'])
       const handle = element('div', { class: 'ytuc-handle' }, [author.user])
-      const id = element('div', { class: 'ytuc-id' }, [author.channelId || '無法取得頻道 ID'])
-      const profileStatus = element('p', { class: 'ytuc-status', role: 'status' }, [author.channelId ? '載入頻道名稱…' : '頻道名稱暫時無法載入。'])
+      const id = element('div', { class: 'ytuc-id' }, [author.channelId || (canResolveHandle ? '查詢頻道 ID…' : '無法取得頻道 ID')])
+      const profileStatus = element('p', { class: 'ytuc-status', role: 'status' }, [
+        author.channelId || canResolveHandle ? '載入頻道名稱…' : '頻道名稱暫時無法載入。',
+      ])
       const profileRetry = element('button', { class: 'ytuc-retry', type: 'button', hidden: '' }, ['重試名稱'])
       const nameRow = element('div', { class: 'ytuc-name-row' }, [title])
       const identity = element('div', { class: 'ytuc-identity' }, [nameRow, handle, id])
@@ -2323,27 +2415,54 @@
       card.addEventListener('click', event => {
         if (event.target?.closest('ytd-menu-popup-renderer')) state.nativeClicked = true
       }, true)
-      const loadProfile = () => getProfile(author.channelId).then(profile => {
+      const loadProfile = () => (author.channelId
+        ? getProfile(author.channelId)
+        : canResolveHandle
+          ? resolveHandle(author.user)
+          : Promise.resolve(null)).then(resolved => {
         if (state.closed) return
-        if (profile) {
-          title.textContent = profile.title
+        const profile = resolved && (author.channelId ? resolved : (resolved.name || resolved.channelId ? {
+          channelId: resolved.channelId || '',
+          title: resolved.name || '',
+          handle: resolved.handle || '',
+        } : null))
+        if (profile && (profile.title || profile.channelId)) {
+          if (profile.title) title.textContent = profile.title
           if (profile.handle) handle.textContent = profile.handle
+          if (profile.channelId) {
+            author.channelId = profile.channelId
+            id.textContent = profile.channelId
+            title.href = `https://www.youtube.com/channel/${encodeURIComponent(profile.channelId)}`
+          }
           noteTargetRecord({
-            channelId: author.channelId,
+            channelId: profile.channelId || author.channelId,
             user: normalizeAccount(profile.handle || author.user),
             profileName: profile.title,
             profileHandle: profile.handle,
           }, null, true)
-          profileStatus.hidden = true
-          profileRetry.hidden = true
+          if (profile.title) {
+            profileStatus.hidden = true
+            profileRetry.hidden = true
+          } else {
+            profileStatus.textContent = '頻道名稱暫時無法載入。'
+            profileRetry.hidden = false
+          }
         } else {
+          if (!author.channelId) id.textContent = '無法取得頻道 ID'
           profileStatus.textContent = '頻道名稱暫時無法載入。'
-          profileRetry.hidden = !author.channelId
+          profileRetry.hidden = !author.channelId && !canResolveHandle
         }
         positionCard(state)
       })
       profileRetry.addEventListener('click', () => {
-        profiles.delete(author.channelId)
+        if (author.channelId) profiles.delete(author.channelId)
+        else if (canResolveHandle) {
+          const key = normalizeAccount(author.user)
+          const cachedId = handleCache.get(key)?.result?.channelId
+          if (cachedId) profiles.delete(cachedId)
+          handleCache.delete(key)
+        }
+        if (!author.channelId && canResolveHandle) id.textContent = '查詢頻道 ID…'
         profileStatus.textContent = '載入頻道名稱…'
         profileRetry.hidden = true
         loadProfile()
@@ -2368,7 +2487,7 @@
       }
       document.fonts?.ready.then(() => { if (!state.closed) positionCard(state) })
       card.focus({ preventScroll: true })
-      if (author.channelId) loadProfile()
+      if (author.channelId || canResolveHandle) loadProfile()
       loadCardMenu(state)
       return state
     }
@@ -2384,7 +2503,7 @@
         dismissCard(activeCard, true)
         return
       }
-      const target = event.target?.closest?.('#author-name')
+      const target = event.target?.closest?.(AUTHOR_NAME_SELECTOR)
       const line = target?.closest(MESSAGE_SELECTOR)
       if (!line || !['Enter', ' '].includes(event.key)) return
       event.preventDefault()
@@ -2457,7 +2576,7 @@
       }
       const author = document.createElement('strong')
       author.className = 'ytcf-author'
-      author.textContent = message.author.textContent
+      author.textContent = message.author.textContent.trim()
       author.style.color = message.supportEvent ? message.colors.author : authorNameColor(message)
       row.appendChild(author)
       row.appendChild(document.createTextNode(' '))
@@ -2506,6 +2625,7 @@
         // still contains identity and badge visuals, but no native commands.
         const snapshot = record.authorInfo || {
           user: record.user, channelId: record.channelId,
+          resolveByHandle: record.supportEvent === 'gift',
           name: record.authorName || author.textContent,
           color: record.supportEvent ? CARD_ROLE_COLORS[record.broadcaster ? 'owner' : record.moderator ? 'moderator' : ''] || '' : author.style.color,
           avatar: $('.ytcf-avatar', record.view)?.getAttribute('src') || '',
@@ -2524,7 +2644,7 @@
     }
 
     const captureLine = (line, history) => {
-      const author = $('#author-name', line)
+      const author = $(AUTHOR_NAME_SELECTOR, line)
       if (author) {
         if (author.getAttribute('role') !== 'button') author.setAttribute('role', 'button')
         if (author.getAttribute('tabindex') !== '0') author.setAttribute('tabindex', '0')
@@ -2660,7 +2780,7 @@
       if (!state?.panel || !state.supportFilterUI) return
       const filter = state.history.supportFilter || (state.history.supportFilter = loadSupportFilter())
       const ui = state.supportFilterUI
-      for (const key of ['membership', 'milestone', 'membershipGift']) {
+      for (const key of ['membership', 'milestone', 'membershipGift', 'gift']) {
         const item = ui.types[key]
         if (item) item.input.checked = filter[key] !== false
       }
@@ -3210,6 +3330,7 @@
         membership: makeScCheckbox({ id: 'ytcf-sc-filter-membership', attrName: 'data-sc-type', attrValue: 'membership', text: '會員加入' }),
         milestone: makeScCheckbox({ id: 'ytcf-sc-filter-milestone', attrName: 'data-sc-type', attrValue: 'milestone', text: '會員里程碑' }),
         membershipGift: makeScCheckbox({ id: 'ytcf-sc-filter-membership-gift', attrName: 'data-sc-type', attrValue: 'membershipGift', text: '會員贈禮' }),
+        gift: makeScCheckbox({ id: 'ytcf-sc-filter-gift', attrName: 'data-sc-type', attrValue: 'gift', text: '禮物' }),
       }
       const superchatToggle = makeScCheckbox({ id: 'ytcf-sc-filter-superchat', attrName: 'data-sc-type', attrValue: 'superchat', text: '超級留言' })
       const supportColors = Object.fromEntries(SC_COLOR_TIERS.map(tier => [tier.key, makeScCheckbox({
@@ -3218,7 +3339,7 @@
       const supportFilterFieldset = element('fieldset', { class: 'ytcf-sc-filters' }, [
         element('legend', { class: 'ytcf-visually-hidden' }, ['篩選事件類型與金額顏色']),
         element('div', { class: 'ytcf-sc-filter-row' }, [
-          supportTypes.membership.option, supportTypes.milestone.option, supportTypes.membershipGift.option,
+          supportTypes.membership.option, supportTypes.milestone.option, supportTypes.membershipGift.option, supportTypes.gift.option,
         ]),
         element('div', { class: 'ytcf-sc-filter-row ytcf-sc-filter-row--colors' }, [
           superchatToggle.option,
@@ -3683,6 +3804,7 @@
       .ytcf-body { display: inline !important; }
       .ytcf-message .ytcf-sticker { display: block !important; margin-top: 4px; }
       .ytcf-sticker img { display: block; max-width: min(100%, 144px); max-height: 96px; width: auto; height: auto; object-fit: contain; }
+      .ytcf-gift-image { display: inline-block; width: 24px; height: 24px; margin-left: 4px; vertical-align: middle; object-fit: contain; }
       .ytcf-message .emoji { max-height: 24px; vertical-align: middle; }
       .ytcf-badge { display: inline-flex; align-items: center; margin-right: 3px; vertical-align: middle; pointer-events: none; }
       .ytcf-badge img, .ytcf-badge svg { width: 18px; height: 18px; }

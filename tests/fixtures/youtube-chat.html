@@ -17,6 +17,14 @@
   #fixture-summary { box-sizing: border-box; height: 220px; padding: 20px; background: #282828; border-radius: 20px; }
   #item-scroller { overflow: auto; }
   yt-live-chat-text-message-renderer { display: flex; position: relative; padding: 8px 12px; }
+  yt-gift-message-view-model { display: block; padding: 4px 24px; font-size: 12px; line-height: 18px; cursor: pointer; }
+  yt-gift-message-view-model > #gift-message-v2 { display: flex; align-items: flex-start; }
+  yt-gift-message-view-model #author-photo { display: block; flex: none; width: 24px; height: 24px; margin-right: 16px; overflow: hidden; border-radius: 50%; }
+  yt-gift-message-view-model #content { display: block; flex: 0 1 auto; min-width: 0; align-self: center; }
+  yt-gift-message-view-model #author-name-v2 { display: inline; color: #aaa; font-size: 12px; font-weight: 500; line-height: 18px; }
+  yt-gift-message-view-model #message-v2 { display: inline; color: #fff; font-size: 12px; line-height: 18px; }
+  yt-gift-message-view-model #gift-image { display: inline-block; width: 24px; height: 24px; margin-left: 4px; vertical-align: middle; }
+  yt-gift-message-view-model #gift-image img { display: block; width: 100%; height: 100%; object-fit: contain; }
   yt-live-chat-text-message-renderer > #content { flex: 1; min-width: 0; }
   yt-live-chat-text-message-renderer > #author-photo { display: block; flex: none; width: 24px; height: 24px; overflow: hidden; border-radius: 50%; }
   #author-photo img { display: block; border-radius: 50%; }
@@ -85,6 +93,7 @@
   <button id="add-verified">新增已驗證用戶訊息</button>
   <button id="add-sc">新增 SC</button>
   <button id="add-sticker">新增超級貼圖</button>
+  <button id="add-live-gift">新增禮物</button>
   <button id="add-empty-sc">新增無留言 SC</button>
   <button id="add-sc-colors">新增七色 SC</button>
   <button id="add-membership">新增會員加入</button>
@@ -401,6 +410,46 @@
     original.replaceWith(line)
   }
   document.getElementById('add-empty-sc').onclick = () => addMessage('@donor', '', '¥200', true, scPalettes[0])
+  document.getElementById('add-live-gift').onclick = () => {
+    serial++
+    const line = document.createElement('yt-gift-message-view-model')
+    line.setAttribute('has-on-tap-command', '')
+    const avatarUrl = 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><rect width="24" height="24" fill="#7406ac"/><circle cx="12" cy="9" r="4" fill="white"/><path d="M4 24a8 8 0 0116 0" fill="white"/></svg>')
+    const giftUrl = 'https://fonts.gstatic.com/s/e/notoemoji/15.1/1f381/72.png'
+    line.data = {
+      id: `live-gift-${Date.now()}-${serial}`,
+      authorName: { content: '@donor ' },
+      text: { content: 'よしよし を送信しました' },
+      authorAvatar: { avatarViewModel: { image: { sources: [{ url: avatarUrl, width: 64, height: 64 }] } } },
+      giftImage: { sources: [{ url: giftUrl, width: 480, height: 480 }] },
+      giftImageA11yLabel: '@donor さんから よしよし のギフトが送られました',
+    }
+    const container = line.appendChild(document.createElement('div'))
+    container.id = 'gift-message-v2'
+    container.setAttribute('tabindex', '0')
+    container.setAttribute('role', 'article')
+    const photo = container.appendChild(document.createElement('yt-img-shadow'))
+    photo.id = 'author-photo'
+    const avatar = photo.appendChild(document.createElement('img'))
+    avatar.alt = ''
+    avatar.width = 24
+    avatar.height = 24
+    avatar.src = avatarUrl
+    const content = container.appendChild(document.createElement('div'))
+    content.id = 'content'
+    const author = content.appendChild(document.createElement('yt-attributed-string'))
+    author.id = 'author-name-v2'
+    author.textContent = '@donor '
+    const msg = content.appendChild(document.createElement('yt-attributed-string'))
+    msg.id = 'message-v2'
+    msg.textContent = 'よしよし を送信しました'
+    const giftImgHost = content.appendChild(document.createElement('yt-image'))
+    giftImgHost.id = 'gift-image'
+    const giftImg = giftImgHost.appendChild(document.createElement('img'))
+    giftImg.alt = ''
+    giftImg.src = giftUrl
+    items().appendChild(line)
+  }
   document.getElementById('add-sc-colors').onclick = () => {
     for (const palette of scPalettes) addMessage('@donor', '', palette[3], false, palette)
   }
