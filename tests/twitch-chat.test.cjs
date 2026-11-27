@@ -1520,8 +1520,15 @@ test('Twitch replies: preserve reply-target quote in DOM/fiber, handle edits, se
   for (const query of ['raiki_raibao', '來希', '身體要健康']) {
     state.messageSearch.value = query
     state.messageSearch.listeners.get('input')()
-    assert.equal(state.count.textContent, '1 則符合', `search failed for ${query}`)
+    assert.equal(state.count.textContent, '0 則符合', `reply quote unexpectedly matched search for ${query}`)
   }
+  state.messageSearch.value = '已編輯回覆'
+  state.messageSearch.listeners.get('input')()
+  assert.equal(state.count.textContent, '1 則符合')
+  assert.ok(state.history.ids.get('reply-1').view.querySelector('.ttc-reply'))
+  state.messageSearch.value = 'mod_a'
+  state.messageSearch.listeners.get('input')()
+  assert.equal(state.count.textContent, '4 則符合')
   fresh.api.unmount()
 })
 
@@ -3912,4 +3919,121 @@ test('Twitch native VOD mention highlight: highlight leading and mid-message @me
   assert.equal(liveTargetLine.classList.contains('ttc-vod-target-line'), false)
   assert.equal(liveTargetLine.classList.contains('ttc-vod-mention-line'), false)
   liveEnv.api.unmount()
+})
+
+test('Twitch message search: exclude reply quotes and @mentions while matching speaker messages and replies', () => {
+  const saved = JSON.stringify({
+    broadcaster: true, moderators: true, vip: true, replies: true,
+    users: ['mea_07311'], excludedUsers: [],
+  })
+  const env = boot({ saved })
+  const stream = env.document.body.appendChild(new env.Element('div'))
+  stream.className = 'stream-chat'
+  const header = stream.appendChild(new env.Element('div'))
+  header.className = 'stream-chat-header'
+  const scroller = stream.appendChild(new env.Element('div'))
+  scroller.setAttribute('data-a-target', 'chat-scroller')
+
+  env.api.refresh()
+  const state = env.api.mounted
+  const { history } = state
+
+  // 1. Target user's normal message
+  const targetMsg = env.message('mea_07311', '加油 薛哥 請回昨天的自己', 'VIP', 'search-target-1')
+  targetMsg.line.querySelector('[data-a-target="chat-message-username"]').textContent = '小碗泡咪'
+
+  // 2. Target user replying to someone else
+  const targetReply = env.message('mea_07311', '哈哈哈', 'VIP', 'search-target-2')
+  targetReply.line.querySelector('[data-a-target="chat-message-username"]').textContent = '小碗泡咪'
+  targetReply.line.__reactFiber$1 = {
+    memoizedProps: {
+      message: {
+        id: 'search-target-2',
+        user: { userLogin: 'mea_07311', userDisplayName: '小碗泡咪' },
+        reply: {
+          parentMsgId: 'other-1',
+          parentUserLogin: 'other_viewer',
+          parentDisplayName: '其他觀眾',
+          parentMessageBody: '早安',
+          parentDeleted: false,
+        },
+      },
+    },
+  }
+
+  // 3. Another viewer replying to mea_07311 (contains @小碗泡咪 (mea_07311) quote)
+  const viewerReply = env.message('erwin5989', '推推', '', 'search-reply-to-target')
+  viewerReply.line.querySelector('[data-a-target="chat-message-username"]').textContent = '熊問安的電吉他'
+  viewerReply.line.__reactFiber$1 = {
+    memoizedProps: {
+      message: {
+        id: 'search-reply-to-target',
+        user: { userLogin: 'erwin5989', userDisplayName: '熊問安的電吉他' },
+        reply: {
+          parentMsgId: 'search-target-1',
+          parentUserLogin: 'mea_07311',
+          parentDisplayName: '小碗泡咪',
+          parentMessageBody: '加油 薛哥 請回昨天的自己',
+          parentDeleted: false,
+        },
+      },
+    },
+  }
+
+  // 4. Another Moderator sending DOM .mention-fragment @mea_07311
+  const domMentionMsg = env.message('mod_b', '', 'Moderator', 'search-mention-dom')
+  domMentionMsg.line.querySelector('[data-a-target="chat-message-username"]').textContent = '管理員B'
+  const mentionFrag = domMentionMsg.body.appendChild(new env.Element('span'))
+  mentionFrag.className = 'mention-fragment'
+  mentionFrag.setAttribute('data-a-target', 'chat-message-mention')
+  mentionFrag.textContent = '@mea_07311'
+  const afterMention = domMentionMsg.body.appendChild(new env.Element('span'))
+  afterMention.textContent = ' 打招呼'
+
+  // 5. Another Moderator sending plain-text @小碗泡咪 mention
+  const textMentionMsg = env.message('mod_b', '@小碗泡咪 晚安', 'Moderator', 'search-mention-text')
+  textMentionMsg.line.querySelector('[data-a-target="chat-message-username"]').textContent = '管理員B'
+
+  for (const row of [targetMsg, targetReply, viewerReply, domMentionMsg, textMentionMsg]) {
+    scroller.appendChild(row.line)
+    assert.equal(env.api.captureLine(row.line, history), true)
+  }
+  env.api.setEnabled(state, true)
+
+  // Searching target login or display name matches ONLY messages sent by mea_07311 (including her own reply)
+  for (const query of ['mea_07311', '小碗泡咪']) {
+    state.messageSearch.value = query
+    state.messageSearch.listeners.get('input')()
+    assert.equal(state.count.textContent, '2 則符合', `unexpected hits for ${query}`)
+    assert.deepEqual(
+      state.list.children.map(node => node.querySelector('strong').textContent),
+      ['小碗泡咪 (mea_07311)', '小碗泡咪 (mea_07311)'],
+    )
+    assert.equal(state.list.children[0].querySelector('.ttc-reply'), null)
+    assert.ok(state.list.children[1].querySelector('.ttc-reply'))
+  }
+
+  // Searching text that only existed in the quoted parent message does NOT match the reply
+  state.messageSearch.value = '加油'
+  state.messageSearch.listeners.get('input')()
+  assert.equal(state.count.textContent, '1 則符合')
+  assert.equal(state.list.children[0], history.ids.get('search-target-1').view)
+
+  // Searching the replier or their own message body still works cleanly
+  for (const query of ['erwin5989', '推推']) {
+    state.messageSearch.value = query
+    state.messageSearch.listeners.get('input')()
+    assert.equal(state.count.textContent, '1 則符合')
+    assert.equal(state.list.children[0], history.ids.get('search-reply-to-target').view)
+    assert.ok(state.list.children[0].querySelector('.ttc-reply'))
+  }
+
+  // Searching non-mention body text on mention messages still works
+  for (const query of ['打招呼', '晚安']) {
+    state.messageSearch.value = query
+    state.messageSearch.listeners.get('input')()
+    assert.equal(state.count.textContent, '1 則符合')
+  }
+
+  env.api.unmount()
 })

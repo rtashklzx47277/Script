@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        Twitch Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.11.8
+// @version     0.11.9
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/TwitchLiveChatTweaks.user.js
 // @description 依頻道主、管理員、VIP、回覆篩選目標與全域帳號包含／排除名單篩選 Twitch 直播與 VOD 聊天，保留回覆目標引言與最近 1000 則／7 天紀錄，支援跨日分隔、搜尋、自動跟隨與 VOD 時間切換（影片秒數／直播時刻），修正 VOD 聊天室多位元組字元後的貼圖位移問題，並在原生 VOD 聊天室以不同色高亮篩選目標發言與 @提及篩選目標的留言；分割螢幕時隱藏聊天室上方橫幅與輸入區底部列。
@@ -1569,18 +1569,28 @@
   }
 
   const normalizeSearch = value => String(value || '').normalize('NFKC').toLowerCase().trim()
+  const extractSearchBodyText = node => {
+    if (!node) return ''
+    if (node.nodeType === 3 || node.tagName === '#text') {
+      return String(node.textContent || '').replace(/(^|\s)[@＠][^\s,，.。!！?？:：;；]+/gu, ' ')
+    }
+    if (node.nodeType !== 1) return ''
+    if (node.matches?.('.mention-fragment, [data-a-target="chat-message-mention"]')) return ''
+    if ((node.localName || node.tagName || '').toLowerCase() === 'img') return node.getAttribute?.('alt') || ''
+    return [...(node.childNodes || [])].map(extractSearchBodyText).filter(Boolean).join(' ')
+  }
   const messageSearchText = record => {
     if (record._searchText) return record._searchText
-    const text = normalizeSearch([
-      record.user,
-      record.reply?.parentUser || '',
-      record.reply?.parentDisplayName || '',
-      record.reply?.parentText || '',
-      ...[...record.view.childNodes]
-        .filter(node => !node.matches?.('.ttc-time'))
-        .map(node => node.textContent),
-      ...$$('img', record.view).map(image => image.getAttribute('alt') || ''),
-    ].join(' '))
+    const parts = [record.user]
+    for (const node of [...(record.view?.childNodes || [])]) {
+      if (node.matches?.('.ttc-time, .ttc-reply')) continue
+      if (node.nodeType === 1 && (node.localName || node.tagName || '').toLowerCase() === 'strong') {
+        parts.push(node.textContent)
+      } else {
+        parts.push(extractSearchBodyText(node))
+      }
+    }
+    const text = normalizeSearch(parts.filter(Boolean).join(' '))
     record._searchText = text
     return text
   }
