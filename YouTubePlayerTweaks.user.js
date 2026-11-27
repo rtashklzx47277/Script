@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name        YouTube Player Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.2.26
+// @version     0.2.27
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubePlayerTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubePlayerTweaks.user.js
-// @description 提供 YouTube 原解析度 PNG 截圖、滾輪音量與速度調整、直播追平、擴大直播回看範圍，並於 Shorts 隱藏影片內資訊與預設右側頁籤面板。
+// @description 提供 YouTube 原解析度 PNG 截圖、滾輪音量（含 Shorts 與 YouTube Music）與速度調整、直播追平、擴大直播回看範圍，並於 Shorts 隱藏影片內資訊與預設右側頁籤面板。
 // @author      Derek
 // @match       *://www.youtube.com/*
+// @match       *://music.youtube.com/*
 // @grant       unsafeWindow
 // @run-at      document-start
 // @noframes
@@ -25,171 +26,184 @@
   const pageWindow =
     (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window)
 
-  const MAX_DVR_SECONDS = 43200 * 14
-  const DVR_WINDOW_FLAG = 'html5_max_live_dvr_window_plus_margin_secs'
-  const DVR_WINDOW_FLAG_PATTERN = new RegExp(`${DVR_WINDOW_FLAG}=[\\d.]+`)
-
-  const streamRunningOver12h = (microformat) => {
-    const live = microformat?.playerMicroformatRenderer?.liveBroadcastDetails
-    if (!live?.startTimestamp) return false
-    const startTime = Date.parse(live.startTimestamp)
-    return Number.isFinite(startTime) && (Date.now() - startTime) / 1000 > 43200
+  const isMusicHost = () => {
+    const host = location.hostname || (() => {
+      try {
+        return new URL(location.href).hostname
+      } catch (_) {
+        return ''
+      }
+    })()
+    return host === 'music.youtube.com'
   }
 
-  const modifyPlayerResponse = (response) => {
-    const { streamingData, videoDetails, playerConfig, microformat } = response
+  if (!isMusicHost()) {
+    const MAX_DVR_SECONDS = 43200 * 14
+    const DVR_WINDOW_FLAG = 'html5_max_live_dvr_window_plus_margin_secs'
+    const DVR_WINDOW_FLAG_PATTERN = new RegExp(`${DVR_WINDOW_FLAG}=[\\d.]+`)
 
-    // Only live streams have DVR; leave normal videos and finished VODs alone.
-    if (!videoDetails || !videoDetails.isLive) return
-
-    videoDetails.isLiveDvrEnabled = true
-
-    const mediaCommonConfig = playerConfig?.mediaCommonConfig
-    if (mediaCommonConfig) {
-      mediaCommonConfig.useServerDrivenAbr = false
-      if (mediaCommonConfig.serverPlaybackStartConfig) {
-        mediaCommonConfig.serverPlaybackStartConfig.enable = false
-      }
+    const streamRunningOver12h = (microformat) => {
+      const live = microformat?.playerMicroformatRenderer?.liveBroadcastDetails
+      if (!live?.startTimestamp) return false
+      const startTime = Date.parse(live.startTimestamp)
+      return Number.isFinite(startTime) && (Date.now() - startTime) / 1000 > 43200
     }
 
-    if (streamingData) {
-      if (
-        streamingData.serverAbrStreamingUrl &&
-        (streamingData.hlsManifestUrl || streamingData.dashManifestUrl)
-      ) {
-        delete streamingData.serverAbrStreamingUrl
+    const modifyPlayerResponse = (response) => {
+      const { streamingData, videoDetails, playerConfig, microformat } = response
+
+      // Only live streams have DVR; leave normal videos and finished VODs alone.
+      if (!videoDetails || !videoDetails.isLive) return
+
+      videoDetails.isLiveDvrEnabled = true
+
+      const mediaCommonConfig = playerConfig?.mediaCommonConfig
+      if (mediaCommonConfig) {
+        mediaCommonConfig.useServerDrivenAbr = false
+        if (mediaCommonConfig.serverPlaybackStartConfig) {
+          mediaCommonConfig.serverPlaybackStartConfig.enable = false
+        }
       }
 
-      if (
-        Array.isArray(streamingData.adaptiveFormats) &&
-        streamRunningOver12h(microformat)
-      ) {
-        for (const format of streamingData.adaptiveFormats) {
-          format.maxDvrDurationSec = MAX_DVR_SECONDS
+      if (streamingData) {
+        if (
+          streamingData.serverAbrStreamingUrl &&
+          (streamingData.hlsManifestUrl || streamingData.dashManifestUrl)
+        ) {
+          delete streamingData.serverAbrStreamingUrl
+        }
+
+        if (
+          Array.isArray(streamingData.adaptiveFormats) &&
+          streamRunningOver12h(microformat)
+        ) {
+          for (const format of streamingData.adaptiveFormats) {
+            format.maxDvrDurationSec = MAX_DVR_SECONDS
+          }
         }
       }
     }
-  }
 
-  const patchResponse = (data) => {
-    if (!data || typeof data !== 'object') return false
-    if (data.videoDetails) modifyPlayerResponse(data)
-    else if (data.playerResponse?.videoDetails) modifyPlayerResponse(data.playerResponse)
-    else return false
-    return true
-  }
+    const patchResponse = (data) => {
+      if (!data || typeof data !== 'object') return false
+      if (data.videoDetails) modifyPlayerResponse(data)
+      else if (data.playerResponse?.videoDetails) modifyPlayerResponse(data.playerResponse)
+      else return false
+      return true
+    }
 
-  // Source 1: the inline `ytInitialPlayerResponse` on first load. Intercept once, then
-  // release the global so uBO and other scriptlets can keep editing it normally.
-  const initialDescriptor =
-    Object.getOwnPropertyDescriptor(pageWindow, 'ytInitialPlayerResponse')
-  const previousInitialGetter = initialDescriptor?.get
-  const previousInitialSetter = initialDescriptor?.set
-  let initialResponse = pageWindow.ytInitialPlayerResponse
+    // Source 1: the inline `ytInitialPlayerResponse` on first load. Intercept once, then
+    // release the global so uBO and other scriptlets can keep editing it normally.
+    const initialDescriptor =
+      Object.getOwnPropertyDescriptor(pageWindow, 'ytInitialPlayerResponse')
+    const previousInitialGetter = initialDescriptor?.get
+    const previousInitialSetter = initialDescriptor?.set
+    let initialResponse = pageWindow.ytInitialPlayerResponse
 
-  if (!patchResponse(initialResponse)) {
+    if (!patchResponse(initialResponse)) {
+      try {
+        Object.defineProperty(pageWindow, 'ytInitialPlayerResponse', {
+          configurable: true,
+          enumerable: initialDescriptor ? initialDescriptor.enumerable : true,
+          get() {
+            return previousInitialGetter ? previousInitialGetter.call(this) : initialResponse
+          },
+          set(value) {
+            previousInitialSetter?.call(this, value)
+            initialResponse = value
+            const current = previousInitialGetter ? previousInitialGetter.call(this) : value
+            const didPatch = patchResponse(current) || (current !== value && patchResponse(value))
+            if (didPatch && !previousInitialGetter && !previousInitialSetter) {
+              Object.defineProperty(pageWindow, 'ytInitialPlayerResponse', {
+                configurable: true,
+                enumerable: initialDescriptor ? initialDescriptor.enumerable : true,
+                writable: true,
+                value,
+              })
+            }
+          },
+        })
+      } catch (_) {
+        patchResponse(pageWindow.ytInitialPlayerResponse)
+      }
+    }
+
+    // Source 2: player responses fetched on later in-site navigations pass through JSON.parse.
+    const nativeJsonParse = pageWindow.JSON.parse
+    pageWindow.JSON.parse = function (...args) {
+      const data = nativeJsonParse.apply(this, args)
+      try {
+        patchResponse(data)
+      } catch (_) {
+        // Never let our hook break the page.
+      }
+      return data
+    }
+
+    // Lift the ~13h rewind cap: the flag lives in a serialized "key=value&..." string inside
+    // ytcfg's per-player config, which the player parses — rewrite it before that happens.
+    // Track patched configs individually (no global "done" flag), so player
+    // configs registered later (miniplayer, inline preview) still get patched.
+    const patchedPlayerConfigs = new WeakSet()
+
+    const liftDvrCap = (ytcfg) => {
+      const store = typeof ytcfg.d === 'function' && ytcfg.d()
+      const players = store?.WEB_PLAYER_CONTEXT_CONFIGS
+      if (!players) return
+
+      for (const id in players) {
+        const config = players[id]
+        if (
+          typeof config?.serializedExperimentFlags !== 'string' ||
+          patchedPlayerConfigs.has(config)
+        ) {
+          continue
+        }
+
+        config.serializedExperimentFlags = config.serializedExperimentFlags.replace(
+          DVR_WINDOW_FLAG_PATTERN,
+          `${DVR_WINDOW_FLAG}=${MAX_DVR_SECONDS}`
+        )
+        patchedPlayerConfigs.add(config)
+      }
+    }
+
+    const hookYtcfg = (ytcfg) => {
+      if (!ytcfg || ytcfg.__dvrHooked) return ytcfg
+      ytcfg.__dvrHooked = true
+
+      const nativeSet = ytcfg.set
+      if (typeof nativeSet === 'function') {
+        ytcfg.set = function (...args) {
+          const result = nativeSet.apply(this, args)
+          try {
+            liftDvrCap(ytcfg)
+          } catch (_) {}
+          return result
+        }
+      }
+
+      try {
+        liftDvrCap(ytcfg)
+      } catch (_) {}
+      return ytcfg
+    }
+
+    // ytcfg is created by an inline page script that runs after us; intercept its creation.
+    let ytcfgRef = hookYtcfg(pageWindow.ytcfg)
     try {
-      Object.defineProperty(pageWindow, 'ytInitialPlayerResponse', {
+      Object.defineProperty(pageWindow, 'ytcfg', {
         configurable: true,
-        enumerable: initialDescriptor ? initialDescriptor.enumerable : true,
         get() {
-          return previousInitialGetter ? previousInitialGetter.call(this) : initialResponse
+          return ytcfgRef
         },
         set(value) {
-          previousInitialSetter?.call(this, value)
-          initialResponse = value
-          const current = previousInitialGetter ? previousInitialGetter.call(this) : value
-          const didPatch = patchResponse(current) || (current !== value && patchResponse(value))
-          if (didPatch && !previousInitialGetter && !previousInitialSetter) {
-            Object.defineProperty(pageWindow, 'ytInitialPlayerResponse', {
-              configurable: true,
-              enumerable: initialDescriptor ? initialDescriptor.enumerable : true,
-              writable: true,
-              value,
-            })
-          }
+          ytcfgRef = hookYtcfg(value)
         },
       })
     } catch (_) {
-      patchResponse(pageWindow.ytInitialPlayerResponse)
+      // Already present and non-configurable — handled by the direct hook above.
     }
-  }
-
-  // Source 2: player responses fetched on later in-site navigations pass through JSON.parse.
-  const nativeJsonParse = pageWindow.JSON.parse
-  pageWindow.JSON.parse = function (...args) {
-    const data = nativeJsonParse.apply(this, args)
-    try {
-      patchResponse(data)
-    } catch (_) {
-      // Never let our hook break the page.
-    }
-    return data
-  }
-
-  // Lift the ~13h rewind cap: the flag lives in a serialized "key=value&..." string inside
-  // ytcfg's per-player config, which the player parses — rewrite it before that happens.
-  // Track patched configs individually (no global "done" flag), so player
-  // configs registered later (miniplayer, inline preview) still get patched.
-  const patchedPlayerConfigs = new WeakSet()
-
-  const liftDvrCap = (ytcfg) => {
-    const store = typeof ytcfg.d === 'function' && ytcfg.d()
-    const players = store?.WEB_PLAYER_CONTEXT_CONFIGS
-    if (!players) return
-
-    for (const id in players) {
-      const config = players[id]
-      if (
-        typeof config?.serializedExperimentFlags !== 'string' ||
-        patchedPlayerConfigs.has(config)
-      ) {
-        continue
-      }
-
-      config.serializedExperimentFlags = config.serializedExperimentFlags.replace(
-        DVR_WINDOW_FLAG_PATTERN,
-        `${DVR_WINDOW_FLAG}=${MAX_DVR_SECONDS}`
-      )
-      patchedPlayerConfigs.add(config)
-    }
-  }
-
-  const hookYtcfg = (ytcfg) => {
-    if (!ytcfg || ytcfg.__dvrHooked) return ytcfg
-    ytcfg.__dvrHooked = true
-
-    const nativeSet = ytcfg.set
-    if (typeof nativeSet === 'function') {
-      ytcfg.set = function (...args) {
-        const result = nativeSet.apply(this, args)
-        try {
-          liftDvrCap(ytcfg)
-        } catch (_) {}
-        return result
-      }
-    }
-
-    try {
-      liftDvrCap(ytcfg)
-    } catch (_) {}
-    return ytcfg
-  }
-
-  // ytcfg is created by an inline page script that runs after us; intercept its creation.
-  let ytcfgRef = hookYtcfg(pageWindow.ytcfg)
-  try {
-    Object.defineProperty(pageWindow, 'ytcfg', {
-      configurable: true,
-      get() {
-        return ytcfgRef
-      },
-      set(value) {
-        ytcfgRef = hookYtcfg(value)
-      },
-    })
-  } catch (_) {
-    // Already present and non-configurable — handled by the direct hook above.
   }
 
   const $ = (element) => document.querySelector(element)
@@ -239,6 +253,8 @@
   let tooltipButton = null
   let liveBtn
   let floatingBarTimer = 0
+  let musicVolumeBadge = null
+  let musicVolumeBadgeTimer = 0
   let persistentFloatingBarText = ''
   let liveCatchupTimer = 0
   let liveCatchupPreviousRate = null
@@ -257,7 +273,33 @@
     },
   }
 
-  addStyle(`
+  if (isMusicHost()) {
+    addStyle(`
+      #yt-player-tweaks-music-volume-badge {
+        position: fixed;
+        top: 0;
+        left: 0;
+        z-index: 9999;
+        display: none;
+        min-width: 40px;
+        padding: 4px 10px;
+        border-radius: 999px;
+        background: rgba(24, 24, 24, 0.92);
+        color: #fff;
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+        font-family: Roboto, Arial, sans-serif;
+        font-size: 13px;
+        font-weight: 500;
+        line-height: 18px;
+        font-variant-numeric: tabular-nums;
+        text-align: center;
+        white-space: nowrap;
+        pointer-events: none;
+      }
+    `)
+  } else {
+    addStyle(`
     /* Hide in-video Shorts metadata without display: none so the sibling
        action bar stays in its native flex position outside the video. */
     html body ytd-shorts #shorts-container #experiment-overlay .ytReelPlayerOverlayViewModelMetadataContainer,
@@ -481,6 +523,7 @@
       display: none !important;
     }
   `)
+  }
 
   const isWatchPage = () =>
     location.pathname === '/watch' ||
@@ -1032,11 +1075,18 @@
   }
 
   const syncVolumeGain = () => {
-    if (!volumeGain || !moviePlayer) return
+    if (!volumeGain) return
 
     // The native media volume is already 0–1. Scaling its output by 3x
     // that value makes quiet settings quieter and full volume up to 300%.
-    const volume = Math.max(0, Math.min(100, moviePlayer.getVolume()))
+    const rawVolume = typeof moviePlayer?.getVolume === 'function'
+      ? Number(moviePlayer.getVolume())
+      : videoPlayer
+        ? Math.round(Number(videoPlayer.volume) * 100)
+        : NaN
+    if (!Number.isFinite(rawVolume)) return
+
+    const volume = Math.max(0, Math.min(100, rawVolume))
     volumeGain.gain.value = MAX_VOLUME_GAIN * volume / 100
   }
 
@@ -1075,7 +1125,8 @@
       // A cross-origin media URL without CORS would become silent when routed
       // through MediaElementAudioSourceNode. YouTube's same-origin blob is safe.
       const sourceUrl = videoPlayer.currentSrc
-      if (sourceUrl && new URL(sourceUrl, pageWindow.location.href).origin !== pageWindow.location.origin) return
+      const pageLocation = pageWindow.location || location
+      if (sourceUrl && pageLocation && new URL(sourceUrl, pageLocation.href).origin !== pageLocation.origin) return
 
       if (!volumeAudioContext) {
         volumeAudioContext = new AudioContextClass()
@@ -2296,6 +2347,242 @@
     }
   }
 
+  const MUSIC_VOLUME_CONTROL_SELECTOR = [
+    '.ytMusicMiniPlayerVolumeWrapper',
+    '.ytMusicMiniPlayerMuteButton',
+    'ytmusic-player-bar .volume',
+    'ytmusic-player-bar #volume-slider',
+    'ytmusic-player-bar #expand-volume-slider',
+  ].join(', ')
+
+  const MUSIC_VOLUME_SLIDER_AREA_SELECTOR = [
+    '.ytMusicMiniPlayerVolumePopup',
+    'ytmusic-player-bar #volume-slider',
+    'ytmusic-player-bar #expand-volume-slider',
+  ].join(', ')
+
+  const getMusicPlayer = () => {
+    const player = $('#movie_player')
+    if (
+      typeof player?.getVolume === 'function' &&
+      typeof player?.setVolume === 'function'
+    ) {
+      return player
+    }
+    const bar = $('ytmusic-player-bar')
+    const barApi = bar?.playerApi_ || bar?.playerApi
+    if (
+      typeof barApi?.getVolume === 'function' &&
+      typeof barApi?.setVolume === 'function'
+    ) {
+      return barApi
+    }
+    return player || null
+  }
+
+  const getMusicVideo = (player) =>
+    player?.querySelector?.('video') ||
+    $('#movie_player')?.querySelector?.('video') ||
+    $('#movie_player video') ||
+    $('video') ||
+    null
+
+  const setNativeInputValue = (input, value) => {
+    const setter = typeof HTMLInputElement === 'function'
+      ? Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
+      : null
+    if (setter && typeof HTMLInputElement === 'function' && input instanceof HTMLInputElement) {
+      setter.call(input, String(value))
+    } else {
+      input.value = String(value)
+    }
+  }
+
+  const getMusicVolumeBadge = () => {
+    if (!musicVolumeBadge) {
+      musicVolumeBadge = $('#yt-player-tweaks-music-volume-badge')
+    }
+    if (!musicVolumeBadge) {
+      musicVolumeBadge = document.createElement('div')
+      musicVolumeBadge.id = 'yt-player-tweaks-music-volume-badge'
+      musicVolumeBadge.setAttribute('aria-hidden', 'true')
+    }
+    if (!musicVolumeBadge.isConnected) {
+      ;(document.body || document.documentElement).appendChild(musicVolumeBadge)
+    }
+    return musicVolumeBadge
+  }
+
+  const showMusicVolumeBadge = (anchor, volume) => {
+    const badge = getMusicVolumeBadge()
+    if (musicVolumeBadgeTimer) clearTimeout(musicVolumeBadgeTimer)
+
+    badge.textContent = `${volume}%`
+    badge.style.display = 'block'
+
+    const anchorRect = anchor?.getBoundingClientRect?.()
+    const badgeRect = badge.getBoundingClientRect?.()
+    const badgeWidth = badgeRect?.width || 44
+    const badgeHeight = badgeRect?.height || 26
+    const centeredLeft =
+      (anchorRect?.left || 0) + (anchorRect?.width || 0) / 2 - badgeWidth / 2
+    const viewportWidth = Number(window.innerWidth) || 0
+    const viewportHeight = Number(window.innerHeight) || 0
+    const left = viewportWidth > 0
+      ? Math.max(8, Math.min(centeredLeft, viewportWidth - badgeWidth - 8))
+      : Math.max(8, centeredLeft)
+    const rawTop = (anchorRect?.top || 0) - badgeHeight - 8
+    const top = viewportHeight > 0
+      ? Math.max(8, Math.min(rawTop, viewportHeight - badgeHeight - 8))
+      : Math.max(8, rawTop)
+
+    badge.style.left = `${left}px`
+    badge.style.top = `${top}px`
+
+    musicVolumeBadgeTimer = setTimeout(() => {
+      musicVolumeBadgeTimer = 0
+      if (musicVolumeBadge) musicVolumeBadge.style.display = 'none'
+    }, FEEDBACK_DURATION)
+  }
+
+  const getMusicVolumeAnchor = (control, wizWrapper) => {
+    const popup = wizWrapper?.querySelector?.('.ytMusicMiniPlayerVolumePopup')
+    const rect = popup?.getBoundingClientRect?.()
+    if (rect && rect.width > 0 && rect.height > 0) return popup
+    return wizWrapper?.querySelector?.('.ytMusicMiniPlayerMuteButton') || control
+  }
+
+  const handleMusicWheel = (event) => {
+    if (event.ctrlKey || event.deltaY === 0) return
+
+    const rawTarget = eventTarget(event)
+    if (!(rawTarget instanceof Node)) return
+    const element = rawTarget?.closest ? rawTarget : rawTarget?.parentElement
+    const control = element?.closest?.(MUSIC_VOLUME_CONTROL_SELECTOR)
+    if (!control) return
+
+    const player = getMusicPlayer()
+    const video = getMusicVideo(player)
+    const wizWrapper =
+      control.closest?.('.ytMusicMiniPlayerVolumeWrapper') ||
+      $('.ytMusicMiniPlayerVolumeWrapper')
+    const wizSlider = wizWrapper?.querySelector?.('input[type="range"]') || null
+    const legacyBar =
+      control.closest?.('ytmusic-player-bar') ||
+      $('ytmusic-player-bar')
+    const legacySliders = legacyBar
+      ? [
+          legacyBar.querySelector?.('#volume-slider'),
+          legacyBar.querySelector?.('#expand-volume-slider'),
+        ].filter(Boolean)
+      : []
+
+    let currentVolume = typeof player?.getVolume === 'function'
+      ? Number(player.getVolume())
+      : NaN
+    if (!Number.isFinite(currentVolume) && wizSlider) {
+      currentVolume = Number(wizSlider.value)
+    }
+    if (!Number.isFinite(currentVolume) && legacySliders[0]) {
+      currentVolume = Number(legacySliders[0].value)
+    }
+    if (!Number.isFinite(currentVolume) && video && Number.isFinite(video.volume)) {
+      currentVolume = Math.round(video.volume * 100)
+    }
+    if (!Number.isFinite(currentVolume)) return
+
+    event.preventDefault()
+    event.stopImmediatePropagation()
+
+    const nextVolume = Math.max(
+      0,
+      Math.min(100, currentVolume + (event.deltaY < 0 ? 5 : -5))
+    )
+    moviePlayer = player
+    videoPlayer = video
+
+    if (wizSlider) {
+      setNativeInputValue(wizSlider, nextVolume)
+      wizSlider.dispatchEvent(new Event('input', { bubbles: true, composed: true }))
+      wizSlider.dispatchEvent(new Event('change', { bubbles: true, composed: true }))
+      if (nextVolume > 0 && (!player?.isMuted || player.isMuted())) {
+        player?.unMute?.(true)
+      }
+      if (
+        typeof player?.getVolume === 'function' &&
+        Number(player.getVolume()) !== nextVolume
+      ) {
+        player.setVolume?.(nextVolume, true)
+      }
+    } else {
+      if (nextVolume > 0) {
+        player?.unMute?.(true)
+      }
+      if (typeof player?.setVolume === 'function') {
+        player.setVolume(nextVolume, true)
+      } else if (video) {
+        video.volume = nextVolume / 100
+        if (nextVolume > 0) video.muted = false
+      }
+      for (const slider of legacySliders) {
+        slider.value = nextVolume
+        slider.dispatchEvent(new Event('value-change', { bubbles: true, composed: true }))
+        slider.dispatchEvent(new Event('change', { bubbles: true, composed: true }))
+      }
+    }
+
+    if (videoPlayer) ensureVolumeGain()
+    showMusicVolumeBadge(getMusicVolumeAnchor(control, wizWrapper), nextVolume)
+  }
+
+  const startMusicVolumeControl = () => {
+    const controller = new AbortController()
+    const { signal } = controller
+
+    document.addEventListener('wheel', handleMusicWheel, {
+      capture: true,
+      passive: false,
+      signal,
+    })
+    document.addEventListener('pointerdown', (event) => {
+      const rawTarget = eventTarget(event)
+      if (!(rawTarget instanceof Node)) return
+      const element = rawTarget?.closest ? rawTarget : rawTarget?.parentElement
+      if (!element?.closest?.(MUSIC_VOLUME_SLIDER_AREA_SELECTOR)) return
+      moviePlayer = getMusicPlayer()
+      videoPlayer = getMusicVideo(moviePlayer)
+      if (videoPlayer) ensureVolumeGain()
+    }, { capture: true, passive: true, signal })
+    document.addEventListener('playing', (event) => {
+      if (!volumeGainEnabled) return
+      const target = event.target
+      if (!target || target.tagName?.toLowerCase?.() !== 'video') return
+      moviePlayer = getMusicPlayer()
+      videoPlayer = target
+      ensureVolumeGain()
+    }, { capture: true, signal })
+    document.addEventListener('volumechange', (event) => {
+      const target = event.target
+      if (!target || target.tagName?.toLowerCase?.() !== 'video') return
+      if (target === videoPlayer) {
+        syncVolumeGain()
+      } else if (volumeGainEnabled) {
+        moviePlayer = getMusicPlayer()
+        videoPlayer = target
+        ensureVolumeGain()
+      }
+    }, { capture: true, signal })
+
+    return () => {
+      controller.abort()
+      if (musicVolumeBadgeTimer) {
+        clearTimeout(musicVolumeBadgeTimer)
+        musicVolumeBadgeTimer = 0
+      }
+      if (musicVolumeBadge) musicVolumeBadge.style.display = 'none'
+    }
+  }
+
   const handleKeydown = (event) => {
     if (event.key === 'Escape' && tooltip?.dataset?.visible === 'true') {
       hideTooltip()
@@ -2478,11 +2765,15 @@
     else if (!isShortsPage() && activeShortsSession) handleNavigation()
   }
 
-  document.addEventListener('yt-navigate-finish', handleNavigation)
-  document.addEventListener('yt-page-data-updated', syncShortsRoute)
-  window.addEventListener('popstate', syncShortsRoute)
+  if (isMusicHost()) {
+    cleanup = startMusicVolumeControl()
+  } else {
+    document.addEventListener('yt-navigate-finish', handleNavigation)
+    document.addEventListener('yt-page-data-updated', syncShortsRoute)
+    window.addEventListener('popstate', syncShortsRoute)
 
-  if (isWatchPage() || isShortsPage()) {
-    handleNavigation()
+    if (isWatchPage() || isShortsPage()) {
+      handleNavigation()
+    }
   }
 })()

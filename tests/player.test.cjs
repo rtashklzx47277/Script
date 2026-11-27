@@ -9,7 +9,7 @@ const assertClose = (actual, expected) => assert.ok(Math.abs(actual - expected) 
 
 // Run the real userscript and expose its closed-over functions at the end of
 // its IIFE. Only browser primitives are mocked; production functions are intact.
-function boot(file, mode = 'worker', pathname = '/', { trustedTypes = false, setupWindow, fetch, now } = {}) {
+function boot(file, mode = 'worker', pathname = '/', { trustedTypes = false, setupWindow, fetch, now, hostname } = {}) {
   const isYouTube = file === scripts[0]
   let nextId = 0
   let activeWorker
@@ -266,7 +266,7 @@ function boot(file, mode = 'worker', pathname = '/', { trustedTypes = false, set
   const document = {
     head: { appendChild: (element) => styles.push(element) },
     documentElement: {},
-    body: {},
+    body: Object.assign(new ElementMock('body'), { _connected: true }),
     addEventListener(name, callback, options) {
       listeners.set(name, callback)
       eventListeners.push({ name, callback, options })
@@ -300,12 +300,19 @@ function boot(file, mode = 'worker', pathname = '/', { trustedTypes = false, set
     },
   }
 
+  const resolvedHostname = hostname || (isYouTube ? 'www.youtube.com' : 'www.twitch.tv')
+  const location = {
+    hostname: resolvedHostname,
+    pathname,
+    href: `https://${resolvedHostname}${pathname}`,
+    origin: `https://${resolvedHostname}`,
+  }
+
   const context = {
     console,
     document,
-    window: { JSON: { parse: JSON.parse }, addEventListener: document.addEventListener },
-    location: { pathname, href: `https://${isYouTube ? 'www.youtube.com' : 'www.twitch.tv'}${pathname}`,
-      origin: `https://${isYouTube ? 'www.youtube.com' : 'www.twitch.tv'}` },
+    window: { JSON: { parse: JSON.parse }, addEventListener: document.addEventListener, location },
+    location,
     HTMLElement: ElementMock,
     Node: NodeMock,
     HTMLInputElement: class {},
@@ -398,7 +405,7 @@ function boot(file, mode = 'worker', pathname = '/', { trustedTypes = false, set
     ? `globalThis.__test = {
         restorePlaybackRate, getLiveBufferHealth,
         runLiveCatchupStep, toggleLiveCatchup, stopLiveCatchup, waitElements,
-        changeVolume, syncVolumeGain, handleWheelCapture,
+        changeVolume, syncVolumeGain, handleWheelCapture, handleMusicWheel,
         setPlayers: (video, player) => {
           videoPlayer = video; moviePlayer = player; floatingBar = { style: {} };
         },
@@ -2280,4 +2287,292 @@ test('Twitch VOD clock: fetches ARCHIVE start time via GQL, tracks seekbar & vid
   vm.createContext(envPreset)
   vm.runInContext(formatFn.replace(/\}\)\(\)\s*$/, 'globalThis.__format = formatVodDate; })()'), envPreset)
   assert.equal(envPreset.__format(sampleDate), `(${weekdayShort} ${d}/${m}/${y} ${t})`)
+})
+
+test('YouTube Music: host isolation skips DVR hooks, YouTube player CSS, and screenshot key', () => {
+  const env = boot(scripts[0], 'worker', '/playlist?list=PL123', {
+    hostname: 'music.youtube.com',
+    setupWindow(win) {
+      win.ytcfg = {
+        set() {},
+        d: () => ({
+          WEB_PLAYER_CONTEXT_CONFIGS: {
+            web: { serializedExperimentFlags: 'html5_max_live_dvr_window_plus_margin_secs=100' },
+          },
+        }),
+      }
+    },
+  })
+
+  assert.equal(env.window.JSON.parse, JSON.parse)
+  assert.equal(Object.getOwnPropertyDescriptor(env.window, 'ytInitialPlayerResponse'), undefined)
+  assert.equal(env.window.ytcfg.__dvrHooked, undefined)
+  assert.equal(env.styles.length, 1)
+  assert.match(env.styles[0].textContent, /#yt-player-tweaks-music-volume-badge/)
+  assert.doesNotMatch(env.styles[0].textContent, /#voice-search-button|ytd-shorts/)
+  assert.equal(env.listenerCount('yt-navigate-finish'), 0)
+  assert.equal(env.listenerCount('wheel'), 1)
+
+  const keyEvent = { key: 's', target: new env.Element('div'), preventDefault() { this.prevented = true } }
+  env.emit('keydown', keyEvent)
+  assert.equal(keyEvent.prevented, undefined)
+  assert.equal(env.draws.length, 0)
+})
+
+test('YouTube Music: Wiz miniplayer speaker & popup wheel volume, 3x gain curve, badge positioning, and video lifecycle', () => {
+  const env = boot(scripts[0], 'worker', '/watch?v=abc', { hostname: 'music.youtube.com' })
+  env.window.innerWidth = 1545
+  env.window.innerHeight = 765
+
+  let gain
+  let sourceCount = 0
+  const connectedSources = []
+  env.window.AudioContext = class {
+    constructor() { this.destination = {}; this.state = 'running' }
+    createGain() {
+      gain = { gain: { value: 1 }, connect() {} }
+      return gain
+    }
+    createMediaElementSource(media) {
+      sourceCount++
+      const source = { media, connect() { connectedSources.push(media) }, disconnect() {} }
+      return source
+    }
+  }
+
+  let volume = 25
+  let muted = false
+  let unMuteCalls = 0
+  const moviePlayer = new env.Element('div')
+  moviePlayer.id = 'movie_player'
+  const video = moviePlayer.appendChild(new env.Element('video'))
+  video.currentSrc = 'blob:https://music.youtube.com/track-1'
+  video.volume = 0.25
+  video.muted = false
+  moviePlayer.getVolume = () => volume
+  moviePlayer.setVolume = (value) => {
+    volume = value
+    video.volume = value / 100
+  }
+  moviePlayer.isMuted = () => muted
+  moviePlayer.mute = () => { muted = true; video.muted = true }
+  moviePlayer.unMute = () => { unMuteCalls++; muted = false; video.muted = false }
+
+  const wrapper = new env.Element('div')
+  wrapper.className = 'ytMusicMiniPlayerVolumeWrapper'
+  const muteWrap = wrapper.appendChild(new env.Element('div'))
+  muteWrap.className = 'ytMusicMiniPlayerMuteButton'
+  muteWrap.rect = { left: 1457, top: 713, right: 1489, bottom: 745, width: 32, height: 32 }
+  const muteBtn = muteWrap.appendChild(new env.Element('button'))
+  const svg = muteBtn.appendChild(new env.Element('svg'))
+  const svgPath = svg.appendChild(new env.Element('path'))
+
+  const popup = wrapper.appendChild(new env.Element('div'))
+  popup.className = 'ytMusicMiniPlayerVolumePopup'
+  popup.rect = { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 }
+  const sliderShape = popup.appendChild(new env.Element('slider-shape'))
+  const slider = sliderShape.appendChild(new env.Element('input'))
+  slider.id = 'slider'
+  slider.type = 'range'
+  slider.setAttribute('type', 'range')
+  slider.value = '25'
+
+  let inputEvents = 0
+  let changeEvents = 0
+  slider.addEventListener('input', () => {
+    inputEvents++
+    moviePlayer.setVolume(Number(slider.value))
+  })
+  slider.addEventListener('change', () => { changeEvents++ })
+
+  env.selectors.set('#movie_player', moviePlayer)
+  env.selectors.set('.ytMusicMiniPlayerVolumeWrapper', wrapper)
+
+  // 1. Scroll down over speaker icon SVG path: adjusts volume by -5, syncs slider, applies 3x gain, shows badge above speaker button.
+  const down = wheel(svgPath, { deltaY: 1 })
+  env.emit('wheel', down)
+  assert.equal(down.prevented, true)
+  assert.equal(down.stopped, true)
+  assert.equal(volume, 20)
+  assert.equal(slider.value, '20')
+  assert.equal(inputEvents, 1)
+  assert.equal(changeEvents, 1)
+  assert.equal(sourceCount, 1)
+  assertClose(gain.gain.value, 0.6)
+  assertClose(video.volume * gain.gain.value, 0.12)
+
+  const badge = env.document.body.querySelector('#yt-player-tweaks-music-volume-badge')
+  assert.ok(badge)
+  assert.equal(badge.textContent, '20%')
+  assert.equal(badge.style.display, 'block')
+  assert.ok(parseFloat(badge.style.top) < muteWrap.rect.top)
+  env.flush(3000)
+  assert.equal(badge.style.display, 'none')
+
+  // 2. Open volume popup and scroll up directly over input#slider: works despite 'input' tag and anchors badge above popup.
+  popup.rect = { left: 1449, top: 569, right: 1497, bottom: 705, width: 48, height: 136 }
+  const up = wheel(slider, { deltaY: -1 })
+  env.emit('wheel', up)
+  assert.equal(up.prevented, true)
+  assert.equal(volume, 25)
+  assert.equal(slider.value, '25')
+  assertClose(gain.gain.value, 0.75)
+  assert.equal(badge.textContent, '25%')
+  assert.equal(badge.style.display, 'block')
+  assert.ok(parseFloat(badge.style.top) < popup.rect.top)
+
+  // 3. Outside control, Ctrl+wheel zoom, and horizontal wheel (deltaY === 0) are ignored.
+  for (const ignored of [
+    wheel(new env.Element('div'), { deltaY: -1 }),
+    wheel(muteBtn, { ctrlKey: true, deltaY: -1 }),
+    wheel(muteBtn, { deltaY: 0 }),
+  ]) {
+    env.emit('wheel', ignored)
+    assert.equal(ignored.prevented, undefined)
+    assert.equal(ignored.stopped, undefined)
+  }
+  assert.equal(volume, 25)
+
+  // 4. Muted player stays muted when scrolling down at 0, unmutes on scroll up > 0, and clamps at 100.
+  volume = 0
+  slider.value = '0'
+  muted = true
+  video.muted = true
+  unMuteCalls = 0
+  env.emit('wheel', wheel(muteBtn, { deltaY: 1 }))
+  assert.equal(volume, 0)
+  assert.equal(muted, true)
+  assert.equal(unMuteCalls, 0)
+
+  env.emit('wheel', wheel(muteBtn, { deltaY: -1 }))
+  assert.equal(volume, 5)
+  assert.equal(muted, false)
+  assert.equal(unMuteCalls, 1)
+
+  volume = 98
+  slider.value = '98'
+  env.emit('wheel', wheel(muteBtn, { deltaY: -1 }))
+  assert.equal(volume, 100)
+  assert.equal(gain.gain.value, 3)
+
+  // 5. Native slider pointerdown enables gain, volumechange syncs it, and playing on a new <video> reconnects it.
+  const env2 = boot(scripts[0], 'worker', '/', { hostname: 'music.youtube.com' })
+  let gain2
+  let sourceCount2 = 0
+  const sources2 = []
+  env2.window.AudioContext = class {
+    constructor() { this.destination = {}; this.state = 'running' }
+    createGain() {
+      gain2 = { gain: { value: 1 }, connect() {} }
+      return gain2
+    }
+    createMediaElementSource(media) {
+      sourceCount2++
+      sources2.push(media)
+      return { connect() {}, disconnect() {} }
+    }
+  }
+
+  let vol2 = 40
+  const mp2 = new env2.Element('div')
+  mp2.id = 'movie_player'
+  const v1 = mp2.appendChild(new env2.Element('video'))
+  v1.currentSrc = 'blob:https://music.youtube.com/track-a'
+  v1.volume = 0.4
+  mp2.getVolume = () => vol2
+  mp2.setVolume = (v) => { vol2 = v; v1.volume = v / 100 }
+
+  const wrap2 = new env2.Element('div')
+  wrap2.className = 'ytMusicMiniPlayerVolumeWrapper'
+  const pop2 = wrap2.appendChild(new env2.Element('div'))
+  pop2.className = 'ytMusicMiniPlayerVolumePopup'
+  const slider2 = pop2.appendChild(new env2.Element('input'))
+  slider2.type = 'range'
+  slider2.setAttribute('type', 'range')
+  env2.selectors.set('#movie_player', mp2)
+
+  env2.emit('pointerdown', { target: slider2, composedPath: () => [slider2, pop2, wrap2] })
+  assert.equal(sourceCount2, 1)
+  assertClose(gain2.gain.value, 1.2)
+
+  vol2 = 60
+  env2.emit('volumechange', { target: v1 })
+  assertClose(gain2.gain.value, 1.8)
+
+  const v2 = new env2.Element('video')
+  v2.currentSrc = 'blob:https://music.youtube.com/track-b'
+  mp2.appendChild(v2)
+  v1.remove()
+  vol2 = 50
+  env2.emit('playing', { target: v2 })
+  assert.equal(sourceCount2, 2)
+  assert.deepEqual(sources2, [v1, v2])
+  assertClose(gain2.gain.value, 1.5)
+})
+
+test('YouTube Music: classic ytmusic-player-bar fallback updates playerApi_, sliders, gain, and badge', () => {
+  const env = boot(scripts[0], 'worker', '/', { hostname: 'music.youtube.com' })
+  env.window.innerWidth = 1280
+  env.window.innerHeight = 800
+
+  let gain
+  env.window.AudioContext = class {
+    constructor() { this.destination = {}; this.state = 'running' }
+    createGain() {
+      gain = { gain: { value: 1 }, connect() {} }
+      return gain
+    }
+    createMediaElementSource() {
+      return { connect() {}, disconnect() {} }
+    }
+  }
+
+  let volume = 30
+  let unMuted = 0
+  const mp = new env.Element('div')
+  mp.id = 'movie_player'
+  const video = mp.appendChild(new env.Element('video'))
+  video.currentSrc = 'blob:https://music.youtube.com/classic-1'
+  video.volume = 0.3
+
+  const bar = new env.Element('ytmusic-player-bar')
+  bar.playerApi_ = {
+    getVolume: () => volume,
+    setVolume: (v) => { volume = v; video.volume = v / 100 },
+    unMute: () => { unMuted++ },
+  }
+  const volumeBtn = bar.appendChild(new env.Element('tp-yt-paper-icon-button'))
+  volumeBtn.className = 'volume'
+  volumeBtn.rect = { left: 900, top: 700, right: 932, bottom: 732, width: 32, height: 32 }
+
+  const mainSlider = bar.appendChild(new env.Element('tp-yt-paper-slider'))
+  mainSlider.id = 'volume-slider'
+  mainSlider.value = 30
+  const expandSlider = bar.appendChild(new env.Element('tp-yt-paper-slider'))
+  expandSlider.id = 'expand-volume-slider'
+  expandSlider.value = 30
+
+  let mainValueChanges = 0
+  let expandChanges = 0
+  mainSlider.addEventListener('value-change', () => { mainValueChanges++ })
+  expandSlider.addEventListener('change', () => { expandChanges++ })
+
+  env.selectors.set('#movie_player', mp)
+  env.selectors.set('ytmusic-player-bar', bar)
+
+  const up = wheel(volumeBtn, { deltaY: -1 })
+  env.emit('wheel', up)
+  assert.equal(up.prevented, true)
+  assert.equal(volume, 35)
+  assert.equal(unMuted, 1)
+  assert.equal(mainSlider.value, 35)
+  assert.equal(expandSlider.value, 35)
+  assert.equal(mainValueChanges, 1)
+  assert.equal(expandChanges, 1)
+  assertClose(gain.gain.value, 1.05)
+
+  const badge = env.document.body.querySelector('#yt-player-tweaks-music-volume-badge')
+  assert.ok(badge)
+  assert.equal(badge.textContent, '35%')
+  assert.equal(badge.style.display, 'block')
 })
