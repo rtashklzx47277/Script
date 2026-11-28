@@ -1002,3 +1002,57 @@ test('chat: connection watchdog skips replays, ended streams, offline state, hid
   guarded.browser.tickIntervals()
   assert.equal(guarded.browser.location.reloadCount, 0, 'caps auto-reload at 3 attempts per stream')
 })
+
+test('chat: emoji picker uses responsive 8-column grid with fixed spacing and scaling stickers', () => {
+  const browser = createBrowser()
+  addChat(browser)
+  browser.run('YouTubeLiveChatTweaks.user.js')
+
+  const styles = browser.document.head.children
+    .filter((child) => child.tagName === 'style')
+    .map((child) => child.textContent)
+  const layoutCss = styles[0] || ''
+
+  assert.match(layoutCss, /--chat-emoji-picker-columns:\s*8;/)
+  assert.match(layoutCss, /--chat-emoji-picker-gap:\s*8px;/)
+  assert.match(layoutCss, /--chat-emoji-picker-edge-margin:\s*12px;/)
+  assert.match(layoutCss, /--chat-emoji-picker-grid-inline-padding:\s*4px;/)
+
+  assert.match(
+    layoutCss,
+    /#pickers\s*>\s*#emoji\s*\{[^}]*container-type:\s*inline-size;[^}]*height:\s*auto\s*!important;/
+  )
+  assert.doesNotMatch(layoutCss, /#pickers\s*>\s*#emoji\s*\{[^}]*\bdisplay\s*:/)
+  assert.match(
+    layoutCss,
+    /#pickers\s*>\s*#emoji\s*>\s*#categories-wrapper\s*\{[^}]*flex:\s*0\s+1\s+auto\s*!important;/
+  )
+  assert.match(
+    layoutCss,
+    /yt-emoji-picker-renderer\s+#categories\s*\{[^}]*scrollbar-gutter:\s*stable\s+both-edges;[^}]*overscroll-behavior:\s*contain;/
+  )
+  assert.match(
+    layoutCss,
+    /#pickers\s*>\s*#emoji\s+#categories\s*\{[^}]*max-height:\s*var\(--chat-emoji-picker-height\)\s*!important;[^}]*max-height:\s*clamp\(var\(--chat-emoji-picker-height\),\s*calc\(32px \+ 26cqi\),\s*min\(280px,\s*40dvh\)\)\s*!important;/
+  )
+  assert.match(
+    layoutCss,
+    /#categories\s*>\s*yt-emoji-picker-category-renderer\s*\{[^}]*margin-inline:\s*var\(--chat-emoji-picker-edge-margin\)\s*!important;/
+  )
+  assert.doesNotMatch(
+    layoutCss,
+    /#categories\s*>\s*yt-emoji-picker-category-renderer\s*\{[^}]*\bdisplay\s*:/
+  )
+  assert.match(
+    layoutCss,
+    /#categories\s*>\s*yt-emoji-picker-category-renderer\s*>\s*#emoji\s*\{[^}]*display:\s*grid\s*!important;[^}]*grid-template-columns:\s*repeat\(var\(--chat-emoji-picker-columns\),\s*minmax\(0,\s*1fr\)\)\s*!important;[^}]*gap:\s*var\(--chat-emoji-picker-gap\)\s*!important;[^}]*padding:\s*var\(--chat-emoji-picker-gap\)\s+var\(--chat-emoji-picker-grid-inline-padding\)\s*!important;/
+  )
+  assert.match(
+    layoutCss,
+    /#categories\s*>\s*yt-emoji-picker-category-renderer\s*>\s*#emoji\s*>\s*:not\(img\)\s*\{\s*display:\s*none\s*!important;/
+  )
+  assert.match(
+    layoutCss,
+    /#categories\s*>\s*yt-emoji-picker-category-renderer\s*>\s*#emoji\s*>\s*img:not\(\[is-active-emoji-with-variants\]\)\s*\{[^}]*width:\s*100%\s*!important;[^}]*min-width:\s*0\s*!important;[^}]*height:\s*auto\s*!important;[^}]*aspect-ratio:\s*1\s*\/\s*1\s*!important;[^}]*object-fit:\s*contain\s*!important;[^}]*padding:\s*0\s*!important;/
+  )
+})

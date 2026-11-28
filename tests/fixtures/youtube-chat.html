@@ -49,8 +49,20 @@
   yt-live-chat-author-badge-renderer svg { width: 16px; height: 16px; fill: currentColor; vertical-align: middle; }
   yt-live-chat-author-chip[is-highlighted] #author-name { color: #0f0f0f; background: #e6e6e6; border-radius: 10px; padding: 2px 4px; }
   yt-live-chat-author-chip[is-highlighted] yt-live-chat-author-badge-renderer { color: #0f0f0f; }
-  .input-area { padding: 14px; border-top: 1px solid #45454a; }
-  .input-area input { box-sizing: border-box; width: 100%; padding: 8px; color: inherit; background: #303034; border: 0; }
+  .input-area { border-top: 1px solid #45454a; }
+  yt-live-chat-message-input-renderer { display: flex; flex-direction: column; padding: 10px 24px; --yt-emoji-picker-category-margin-left: 24px; }
+  yt-live-chat-message-input-renderer #top { display: flex; align-items: center; gap: 6px; }
+  yt-live-chat-message-input-renderer #top input { box-sizing: border-box; flex: 1; min-width: 0; padding: 8px; color: inherit; background: #303034; border: 0; }
+  #emoji-picker-button button { width: 32px; height: 32px; border: 0; border-radius: 50%; color: inherit; background: #303034; cursor: pointer; }
+  #pickers { display: block; margin: 0 8px; }
+  #pickers > :not(.iron-selected) { display: none; }
+  yt-emoji-picker-renderer { position: relative; display: flex; flex-direction: column; height: 180px; min-height: 130px; max-height: 220px; margin: 16px -24px 0; }
+  #categories-wrapper { margin-top: 8px; position: relative; min-height: 0; display: flex; flex-direction: column; flex: 1 1 1e-09px; }
+  #categories { overflow: auto; min-height: 0; }
+  yt-emoji-picker-category-renderer { display: block; margin-left: var(--yt-emoji-picker-category-margin-left); }
+  #title.yt-emoji-picker-category-renderer { position: sticky; top: 0; display: block; padding: 2px; line-height: 16px; font-size: 13px; background: rgba(40,40,40,0.8); color: #aaa; z-index: 1; }
+  #emoji.yt-emoji-picker-category-renderer { display: flex; flex-flow: wrap; contain: content; }
+  img.yt-emoji-picker-category-renderer { padding: 4px; border-radius: 2px; cursor: pointer; }
   .fixture-tools { margin-top: 20px; display: flex; gap: 8px; flex-wrap: wrap; }
   yt-live-chat-app { display: block; }
   tp-yt-iron-dropdown { position: fixed; z-index: 10; }
@@ -75,7 +87,36 @@
   </yt-live-chat-header-renderer>
   <div id="chat-contents"><div id="item-scroller"><div id="item-offset"><div id="items"></div></div></div><button id="show-more" disabled hidden>顯示更多</button></div>
   <div id="fixture-summary" hidden>✦ チャットの要約<br>摘要測試：這個原生區塊會占用 220px，縮小訊息區；篩選模式應繼續填滿原有範圍。</div>
-  <div class="input-area" id="input-panel"><input aria-label="傳送訊息" placeholder="傳送訊息（測試頁不傳送）"></div>
+  <tp-yt-iron-pages id="panel-pages">
+    <div class="input-area" id="input-panel">
+      <yt-live-chat-message-input-renderer id="live-chat-message-input">
+        <div id="container">
+          <div id="top">
+            <input aria-label="傳送訊息" placeholder="傳送訊息（測試頁不傳送）">
+            <div id="emoji-picker-button"><button type="button" aria-label="開啟表情符號選單">☺</button></div>
+          </div>
+          <tp-yt-iron-pages id="pickers">
+            <yt-emoji-picker-renderer id="emoji">
+              <div id="search-panel"><input aria-label="搜尋表情符號"></div>
+              <div id="category-buttons"><button type="button">頻道</button></div>
+              <div id="categories-wrapper">
+                <div id="categories">
+                  <yt-emoji-picker-category-renderer id="fixture-custom-category">
+                    <yt-formatted-string id="title" class="yt-emoji-picker-category-renderer">測試頻道貼圖</yt-formatted-string>
+                    <div id="emoji" class="CATEGORY_TYPE_CUSTOM yt-emoji-picker-category-renderer"></div>
+                  </yt-emoji-picker-category-renderer>
+                  <yt-emoji-picker-category-renderer id="fixture-global-category">
+                    <yt-formatted-string id="title" class="yt-emoji-picker-category-renderer">YouTube</yt-formatted-string>
+                    <div id="emoji" class="CATEGORY_TYPE_GLOBAL yt-emoji-picker-category-renderer"></div>
+                  </yt-emoji-picker-category-renderer>
+                </div>
+              </div>
+            </yt-emoji-picker-renderer>
+          </tp-yt-iron-pages>
+        </div>
+      </yt-live-chat-message-input-renderer>
+    </div>
+  </tp-yt-iron-pages>
 </yt-live-chat-renderer>
 <tp-yt-iron-dropdown style="left: 24px; top: 52px; max-width: 400px;" hidden>
   <ytd-menu-popup-renderer role="menu" style="max-width: 215px; max-height: 160px; box-sizing: border-box;">
@@ -107,6 +148,7 @@
   <button id="overlay-toggle">顯示遮擋測試物件</button>
   <button id="summary-toggle">切換聊天摘要</button>
   <button id="width-toggle">切換聊天室寬度</button>
+  <button id="emoji-toggle">切換貼圖選單</button>
 </div>
 <div class="fixture-overlay" id="fixture-overlay" hidden>原生浮動物件遮擋測試</div>
 <p id="fixture-requests" data-profiles="0" data-menus="0">名稱查詢 0 次 · 操作選單 0 次</p>
@@ -136,6 +178,38 @@
   }
   if (fixtureParams.has('overlay')) document.getElementById('fixture-overlay').hidden = false
   if (fixtureParams.has('embedded')) document.body.classList.add('embedded')
+  const fixtureWidth = Number(fixtureParams.get('width'))
+  if (Number.isFinite(fixtureWidth) && fixtureWidth >= 200) {
+    document.querySelector('yt-live-chat-renderer').style.width = `${fixtureWidth}px`
+  }
+  const emojiPicker = document.getElementById('emoji')
+  const toggleEmojiPicker = () => emojiPicker.classList.toggle('iron-selected')
+  if (fixtureParams.has('emojiPicker')) emojiPicker.classList.add('iron-selected')
+  document.getElementById('emoji-toggle').onclick = toggleEmojiPicker
+  document.querySelector('#emoji-picker-button button').onclick = toggleEmojiPicker
+  const emojiCount = Math.max(1, Number(fixtureParams.get('emojiCount')) || 18)
+  const customEmojiGrid = document.querySelector('#fixture-custom-category > #emoji')
+  const globalEmojiGrid = document.querySelector('#fixture-global-category > #emoji')
+  for (let i = 0; i < emojiCount; i++) {
+    const img = document.createElement('img')
+    img.className = 'yt-emoji-picker-category-renderer'
+    img.width = 24
+    img.height = 24
+    img.alt = `貼圖${i + 1}`
+    img.setAttribute('role', 'option')
+    img.setAttribute('aria-selected', i === 0 ? 'true' : 'false')
+    const hue = (i * 37) % 360
+    img.src = 'data:image/svg+xml,' + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48"><rect width="48" height="48" rx="8" fill="hsl(${hue} 70% 50%)"/><text x="24" y="31" text-anchor="middle" font-size="20" fill="#fff">${i + 1}</text></svg>`)
+    customEmojiGrid.appendChild(img)
+  }
+  customEmojiGrid.appendChild(document.createElement('dom-repeat'))
+  const globalImg = document.createElement('img')
+  globalImg.className = 'yt-emoji-picker-category-renderer'
+  globalImg.width = 24
+  globalImg.height = 24
+  globalImg.alt = 'YouTube'
+  globalImg.src = customEmojiGrid.firstChild.src
+  globalEmojiGrid.appendChild(globalImg)
   const fixtureRequests = document.getElementById('fixture-requests')
   const countRequest = type => {
     fixtureRequests.dataset[type] = String(+fixtureRequests.dataset[type] + 1)

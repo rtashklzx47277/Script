@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Live Chat Tweaks
 // @namespace   https://tampermonkey.net/
-// @version     0.8.17
+// @version     0.8.18
 // @updateURL   https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @downloadURL https://raw.githubusercontent.com/rtashklzx47277/Script/main/YouTubeLiveChatTweaks.user.js
 // @description 提供 YouTube 聊天室用戶資訊卡、獨立 SC／會員事件紀錄與類型顏色篩選、全域角色與帳號包含／排除篩選、表情複製、重新載入、斷線自動恢復與自動跟隨。
@@ -82,6 +82,10 @@
       --chat-inline-padding: 1em;
       --chat-message-padding-block: 4px;
       --chat-emoji-picker-height: 130px;
+      --chat-emoji-picker-columns: 8;
+      --chat-emoji-picker-gap: 8px;
+      --chat-emoji-picker-edge-margin: 12px;
+      --chat-emoji-picker-grid-inline-padding: 4px;
     }
 
     yt-live-chat-app {
@@ -171,12 +175,76 @@
     }
 
     #pickers > #emoji {
-      max-height: var(--chat-emoji-picker-height) !important;
+      container-type: inline-size;
+      height: auto !important;
+      min-height: 0 !important;
+      max-height: none !important;
       margin: 0 -24px !important;
     }
 
-    #categories yt-emoji-picker-category-renderer {
-      margin-right: var(--yt-emoji-picker-category-margin-left) !important;
+    #pickers > #emoji > #categories-wrapper {
+      flex: 0 1 auto !important;
+      min-height: 0 !important;
+    }
+
+    yt-emoji-picker-renderer #categories {
+      overflow-x: hidden !important;
+      scrollbar-gutter: stable both-edges;
+      scrollbar-width: thin;
+      scrollbar-color: color-mix(in srgb, var(--yt-live-chat-primary-text-color, #0f0f0f) 42%, transparent) transparent;
+      overscroll-behavior: contain;
+    }
+
+    #pickers > #emoji #categories {
+      max-height: var(--chat-emoji-picker-height) !important;
+      max-height: clamp(var(--chat-emoji-picker-height), calc(32px + 26cqi), min(280px, 40dvh)) !important;
+    }
+
+    #categories > yt-emoji-picker-category-renderer {
+      margin-inline: var(--chat-emoji-picker-edge-margin) !important;
+    }
+
+    #categories > yt-emoji-picker-category-renderer > #emoji {
+      display: grid !important;
+      grid-template-columns: repeat(var(--chat-emoji-picker-columns), minmax(0, 1fr)) !important;
+      gap: var(--chat-emoji-picker-gap) !important;
+      padding: var(--chat-emoji-picker-gap) var(--chat-emoji-picker-grid-inline-padding) !important;
+      box-sizing: border-box !important;
+      align-items: center !important;
+      justify-items: stretch !important;
+    }
+
+    #categories > yt-emoji-picker-category-renderer > #emoji > :not(img) {
+      display: none !important;
+    }
+
+    #categories > yt-emoji-picker-category-renderer > #emoji > img:not([is-active-emoji-with-variants]) {
+      box-sizing: border-box !important;
+      display: block !important;
+      width: 100% !important;
+      min-width: 0 !important;
+      height: auto !important;
+      aspect-ratio: 1 / 1 !important;
+      object-fit: contain !important;
+      margin: 0 !important;
+      padding: 0 !important;
+      border-radius: 4px !important;
+    }
+
+    #categories > yt-emoji-picker-category-renderer > #emoji > img:not([is-active-emoji-with-variants]):is(:hover, [aria-selected="true"]) {
+      background-color: var(--yt-spec-button-chip-background-hover, color-mix(in srgb, var(--yt-live-chat-primary-text-color, #0f0f0f) 20%, transparent)) !important;
+      box-shadow: 0 0 0 3px var(--yt-spec-button-chip-background-hover, color-mix(in srgb, var(--yt-live-chat-primary-text-color, #0f0f0f) 20%, transparent)) !important;
+    }
+
+    @media (prefers-contrast: more) {
+      yt-emoji-picker-renderer #categories {
+        scrollbar-color: var(--yt-live-chat-primary-text-color, #0f0f0f) var(--yt-live-chat-background-color, #fff);
+      }
+
+      #categories > yt-emoji-picker-category-renderer > #emoji > img:not([is-active-emoji-with-variants])[aria-selected="true"] {
+        outline: 2px solid currentColor !important;
+        outline-offset: 1px !important;
+      }
     }
 
     #yt-chat-tweaks-reload-button {
